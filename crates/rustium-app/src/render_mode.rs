@@ -146,7 +146,10 @@ pub(crate) enum RenderStatus {
 
 /// Everything Render mode remembers.
 #[derive(Debug)]
-#[expect(clippy::struct_excessive_bools, reason = "independent HUD toggles, not a state machine")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent HUD toggles, not a state machine"
+)]
 pub(crate) struct RenderState {
     pub(crate) tool: RenderTool,
     pub(crate) tab: RenderTab,

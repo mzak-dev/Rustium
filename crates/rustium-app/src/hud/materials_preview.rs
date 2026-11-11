@@ -6,7 +6,7 @@
 
 use egui::{Color32, Grid, RichText, Sense, Slider, Ui, vec2};
 use fluent_bundle::FluentValue;
-use rustium_core::SurfaceConstants;
+use rustium_core::{MaterialGraph, SurfaceConstants};
 
 use super::Hud;
 use super::widgets::{self, Look};
@@ -141,7 +141,7 @@ fn constants(ui: &mut Ui, hud: &mut Hud<'_>, selected: usize) {
         .scene
         .material_graphs()
         .get(selected)
-        .map(|graph| graph.surface)
+        .map(MaterialGraph::surface_constants)
     else {
         return;
     };

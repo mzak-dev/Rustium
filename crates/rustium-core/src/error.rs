@@ -47,6 +47,9 @@ pub enum Error {
     /// The built-in Default material (graph 0) cannot be edited.
     #[error("the default material cannot be edited")]
     DefaultMaterialLocked,
+    /// A Material graph edit was rejected.
+    #[error(transparent)]
+    Graph(#[from] crate::material_graph::GraphError),
     /// The Scene ran out of Node or Shape ids.
     #[error("the scene has too many nodes")]
     TooManyNodes,

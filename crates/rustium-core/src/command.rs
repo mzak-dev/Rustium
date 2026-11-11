@@ -3,7 +3,7 @@ use glam::IVec3;
 use crate::edit::{Edit, EditKind, Recorder};
 use crate::error::Error;
 use crate::ids::{NodeId, ShapeId};
-use crate::material_graph::{MaterialGraph, SurfaceConstants};
+use crate::material_graph::{GraphEdit, MaterialGraph, SurfaceConstants};
 use crate::palette::ColorId;
 use crate::raycast::RayHit;
 use crate::scene::Scene;
@@ -12,6 +12,9 @@ use crate::selection::Selection;
 use crate::shape::Voxel;
 use crate::tools::{self, Brush, FillMode, Mirror};
 use crate::transform::Transform;
+
+/// Longest Material name kept, in characters.
+const MATERIAL_NAME_MAX: usize = 64;
 
 /// Voxel Tools that change voxels with a [`Brush`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +185,51 @@ pub enum Command {
         /// Index of the graph; 0 is the Default material.
         graph: u32,
     },
+    /// Adds a finished Material (for example [`SampleMaterial::build`](crate::SampleMaterial::build) or
+    /// [`MaterialGraph::blank`]); it gets the next free index. The graph must pass [`MaterialGraph::validate`].
+    AddMaterial {
+        /// The Material to add.
+        graph: Box<MaterialGraph>,
+    },
+    /// Copies a Material (the copy is named "<name> copy") and appends it.
+    DuplicateMaterial {
+        /// Index of the Material to copy.
+        index: u32,
+    },
+    /// Deletes a Material. Colors that used it fall back to the Default material and later indices shift down by
+    /// one.
+    DeleteMaterial {
+        /// Index of the Material; the Default material (0) cannot be deleted.
+        index: u32,
+    },
+    /// Renames a Material.
+    RenameMaterial {
+        /// Index of the Material.
+        index: u32,
+        /// The new name.
+        name: String,
+    },
+    /// Turns "Casts shadow" of a Material on or off.
+    SetCastsShadow {
+        /// Index of the Material.
+        index: u32,
+        /// Whether voxels with this Material block light.
+        casts_shadow: bool,
+    },
+    /// Points several Palette entries at a Material in one step.
+    AssignGraphToColors {
+        /// The Palette entries.
+        ids: Vec<ColorId>,
+        /// Index of the Material; 0 is the Default material.
+        graph: u32,
+    },
+    /// Changes the inside of a Material's node graph. The Default material (0) is locked.
+    EditMaterial {
+        /// Index of the Material.
+        index: u32,
+        /// What to change.
+        edit: GraphEdit,
+    },
     /// Sets or erases voxels of a Model at explicit cell positions (`None` erases). The batch is
     /// all-or-nothing: an invalid entry rejects the whole Command.
     SetVoxels {
@@ -256,6 +304,13 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::CreateGraph { name, surface } => create_graph(scene, name, *surface),
         Command::EditGraph { index, surface } => edit_graph(scene, *index, *surface),
         Command::AssignGraph { id, graph } => assign_graph(scene, *id, *graph),
+        Command::AddMaterial { graph } => add_material(scene, graph),
+        Command::DuplicateMaterial { index } => duplicate_material(scene, *index),
+        Command::DeleteMaterial { index } => delete_material(scene, *index),
+        Command::RenameMaterial { index, name } => rename_material(scene, *index, name),
+        Command::SetCastsShadow { index, casts_shadow } => set_casts_shadow(scene, *index, *casts_shadow),
+        Command::AssignGraphToColors { ids, graph } => assign_graph_to_colors(scene, ids, *graph),
+        Command::EditMaterial { index, edit } => edit_material(scene, *index, edit),
         Command::SetVoxels { model, voxels } => apply_set_voxels(scene, *model, voxels),
         Command::SetColor { id, color } => apply_set_color(scene, *id, *color),
     }
@@ -306,31 +361,119 @@ fn snapshot(scene: &Scene) -> (crate::Palette, Vec<MaterialGraph>) {
 }
 
 fn create_graph(scene: &mut Scene, name: &str, surface: SurfaceConstants) -> Result<Option<Edit>, Error> {
+    add_material(scene, &MaterialGraph::from_constants(name, surface))
+}
+
+fn add_material(scene: &mut Scene, graph: &MaterialGraph) -> Result<Option<Edit>, Error> {
     if scene.material_graphs.len() >= MaterialGraph::MAX_PER_SCENE {
         return Err(Error::TooManyGraphs(scene.material_graphs.len()));
     }
+    graph.validate()?;
     let before = snapshot(scene);
-    scene.material_graphs.push(MaterialGraph {
-        name: name.to_owned(),
-        surface: surface.sanitized(),
-    });
+    scene.material_graphs.push(graph.clone());
     Ok(Some(Edit::materials_change(EditKind::CreateGraph, scene, before)))
 }
 
-fn edit_graph(scene: &mut Scene, index: u32, surface: SurfaceConstants) -> Result<Option<Edit>, Error> {
+fn duplicate_material(scene: &mut Scene, index: u32) -> Result<Option<Edit>, Error> {
+    let mut copy = graph_at(scene, index)?.clone();
+    copy.name = format!("{} copy", copy.name);
+    add_material(scene, &copy).map(|edit| edit.map(|e| e.with_kind(EditKind::DuplicateGraph)))
+}
+
+fn delete_material(scene: &mut Scene, index: u32) -> Result<Option<Edit>, Error> {
     if index == 0 {
         return Err(Error::DefaultMaterialLocked);
     }
+    graph_at(scene, index)?;
     let before = snapshot(scene);
-    let surface = surface.sanitized();
-    let graph = usize::try_from(index)
-        .ok()
-        .and_then(|slot| scene.material_graphs.get_mut(slot))
-        .ok_or(Error::UnknownGraph(index))?;
-    if graph.surface == surface {
+    scene.material_graphs.remove(slot(index));
+    for id in (1..=u8::MAX).filter_map(ColorId::new) {
+        if let Some(color) = scene.palette.get_mut(id) {
+            if color.graph == index {
+                color.graph = 0;
+            } else if color.graph > index {
+                color.graph -= 1;
+            }
+        }
+    }
+    Ok(Some(Edit::materials_change(EditKind::DeleteGraph, scene, before)))
+}
+
+fn rename_material(scene: &mut Scene, index: u32, name: &str) -> Result<Option<Edit>, Error> {
+    let name: String = name.trim().chars().take(MATERIAL_NAME_MAX).collect();
+    let before = snapshot(scene);
+    let graph = unlocked_graph(scene, index)?;
+    if graph.name == name {
         return Ok(None);
     }
-    graph.surface = surface;
+    graph.name = name;
+    Ok(Some(Edit::materials_change(EditKind::RenameGraph, scene, before)))
+}
+
+fn set_casts_shadow(scene: &mut Scene, index: u32, casts_shadow: bool) -> Result<Option<Edit>, Error> {
+    let before = snapshot(scene);
+    let graph = unlocked_graph(scene, index)?;
+    if graph.casts_shadow == casts_shadow {
+        return Ok(None);
+    }
+    graph.casts_shadow = casts_shadow;
+    Ok(Some(Edit::materials_change(EditKind::CastsShadow, scene, before)))
+}
+
+fn edit_material(scene: &mut Scene, index: u32, edit: &GraphEdit) -> Result<Option<Edit>, Error> {
+    let before = snapshot(scene);
+    let graph = unlocked_graph(scene, index)?;
+    if !graph.apply_edit(edit)? {
+        return Ok(None);
+    }
+    Ok(Some(Edit::materials_change(edit.kind(), scene, before)))
+}
+
+fn assign_graph_to_colors(scene: &mut Scene, ids: &[ColorId], graph: u32) -> Result<Option<Edit>, Error> {
+    graph_at(scene, graph)?;
+    for id in ids {
+        check_color(scene, *id)?;
+    }
+    let before = snapshot(scene);
+    let mut changed = false;
+    for id in ids {
+        if let Some(color) = scene.palette.get_mut(*id)
+            && color.graph != graph
+        {
+            color.graph = graph;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    Ok(Some(Edit::materials_change(EditKind::AssignGraph, scene, before)))
+}
+
+fn slot(index: u32) -> usize {
+    usize::try_from(index).unwrap_or(usize::MAX)
+}
+
+fn graph_at(scene: &Scene, index: u32) -> Result<&MaterialGraph, Error> {
+    scene.material_graphs.get(slot(index)).ok_or(Error::UnknownGraph(index))
+}
+
+/// The graph at `index`, unless it is the locked Default material.
+fn unlocked_graph(scene: &mut Scene, index: u32) -> Result<&mut MaterialGraph, Error> {
+    if index == 0 {
+        return Err(Error::DefaultMaterialLocked);
+    }
+    scene
+        .material_graphs
+        .get_mut(slot(index))
+        .ok_or(Error::UnknownGraph(index))
+}
+
+fn edit_graph(scene: &mut Scene, index: u32, surface: SurfaceConstants) -> Result<Option<Edit>, Error> {
+    let before = snapshot(scene);
+    if !unlocked_graph(scene, index)?.set_surface_constants(surface) {
+        return Ok(None);
+    }
     Ok(Some(Edit::materials_change(EditKind::EditGraph, scene, before)))
 }
 
@@ -879,14 +1022,14 @@ mod material_graph_tests {
         history.push(edit);
         assert_eq!(scene.palette().get(color_id(5)).unwrap().graph, 1);
         assert!(
-            (scene.material_graphs()[1].surface.roughness - 1.0).abs() < f32::EPSILON,
+            (scene.material_graphs()[1].surface_constants().roughness - 1.0).abs() < f32::EPSILON,
             "constants are clamped"
         );
 
         history.undo(&mut scene);
         assert_eq!(scene.palette().get(color_id(5)).unwrap().graph, 0);
         history.undo(&mut scene);
-        assert!(scene.material_graphs()[1].surface.emission_strength.abs() < f32::EPSILON);
+        assert!(scene.material_graphs()[1].surface_constants().emission_strength.abs() < f32::EPSILON);
         history.undo(&mut scene);
         assert_eq!(scene.material_graphs().len(), 1);
         history.redo(&mut scene);
@@ -918,7 +1061,7 @@ mod material_graph_tests {
         }
         history.push(merged.unwrap());
         history.undo(&mut scene);
-        assert!(scene.material_graphs()[1].surface.metallic.abs() < f32::EPSILON);
+        assert!(scene.material_graphs()[1].surface_constants().metallic.abs() < f32::EPSILON);
         assert!(!history.can_undo());
     }
 
@@ -977,5 +1120,144 @@ mod material_graph_tests {
             apply(&mut scene, &create).unwrap();
         }
         assert!(matches!(apply(&mut scene, &create), Err(Error::TooManyGraphs(_))));
+    }
+
+    #[test]
+    fn material_commands_undo_and_redo_with_labels() {
+        use crate::material_graph::{GraphEdit, GraphNodeKind, SampleMaterial};
+
+        let mut scene = Scene::new();
+        let mut history = History::new(20);
+        let mut run = |scene: &mut Scene, command: Command| {
+            let edit = apply(scene, &command).unwrap().unwrap();
+            let kind = edit.kind();
+            history.push(edit);
+            kind
+        };
+        let slate = SampleMaterial::RoofSlate.build();
+        assert_eq!(
+            run(&mut scene, Command::AddMaterial { graph: Box::new(slate) }),
+            EditKind::CreateGraph
+        );
+        let add = GraphEdit::AddNode {
+            kind: GraphNodeKind::Cells,
+            position: [0.0, 0.0],
+        };
+        assert_eq!(
+            run(&mut scene, Command::EditMaterial { index: 1, edit: add }),
+            EditKind::AddGraphNode
+        );
+        assert_eq!(scene.material_graphs()[1].nodes().len(), 7);
+        let ids = vec![color_id(2), color_id(3)];
+        assert_eq!(
+            run(&mut scene, Command::AssignGraphToColors { ids, graph: 1 }),
+            EditKind::AssignGraph
+        );
+        assert_eq!(scene.colors_using(1), vec![color_id(2), color_id(3)]);
+        assert_eq!(
+            run(
+                &mut scene,
+                Command::RenameMaterial {
+                    index: 1,
+                    name: "Slate".to_owned()
+                }
+            ),
+            EditKind::RenameGraph
+        );
+        assert_eq!(
+            run(
+                &mut scene,
+                Command::SetCastsShadow {
+                    index: 1,
+                    casts_shadow: false
+                }
+            ),
+            EditKind::CastsShadow
+        );
+        assert_eq!(
+            run(&mut scene, Command::DuplicateMaterial { index: 1 }),
+            EditKind::DuplicateGraph
+        );
+        assert_eq!(scene.material_graphs()[2].name, "Slate copy");
+
+        // Deleting material 1 sends its colors to the default and shifts the copy down.
+        assert_eq!(
+            run(
+                &mut scene,
+                Command::AssignGraphToColors {
+                    ids: vec![color_id(4)],
+                    graph: 2
+                }
+            ),
+            EditKind::AssignGraph
+        );
+        assert_eq!(
+            run(&mut scene, Command::DeleteMaterial { index: 1 }),
+            EditKind::DeleteGraph
+        );
+        assert_eq!(scene.palette().get(color_id(2)).unwrap().graph, 0);
+        assert_eq!(scene.palette().get(color_id(4)).unwrap().graph, 1);
+        assert_eq!(scene.material_graphs().len(), 2);
+
+        while history.can_undo() {
+            history.undo(&mut scene);
+        }
+        assert_eq!(scene.material_graphs().len(), 1);
+        while history.can_redo() {
+            history.redo(&mut scene);
+        }
+        assert_eq!(scene.material_graphs()[1].name, "Slate copy");
+    }
+
+    #[test]
+    fn material_commands_reject_bad_input_and_leave_the_scene_alone() {
+        use crate::material_graph::{GraphEdit, GraphError, GraphNodeKind};
+
+        let mut scene = Scene::new();
+        let default_edit = Command::EditMaterial {
+            index: 0,
+            edit: GraphEdit::AddNode {
+                kind: GraphNodeKind::Noise,
+                position: [0.0; 2],
+            },
+        };
+        assert!(matches!(
+            apply(&mut scene, &default_edit),
+            Err(Error::DefaultMaterialLocked)
+        ));
+        assert!(matches!(
+            apply(&mut scene, &Command::DeleteMaterial { index: 0 }),
+            Err(Error::DefaultMaterialLocked)
+        ));
+        assert!(matches!(
+            apply(&mut scene, &Command::DuplicateMaterial { index: 4 }),
+            Err(Error::UnknownGraph(4))
+        ));
+        apply(
+            &mut scene,
+            &Command::AddMaterial {
+                graph: Box::new(MaterialGraph::blank("A")),
+            },
+        )
+        .unwrap();
+        let second_surface = Command::EditMaterial {
+            index: 1,
+            edit: GraphEdit::AddNode {
+                kind: GraphNodeKind::SurfaceOutput,
+                position: [0.0; 2],
+            },
+        };
+        assert!(matches!(
+            apply(&mut scene, &second_surface),
+            Err(Error::Graph(GraphError::SecondOutput(_)))
+        ));
+        let unlinked = Command::AddMaterial {
+            graph: Box::new(serde_json::from_str(r#"{"name":"x","casts_shadow":true,"nodes":[],"links":[],"frames":[],"next_node":0,"next_frame":0}"#).unwrap()),
+        };
+        assert!(matches!(
+            apply(&mut scene, &unlinked),
+            Err(Error::Graph(GraphError::NoSurface))
+        ));
+        assert_eq!(scene.material_graphs().len(), 2);
     }
 }

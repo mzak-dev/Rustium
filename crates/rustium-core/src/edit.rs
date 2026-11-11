@@ -5,7 +5,9 @@ use glam::IVec3;
 
 use crate::chunk::{Chunk, ChunkCoord};
 use crate::ids::{NodeId, ShapeId};
+use crate::material_graph::MaterialGraph;
 use crate::node::Graph;
+use crate::palette::Palette;
 use crate::scene::Scene;
 use crate::shape::{Shape, Volume, Voxel};
 
@@ -48,6 +50,12 @@ pub enum EditKind {
     MoveNode,
     /// A Node's Transform changed.
     Transform,
+    /// The constants of a material graph were edited.
+    EditGraph,
+    /// A material graph was created.
+    CreateGraph,
+    /// A Color was assigned to a material graph.
+    AssignGraph,
 }
 
 /// One named, undoable change: the chunks it touched before and after, the Volumes, and a snapshot of the node
@@ -59,6 +67,14 @@ pub struct Edit {
     chunks: Vec<ChunkChange>,
     volumes: Vec<VolumeChange>,
     created: Vec<NodeId>,
+    materials: Option<MaterialsChange>,
+}
+
+/// The Palette and material graphs before and after an Edit; both are small, so a snapshot is cheap.
+#[derive(Debug, Clone)]
+struct MaterialsChange {
+    before: (Palette, Vec<MaterialGraph>),
+    after: (Palette, Vec<MaterialGraph>),
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +99,26 @@ struct VolumeChange {
 }
 
 impl Edit {
+    /// An Edit that only changed Palette entries or material graphs.
+    pub(crate) fn materials_change(kind: EditKind, scene: &Scene, before: (Palette, Vec<MaterialGraph>)) -> Self {
+        Self {
+            kind,
+            graph: None,
+            chunks: Vec::new(),
+            volumes: Vec::new(),
+            created: Vec::new(),
+            materials: Some(MaterialsChange {
+                before,
+                after: (scene.palette.clone(), scene.material_graphs.clone()),
+            }),
+        }
+    }
+
+    /// Whether the Edit changed Colors or material graphs, so the GPU copy must be uploaded again.
+    pub fn touches_materials(&self) -> bool {
+        self.materials.is_some()
+    }
+
     /// What the Edit did.
     pub fn kind(&self) -> EditKind {
         self.kind
@@ -130,6 +166,13 @@ impl Edit {
             (first, next) => first.or(next),
         };
         self.created.extend(later.created);
+        self.materials = match (self.materials.take(), later.materials) {
+            (Some(first), Some(next)) => Some(MaterialsChange {
+                before: first.before,
+                after: next.after,
+            }),
+            (first, next) => first.or(next),
+        };
         self
     }
 
@@ -157,6 +200,14 @@ impl Edit {
                 Direction::Back => Arc::clone(&change.before),
                 Direction::Forward => Arc::clone(&change.after),
             };
+        }
+        if let Some(materials) = &self.materials {
+            let (palette, graphs) = match direction {
+                Direction::Back => materials.before.clone(),
+                Direction::Forward => materials.after.clone(),
+            };
+            scene.palette = palette;
+            scene.material_graphs = graphs;
         }
     }
 }
@@ -263,6 +314,7 @@ impl<'scene> Recorder<'scene> {
             chunks,
             volumes,
             created: self.created,
+            materials: None,
         })
     }
 }

@@ -38,6 +38,15 @@ pub enum Error {
         /// Largest allowed region.
         limit: usize,
     },
+    /// The Scene already holds [`MaterialGraph::MAX_PER_SCENE`](crate::MaterialGraph::MAX_PER_SCENE) material graphs.
+    #[error("the scene already has {0} material graphs")]
+    TooManyGraphs(usize),
+    /// The Command names a material graph the Scene does not have.
+    #[error("material graph {0} does not exist")]
+    UnknownGraph(u32),
+    /// The built-in Default material (graph 0) cannot be edited.
+    #[error("the default material cannot be edited")]
+    DefaultMaterialLocked,
     /// The Scene ran out of Node or Shape ids.
     #[error("the scene has too many nodes")]
     TooManyNodes,

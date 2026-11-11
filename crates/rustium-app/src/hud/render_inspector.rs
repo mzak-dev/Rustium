@@ -1,12 +1,14 @@
 //! Render mode, right island: the Render, Camera, Light and Output tabs.
 
 use egui::{Color32, DragValue, Grid, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
-use rustium_render::{Ground, Sky};
+use rustium_render::{Ground, RenderStyle, Sky};
 
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud};
 use crate::icons::Icon;
-use crate::render_mode::{Backdrop, ImageFormat, RenderTab, SIDE_RANGE, ViewProjection};
+use crate::render_mode::{
+    APERTURE_RANGE, Backdrop, EXPOSURE_RANGE, ImageFormat, RenderTab, SIDE_RANGE, TURNTABLE_RANGE, ViewProjection,
+};
 use crate::theme;
 
 pub(crate) const TABS: [(RenderTab, &str); 4] = [
@@ -63,22 +65,10 @@ fn static_select(ui: &mut Ui, text: &str) {
         });
 }
 
-fn disabled_field(ui: &mut Ui, text: &str, tooltip: String) {
-    ui.add_enabled_ui(false, |ui| {
-        egui::Frame::new()
-            .fill(theme::FIELD)
-            .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
-            .corner_radius(7)
-            .inner_margin(egui::Margin::symmetric(8, 4))
-            .show(ui, |ui| ui.label(widgets::mono(text, 11.0)));
-    })
-    .response
-    .on_disabled_hover_text(tooltip);
-}
-
 /// One isometric cube thumbnail of the Style row (28 × 28 view box).
 struct StyleLook {
     key: &'static str,
+    hint: &'static str,
     faces: [Option<Color32>; 3],
     outline: Color32,
 }
@@ -89,6 +79,7 @@ fn style_looks() -> [StyleLook; 5] {
     [
         StyleLook {
             key: "style-traced",
+            hint: "style-traced-hint",
             faces: [
                 color(0xd6, 0xcc, 0xba),
                 color(0xa8, 0x9c, 0x86),
@@ -98,6 +89,7 @@ fn style_looks() -> [StyleLook; 5] {
         },
         StyleLook {
             key: "style-clay",
+            hint: "style-clay-hint",
             faces: [
                 color(0xb4, 0xb4, 0xb4),
                 color(0x8e, 0x8e, 0x8e),
@@ -107,6 +99,7 @@ fn style_looks() -> [StyleLook; 5] {
         },
         StyleLook {
             key: "style-toon",
+            hint: "style-toon-hint",
             faces: [
                 color(0xd6, 0xcc, 0xba),
                 color(0xd6, 0xcc, 0xba),
@@ -116,6 +109,7 @@ fn style_looks() -> [StyleLook; 5] {
         },
         StyleLook {
             key: "style-pixel",
+            hint: "style-pixel-hint",
             faces: [
                 color(0xf0, 0xe0, 0xb0),
                 color(0xb0, 0x80, 0x40),
@@ -125,15 +119,15 @@ fn style_looks() -> [StyleLook; 5] {
         },
         StyleLook {
             key: "style-wire",
+            hint: "style-wire-hint",
             faces: [None, None, None],
             outline: stroke(0xc8, 0xcf, 0xd9),
         },
     ]
 }
 
-fn style_row(ui: &mut Ui, hud: &Hud<'_>) {
+fn style_row(ui: &mut Ui, hud: &mut Hud<'_>) {
     let accent = hud.accent();
-    let later = hud.tr("later-milestone");
     egui::Frame::new()
         .inner_margin(egui::Margin {
             left: 8,
@@ -146,9 +140,9 @@ fn style_row(ui: &mut Ui, hud: &Hud<'_>) {
             let width = (ui.available_width() - 4.0 * 2.0) / 5.0;
             ui.horizontal(|ui| {
                 for (index, look) in style_looks().iter().enumerate() {
-                    let selected = index == 0;
-                    let sense = if selected { Sense::click() } else { Sense::hover() };
-                    let (rect, response) = ui.allocate_exact_size(vec2(width, 50.0), sense);
+                    let style = RenderStyle::ALL[index];
+                    let selected = hud.ui.render.style == style;
+                    let (rect, response) = ui.allocate_exact_size(vec2(width, 50.0), Sense::click());
                     let painter = ui.painter();
                     if selected {
                         painter.rect(
@@ -191,8 +185,8 @@ fn style_row(ui: &mut Ui, hud: &Hud<'_>) {
                         egui::FontId::proportional(10.0),
                         text_color,
                     );
-                    if !selected {
-                        response.on_hover_text(later.clone());
+                    if response.on_hover_text(hud.tr(look.hint)).clicked() && !selected {
+                        hud.ui.render.style = style;
                     }
                 }
             });
@@ -205,7 +199,6 @@ fn style_row(ui: &mut Ui, hud: &Hud<'_>) {
 fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     caption(ui, &hud.tr("style"));
     style_row(ui, hud);
-    let later = hud.tr("later-milestone");
     let labels = [
         hud.tr("engine"),
         hud.tr("samples"),
@@ -213,6 +206,7 @@ fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         hud.tr("denoise"),
     ];
     let engine = hud.tr("engine-path-tracing");
+    let denoise_hint = hud.tr("denoise-hint");
     properties(ui, "render-tab", |ui| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
@@ -225,18 +219,17 @@ fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         ui.add(DragValue::new(&mut render.bounces).range(1..=32).speed(0.1));
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
-        let mut on = false;
-        widgets::switch(ui, &mut on, false).on_disabled_hover_text(later);
+        widgets::switch(ui, &mut render.denoise, true).on_hover_text(denoise_hint);
         ui.end_row();
     });
     super::materials_preview::show(ui, hud);
 }
 
 fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
-    let later = hud.tr("later-milestone");
     let labels = [
         hud.tr("projection"),
         hud.tr("lens"),
+        hud.tr("exposure"),
         hud.tr("dof"),
         hud.tr("aperture"),
         hud.tr("focus"),
@@ -246,14 +239,19 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         (ViewProjection::Orthographic, hud.tr("proj-ortho")),
         (ViewProjection::Isometric, hud.tr("proj-iso")),
     ];
+    let focus_hint = hud.tr("focus-hint");
+    let voxel_size = hud.editor.scene.voxel_size();
+    let mut focus = hud.ui.render.focus_metres(hud.camera, voxel_size);
+    let mut focus_changed = false;
     let mut projection = hud.ui.render.projection;
     properties(ui, "camera-tab", |ui| {
+        let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
         widgets::segmented(ui, &mut projection, &options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[1]));
         ui.add(
-            DragValue::new(&mut hud.ui.render.lens_mm)
+            DragValue::new(&mut render.lens_mm)
                 .range(crate::render_mode::LENS_RANGE_MM.0..=crate::render_mode::LENS_RANGE_MM.1)
                 .speed(0.3)
                 .suffix(" mm")
@@ -261,16 +259,44 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         );
         ui.end_row();
         ui.label(widgets::muted(&labels[2]));
-        let mut off = false;
-        widgets::switch(ui, &mut off, false).on_disabled_hover_text(later.clone());
+        ui.add(
+            DragValue::new(&mut render.exposure_ev)
+                .range(EXPOSURE_RANGE.0..=EXPOSURE_RANGE.1)
+                .speed(0.02)
+                .suffix(" EV")
+                .fixed_decimals(1),
+        );
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
-        disabled_field(ui, "f/2.8", later.clone());
+        widgets::switch(ui, &mut render.dof, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[4]));
-        disabled_field(ui, "4.20 m", later);
+        ui.add_enabled(
+            render.dof,
+            DragValue::new(&mut render.aperture)
+                .range(APERTURE_RANGE.0..=APERTURE_RANGE.1)
+                .speed(0.05)
+                .prefix("f/")
+                .fixed_decimals(1),
+        );
+        ui.end_row();
+        ui.label(widgets::muted(&labels[5]));
+        let response = ui
+            .add_enabled(
+                render.dof,
+                DragValue::new(&mut focus)
+                    .range(0.05..=10_000.0)
+                    .speed(0.02)
+                    .suffix(" m")
+                    .fixed_decimals(2),
+            )
+            .on_hover_text(focus_hint);
+        focus_changed = response.changed();
         ui.end_row();
     });
+    if focus_changed {
+        hud.ui.render.focus_m = Some(focus);
+    }
     if projection != hud.ui.render.projection {
         hud.ui.render.apply_projection(hud.camera, projection);
     }
@@ -342,7 +368,6 @@ fn sky_key(sky: Sky) -> &'static str {
 }
 
 fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
-    let later = hud.tr("later-milestone");
     let labels = [
         hud.tr("size"),
         hud.tr("format"),
@@ -356,7 +381,9 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     let format_options = [
         (ImageFormat::Png, "PNG".to_owned()),
         (ImageFormat::Exr, "EXR".to_owned()),
+        (ImageFormat::Mp4, "MP4".to_owned()),
     ];
+    let frames_suffix = format!(" {}", hud.tr("frames"));
     let mut format = hud.ui.render.format;
     let mut backdrop = hud.ui.render.backdrop;
     properties(ui, "output-tab", |ui| {
@@ -377,38 +404,50 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         });
         ui.end_row();
         ui.label(widgets::muted(&labels[1]));
-        ui.horizontal(|ui| {
-            widgets::segmented(ui, &mut format, &format_options, true);
-            widgets::text_button(ui, "MP4", 26.0, Look::Plain, false).on_disabled_hover_text(later.clone());
-        });
+        widgets::segmented(ui, &mut format, &format_options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[2]));
         widgets::segmented(ui, &mut backdrop, &backdrop_options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
-        disabled_field(ui, "72", later.clone());
+        ui.add(
+            DragValue::new(&mut render.turntable_frames)
+                .range(TURNTABLE_RANGE.0..=TURNTABLE_RANGE.1)
+                .speed(0.5)
+                .suffix(frames_suffix),
+        );
         ui.end_row();
     });
     hud.ui.render.format = format;
     hud.ui.render.backdrop = backdrop;
 
-    let ready = hud.ui.render.progress.samples > 0;
+    let running = hud.ui.render.job.is_some();
+    let video = format == ImageFormat::Mp4;
+    let ready = !running && (video || hud.ui.render.progress.samples > 0);
+    let save_label = hud.tr(if video { "save-video" } else { "save-image" });
+    let save_hint = hud.tr(if video { "save-video-hint" } else { "save-image-hint" });
+    let queue_label = hud.tr("queue-shots");
+    let queue_hint = hud.tr("queue-shots-hint");
     ui.horizontal(|ui| {
         ui.add_space(12.0);
         ui.spacing_mut().item_spacing.x = 4.0;
         let half = (ui.available_width() - 12.0 - 4.0) / 2.0;
         ui.scope(|ui| {
             ui.set_width(half);
-            let save = widgets::text_button(ui, &hud.tr("save-image"), 32.0, Look::On, ready);
-            if save.clicked() {
+            let save = widgets::text_button(ui, &save_label, 32.0, Look::On, ready);
+            if save.on_hover_text(save_hint).clicked() {
                 hud.send(AppCommand::SaveImage);
             }
         });
         ui.scope(|ui| {
             ui.set_width(half);
-            widgets::text_button(ui, &hud.tr("queue-shots"), 32.0, Look::On, false).on_disabled_hover_text(later);
+            let queue = widgets::text_button(ui, &queue_label, 32.0, Look::On, !running);
+            if queue.on_hover_text(queue_hint).clicked() {
+                hud.send(AppCommand::QueueShots);
+            }
         });
     });
+    job_progress(ui, hud);
     if let Some(message) = &hud.ui.render.message {
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
@@ -416,4 +455,38 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             ui.label(RichText::new(message).color(theme::SOFT).size(11.0));
         });
     }
+}
+
+/// The progress bar and Cancel button of a running turntable or queue job.
+fn job_progress(ui: &mut Ui, hud: &mut Hud<'_>) {
+    let Some(job) = &hud.ui.render.job else {
+        return;
+    };
+    let fraction = job.fraction();
+    let (done, total) = job.frames();
+    let status = hud.i18n.tr_args(
+        "job-progress",
+        &[
+            ("done", fluent_bundle::FluentValue::from(done)),
+            ("total", fluent_bundle::FluentValue::from(total)),
+        ],
+    );
+    let cancel_label = hud.tr("job-cancel");
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        ui.label(RichText::new(status).color(theme::SOFT).size(11.0));
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        let width = ui.available_width() - 12.0 - 72.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(width.max(40.0), 6.0), Sense::hover());
+        ui.painter().rect_filled(rect, 3, Color32::from_white_alpha(26));
+        let filled = egui::Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height()));
+        ui.painter().rect_filled(filled, 3, hud.accent());
+        if widgets::text_button(ui, &cancel_label, 24.0, Look::Plain, true).clicked() {
+            hud.send(AppCommand::CancelJob);
+        }
+    });
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
 }

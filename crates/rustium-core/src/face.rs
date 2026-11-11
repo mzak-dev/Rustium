@@ -59,6 +59,11 @@ impl Face {
         }
     }
 
+    /// The face whose [`normal`](Self::normal) is `normal`; `None` unless it is one of the six unit axis vectors.
+    pub fn from_normal(normal: IVec3) -> Option<Self> {
+        Self::ALL.into_iter().find(|face| face.normal() == normal)
+    }
+
     /// The face on `axis` that a ray moving with `step` (+1 or -1) enters through.
     pub(crate) fn entered_by_step(axis: usize, step: i32) -> Self {
         match (axis, step > 0) {

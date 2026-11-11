@@ -1,11 +1,15 @@
 use glam::IVec3;
 
-use crate::edit::{Edit, EditKind, EditRecorder};
+use crate::edit::{Edit, EditKind, Recorder};
 use crate::error::Error;
+use crate::ids::{NodeId, ShapeId};
 use crate::palette::MaterialId;
-use crate::raycast::{HitTarget, RayHit};
+use crate::raycast::RayHit;
 use crate::scene::Scene;
-use crate::shape::Volume;
+use crate::scene_ops;
+use crate::selection::Selection;
+use crate::tools::{self, Brush, FillMode, Mirror};
+use crate::transform::Transform;
 
 /// Voxel Tools that change voxels with a [`Brush`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,37 +22,136 @@ pub enum VoxelTool {
     Paint,
 }
 
-/// Footprint of a gesture: a cube `size` voxels wide.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Brush {
-    /// Edge length of the cube in voxels.
-    pub size: u32,
-}
-
-impl Brush {
-    /// Largest brush the editor accepts.
-    pub const MAX_SIZE: u32 = 64;
-}
-
-impl Default for Brush {
-    fn default() -> Self {
-        Self { size: 1 }
-    }
-}
-
 /// A request to change the Scene, from the interface, a script or an MCP client.
+///
+/// Hits are in the cell coordinates of the Model the Command names (not in Scene space).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// Applies a voxel Tool with a Brush where a ray hit the Scene.
+    /// Applies a voxel Tool with a Brush to a Model, where a ray hit it.
     ApplyBrush {
+        /// The Model to edit; it must be visible and unlocked.
+        model: NodeId,
         /// Which voxel Tool to use.
         tool: VoxelTool,
         /// Footprint of the gesture.
         brush: Brush,
-        /// Where the gesture lands.
+        /// Where the gesture lands, or where it starts for Line and Box.
         hit: RayHit,
+        /// Where a Line or Box gesture ends; `None` means the same as `hit`.
+        end: Option<RayHit>,
         /// Material for Attach and Paint; ignored by Erase.
         material: MaterialId,
+        /// Reflections applied to every changed cell.
+        mirror: Mirror,
+    },
+    /// Fills a face or an enclosed space of a Model.
+    Fill {
+        /// The Model to edit; it must be visible and unlocked.
+        model: NodeId,
+        /// Surface or 3D fill.
+        mode: FillMode,
+        /// The clicked voxel face.
+        hit: RayHit,
+        /// Material to fill with.
+        material: MaterialId,
+        /// Reflections applied to every changed cell.
+        mirror: Mirror,
+    },
+    /// Moves the selected voxels inside their Model; the Volume grows to hold them.
+    MoveVoxels {
+        /// The Model to edit; it must be visible and unlocked.
+        model: NodeId,
+        /// The voxels to move.
+        selection: Selection,
+        /// Distance in voxels along each axis of the Model.
+        offset: IVec3,
+    },
+    /// Adds an empty Model at the top of a Group.
+    NewModel {
+        /// The Group to add to.
+        parent: NodeId,
+        /// Name of the new Model.
+        name: String,
+    },
+    /// Adds an empty Group at the top of a Group and moves `adopt` into it, keeping their place in the Scene.
+    NewGroup {
+        /// The Group to add to.
+        parent: NodeId,
+        /// Name of the new Group.
+        name: String,
+        /// Nodes that become its children.
+        adopt: Vec<NodeId>,
+    },
+    /// Copies a Node, with Shapes of its own, next to the original.
+    Duplicate {
+        /// The Node to copy.
+        node: NodeId,
+    },
+    /// Copies a Node next to the original, sharing its Shapes so edits show in both.
+    DuplicateAsInstance {
+        /// The Node to copy.
+        node: NodeId,
+    },
+    /// Gives every Model of a Node that shares a Shape a Shape of its own.
+    MakeUnique {
+        /// The Model, or a Group whose Models become unique.
+        node: NodeId,
+    },
+    /// Removes a Node and everything below it.
+    Delete {
+        /// The Node to remove.
+        node: NodeId,
+    },
+    /// Changes the name of a Node.
+    Rename {
+        /// The Node to rename.
+        node: NodeId,
+        /// The new name; blank names are ignored.
+        name: String,
+    },
+    /// Hides or shows a Node and everything below it.
+    SetHidden {
+        /// The Node to change.
+        node: NodeId,
+        /// Whether it is hidden afterwards.
+        hidden: bool,
+    },
+    /// Locks or unlocks a Node and everything below it.
+    SetLocked {
+        /// The Node to change.
+        node: NodeId,
+        /// Whether it is locked afterwards.
+        locked: bool,
+    },
+    /// Merges Models into the first of them in tree order; Groups stand for the Models below them.
+    Merge {
+        /// The Nodes to merge.
+        nodes: Vec<NodeId>,
+    },
+    /// Moves the Selection of a Model into a new Model above it.
+    Split {
+        /// The Model to split.
+        model: NodeId,
+        /// The voxels that leave it.
+        selection: Selection,
+        /// Name of the new Model.
+        name: String,
+    },
+    /// Moves a Node to another place in the tree, keeping its place in the Scene.
+    MoveNode {
+        /// The Node to move.
+        node: NodeId,
+        /// The Group it moves into.
+        parent: NodeId,
+        /// Position among the children of `parent` once the Node has left its old place.
+        index: usize,
+    },
+    /// Sets where a Node sits relative to its parent.
+    SetTransform {
+        /// The Node to change.
+        node: NodeId,
+        /// Its new Transform.
+        transform: Transform,
     },
 }
 
@@ -57,92 +160,161 @@ pub enum Command {
 /// # Errors
 ///
 /// [`Error::UnknownMaterial`] when the Material is not in the Palette, [`Error::BrushSize`] when the brush is
-/// empty or larger than [`Brush::MAX_SIZE`].
+/// empty or larger than [`Brush::MAX_SIZE`], [`Error::FillTooLarge`] for an oversized 3D Fill, and the Node errors
+/// ([`Error::UnknownNode`], [`Error::NotAModel`], [`Error::NotAGroup`], [`Error::ModelUnavailable`],
+/// [`Error::RootProtected`], [`Error::MoveIntoSelf`]) when a Command names a Node it cannot be applied to.
 pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error> {
-    match *command {
+    match command {
         Command::ApplyBrush {
+            model,
             tool,
             brush,
             hit,
+            end,
             material,
-        } => apply_brush(scene, tool, brush, hit, material),
+            mirror,
+        } => apply_brush(
+            scene,
+            *model,
+            *tool,
+            *brush,
+            (*hit, end.unwrap_or(*hit)),
+            *material,
+            *mirror,
+        ),
+        Command::Fill {
+            model,
+            mode,
+            hit,
+            material,
+            mirror,
+        } => apply_fill(scene, *model, *mode, *hit, *material, *mirror),
+        Command::MoveVoxels {
+            model,
+            selection,
+            offset,
+        } => move_voxels(scene, *model, selection, *offset),
+        Command::NewModel { parent, name } => scene_ops::new_model(scene, *parent, name),
+        Command::NewGroup { parent, name, adopt } => scene_ops::new_group(scene, *parent, name, adopt),
+        Command::Duplicate { node } => scene_ops::duplicate(scene, *node, false),
+        Command::DuplicateAsInstance { node } => scene_ops::duplicate(scene, *node, true),
+        Command::MakeUnique { node } => scene_ops::make_unique(scene, *node),
+        Command::Delete { node } => scene_ops::delete(scene, *node),
+        Command::Rename { node, name } => scene_ops::rename(scene, *node, name),
+        Command::SetHidden { node, hidden } => scene_ops::set_hidden(scene, *node, *hidden),
+        Command::SetLocked { node, locked } => scene_ops::set_locked(scene, *node, *locked),
+        Command::Merge { nodes } => scene_ops::merge(scene, nodes),
+        Command::Split { model, selection, name } => scene_ops::split(scene, *model, selection, name),
+        Command::MoveNode { node, parent, index } => scene_ops::move_node(scene, *node, *parent, *index),
+        Command::SetTransform { node, transform } => scene_ops::set_transform(scene, *node, *transform),
+    }
+}
+
+/// What to do with each cell a gesture reaches.
+#[derive(Debug, Clone, Copy)]
+enum Op {
+    /// Fill the cell when it is empty.
+    Place(MaterialId),
+    /// Empty the cell.
+    Remove,
+    /// Change the Material when the cell is filled.
+    Recolor(MaterialId),
+}
+
+fn check_material(scene: &Scene, material: MaterialId) -> Result<(), Error> {
+    if scene.palette().get(material).is_none() {
+        return Err(Error::UnknownMaterial(material.get()));
+    }
+    Ok(())
+}
+
+fn apply_to_cells(rec: &mut Recorder<'_>, shape: ShapeId, op: Op, cells: &[IVec3], mirror: Mirror) {
+    for cell in cells {
+        mirror.for_each_image(*cell, |image| {
+            let current = rec.voxel(shape, image);
+            match op {
+                Op::Place(material) if current.is_none() => rec.set(shape, image, Some(material)),
+                Op::Remove => rec.set(shape, image, None),
+                Op::Recolor(material) if current.is_some() => rec.set(shape, image, Some(material)),
+                Op::Place(_) | Op::Recolor(_) => {}
+            }
+        });
     }
 }
 
 fn apply_brush(
     scene: &mut Scene,
+    model: NodeId,
     tool: VoxelTool,
     brush: Brush,
-    hit: RayHit,
+    (from, to): (RayHit, RayHit),
     material: MaterialId,
+    mirror: Mirror,
 ) -> Result<Option<Edit>, Error> {
-    if scene.palette().get(material).is_none() {
-        return Err(Error::UnknownMaterial(material.get()));
-    }
+    let shape = scene_ops::editable_shape(scene, model)?;
+    check_material(scene, material)?;
     if brush.size == 0 || brush.size > Brush::MAX_SIZE {
         return Err(Error::BrushSize {
             size: brush.size,
             max: Brush::MAX_SIZE,
         });
     }
-    if tool != VoxelTool::Attach && hit.target == HitTarget::Ground {
+    let cells = {
+        let shape = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
+        tools::brush_positions(shape, tool, brush, from, to)
+    };
+    let (op, kind) = match tool {
+        VoxelTool::Attach => (Op::Place(material), EditKind::Attach),
+        VoxelTool::Erase => (Op::Remove, EditKind::Erase),
+        VoxelTool::Paint => (Op::Recolor(material), EditKind::Paint),
+    };
+    let mut rec = Recorder::new(scene);
+    apply_to_cells(&mut rec, shape, op, &cells, mirror);
+    Ok(rec.finish(kind))
+}
+
+fn apply_fill(
+    scene: &mut Scene,
+    model: NodeId,
+    mode: FillMode,
+    hit: RayHit,
+    material: MaterialId,
+    mirror: Mirror,
+) -> Result<Option<Edit>, Error> {
+    let shape = scene_ops::editable_shape(scene, model)?;
+    check_material(scene, material)?;
+    let (cells, op) = {
+        let shape = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
+        match mode {
+            FillMode::Surface => (tools::face_region(shape, hit), Op::Recolor(material)),
+            FillMode::Volume => (tools::fill_volume(shape, hit)?, Op::Place(material)),
+        }
+    };
+    let mut rec = Recorder::new(scene);
+    apply_to_cells(&mut rec, shape, op, &cells, mirror);
+    Ok(rec.finish(EditKind::Fill))
+}
+
+fn move_voxels(scene: &mut Scene, model: NodeId, selection: &Selection, offset: IVec3) -> Result<Option<Edit>, Error> {
+    let shape = scene_ops::editable_shape(scene, model)?;
+    if offset == IVec3::ZERO {
         return Ok(None);
     }
-    let bounds = brush_bounds(tool, brush, hit);
-    let mut recorder = EditRecorder::new(&mut scene.shape);
-    for_each_in(bounds.min, bounds.max, |position| {
-        let current = recorder.get(position);
-        match tool {
-            VoxelTool::Attach if current.is_none() => recorder.set(position, Some(material)),
-            VoxelTool::Erase => recorder.set(position, None),
-            VoxelTool::Paint if current.is_some() => recorder.set(position, Some(material)),
-            _ => {}
-        }
-    });
-    let kind = match tool {
-        VoxelTool::Attach => EditKind::Attach,
-        VoxelTool::Erase => EditKind::Erase,
-        VoxelTool::Paint => EditKind::Paint,
+    let moving: Vec<_> = {
+        let source = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
+        selection
+            .iter()
+            .filter_map(|cell| source.get(cell).map(|material| (cell, material)))
+            .collect()
     };
-    Ok(recorder.finish(kind))
-}
-
-/// The box of voxel positions a gesture covers: for Attach a cube resting on the hit face and centred across it,
-/// for Erase and Paint a cube centred on the hit voxel.
-pub fn brush_bounds(tool: VoxelTool, brush: Brush, hit: RayHit) -> Volume {
-    // Clamped to MAX_SIZE, so the conversion always succeeds.
-    let size = i32::try_from(brush.size.clamp(1, Brush::MAX_SIZE)).unwrap_or(1);
-    let low = -(size - 1) / 2;
-    let high = size / 2;
-    match tool {
-        VoxelTool::Attach => {
-            let normal = hit.face.normal();
-            let base = hit.voxel + normal;
-            let axis = hit.face.axis();
-            let mut min = IVec3::splat(low);
-            let mut max = IVec3::splat(high);
-            min[axis] = if normal[axis] > 0 { 0 } else { 1 - size };
-            max[axis] = if normal[axis] > 0 { size - 1 } else { 0 };
-            Volume {
-                min: base + min,
-                max: base + max,
-            }
-        }
-        VoxelTool::Erase | VoxelTool::Paint => Volume {
-            min: hit.voxel + low,
-            max: hit.voxel + high,
-        },
+    let mut rec = Recorder::new(scene);
+    for (cell, _) in &moving {
+        rec.set(shape, *cell, None);
     }
-}
-
-fn for_each_in(min: IVec3, max: IVec3, mut visit: impl FnMut(IVec3)) {
-    for y in min.y..=max.y {
-        for z in min.z..=max.z {
-            for x in min.x..=max.x {
-                visit(IVec3::new(x, y, z));
-            }
-        }
+    for (cell, material) in &moving {
+        rec.set(shape, *cell + offset, Some(*material));
     }
+    Ok(rec.finish(EditKind::MoveVoxels))
 }
 
 #[cfg(test)]
@@ -152,34 +324,58 @@ mod tests {
     use super::*;
     use crate::edit::History;
     use crate::face::Face;
+    use crate::raycast::HitTarget;
+    use crate::tools::BrushKind;
     use crate::{CHUNK_SIZE, ChunkCoord};
 
     fn material(number: u8) -> MaterialId {
         MaterialId::new(number).unwrap()
     }
 
-    fn attach(scene: &mut Scene, at: IVec3, size: u32) -> Option<Edit> {
-        let hit = RayHit {
+    fn first_model(scene: &Scene) -> NodeId {
+        scene.node(NodeId::ROOT).unwrap().children()[0]
+    }
+
+    fn ground_hit(at: IVec3) -> RayHit {
+        RayHit {
             voxel: at - IVec3::Y,
             face: Face::PosY,
             target: HitTarget::Ground,
-        };
-        let command = Command::ApplyBrush {
+        }
+    }
+
+    fn attach_command(model: NodeId, at: IVec3, size: u32) -> Command {
+        Command::ApplyBrush {
+            model,
             tool: VoxelTool::Attach,
-            brush: Brush { size },
-            hit,
+            brush: Brush {
+                kind: BrushKind::Voxel,
+                size,
+            },
+            hit: ground_hit(at),
+            end: None,
             material: material(1),
-        };
-        apply(scene, &command).unwrap()
+            mirror: Mirror::default(),
+        }
+    }
+
+    fn attach(scene: &mut Scene, at: IVec3, size: u32) -> Option<Edit> {
+        let model = first_model(scene);
+        apply(scene, &attach_command(model, at, size)).unwrap()
+    }
+
+    fn shape_of(scene: &Scene, node: NodeId) -> &crate::Shape {
+        scene.model_shape(node).unwrap().1
     }
 
     #[test]
     fn attach_on_the_ground_fills_a_cube_above_it() {
         let mut scene = Scene::new();
         attach(&mut scene, IVec3::ZERO, 3);
-        assert_eq!(scene.shape().volume().map(Volume::size), Some(IVec3::splat(3)));
-        assert!(scene.shape().get(IVec3::new(0, 2, 0)).is_some());
-        assert!(scene.shape().get(IVec3::new(0, -1, 0)).is_none());
+        let shape = shape_of(&scene, first_model(&scene));
+        assert_eq!(shape.volume().map(crate::Volume::size), Some(IVec3::splat(3)));
+        assert!(shape.get(IVec3::new(0, 2, 0)).is_some());
+        assert!(shape.get(IVec3::new(0, -1, 0)).is_none());
     }
 
     #[test]
@@ -187,7 +383,7 @@ mod tests {
         let mut scene = Scene::new();
         attach(&mut scene, IVec3::ZERO, 1);
         attach(&mut scene, IVec3::new(40, 0, 0), 1);
-        let volume = scene.shape().volume().unwrap();
+        let volume = shape_of(&scene, first_model(&scene)).volume().unwrap();
         assert_eq!(volume.min, IVec3::ZERO);
         assert_eq!(volume.max, IVec3::new(40, 0, 0));
     }
@@ -196,21 +392,22 @@ mod tests {
     fn undo_and_redo_restore_the_same_chunks_across_a_chunk_border() {
         let mut scene = Scene::new();
         let mut history = History::new(10);
+        let model = first_model(&scene);
         let border = IVec3::new(CHUNK_SIZE - 1, 0, 0);
         history.push(attach(&mut scene, IVec3::ZERO, 1).unwrap());
-        let untouched = Arc::clone(scene.shape().chunk(ChunkCoord(IVec3::ZERO)).unwrap());
+        let untouched = Arc::clone(shape_of(&scene, model).chunk(ChunkCoord(IVec3::ZERO)).unwrap());
         history.push(attach(&mut scene, border + IVec3::X, 2).unwrap());
-        assert!(scene.shape().get(border + IVec3::X).is_some());
+        assert!(shape_of(&scene, model).get(border + IVec3::X).is_some());
 
         history.undo(&mut scene);
-        assert!(scene.shape().get(border + IVec3::X).is_none());
+        assert!(shape_of(&scene, model).get(border + IVec3::X).is_none());
         assert!(Arc::ptr_eq(
             &untouched,
-            scene.shape().chunk(ChunkCoord(IVec3::ZERO)).unwrap()
+            shape_of(&scene, model).chunk(ChunkCoord(IVec3::ZERO)).unwrap()
         ));
 
         history.redo(&mut scene);
-        assert!(scene.shape().get(border + IVec3::X).is_some());
+        assert!(shape_of(&scene, model).get(border + IVec3::X).is_some());
     }
 
     #[test]
@@ -223,17 +420,166 @@ mod tests {
     #[test]
     fn unknown_material_is_rejected() {
         let mut scene = Scene::new();
-        let hit = RayHit {
-            voxel: IVec3::NEG_Y,
-            face: Face::PosY,
-            target: HitTarget::Ground,
-        };
-        let command = Command::ApplyBrush {
-            tool: VoxelTool::Attach,
-            brush: Brush::default(),
-            hit,
-            material: material(200),
-        };
+        let model = first_model(&scene);
+        let mut command = attach_command(model, IVec3::ZERO, 1);
+        if let Command::ApplyBrush { material, .. } = &mut command {
+            *material = self::material(200);
+        }
         assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownMaterial(200))));
+    }
+
+    #[test]
+    fn hidden_or_locked_models_reject_voxel_tools() {
+        let mut scene = Scene::new();
+        let model = first_model(&scene);
+        apply(
+            &mut scene,
+            &Command::SetLocked {
+                node: model,
+                locked: true,
+            },
+        )
+        .unwrap();
+        let result = apply(&mut scene, &attach_command(model, IVec3::ZERO, 1));
+        assert!(matches!(result, Err(Error::ModelUnavailable(_))));
+    }
+
+    #[test]
+    fn mirrored_attach_lands_in_the_same_edit_and_undoes_together() {
+        let mut scene = Scene::new();
+        let mut history = History::new(10);
+        let model = first_model(&scene);
+        history.push(attach(&mut scene, IVec3::new(9, 0, 0), 1).unwrap());
+        history.push(attach(&mut scene, IVec3::ZERO, 1).unwrap());
+        let volume = shape_of(&scene, model).volume();
+        let mut command = attach_command(model, IVec3::new(2, 0, 0), 1);
+        if let Command::ApplyBrush { mirror, .. } = &mut command {
+            *mirror = Mirror::around([true, false, false], volume);
+        }
+        let edit = apply(&mut scene, &command).unwrap().unwrap();
+        history.push(edit);
+        let shape = shape_of(&scene, model);
+        assert!(shape.get(IVec3::new(2, 0, 0)).is_some());
+        assert!(shape.get(IVec3::new(7, 0, 0)).is_some());
+        history.undo(&mut scene);
+        let shape = shape_of(&scene, model);
+        assert!(shape.get(IVec3::new(2, 0, 0)).is_none());
+        assert!(shape.get(IVec3::new(7, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn surface_fill_repaints_the_connected_face_and_nothing_else() {
+        let mut scene = Scene::new();
+        attach(&mut scene, IVec3::ZERO, 3);
+        let model = first_model(&scene);
+        let command = Command::Fill {
+            model,
+            mode: FillMode::Surface,
+            hit: RayHit {
+                voxel: IVec3::new(1, 2, 1),
+                face: Face::PosY,
+                target: HitTarget::Voxel,
+            },
+            material: material(40),
+            mirror: Mirror::default(),
+        };
+        apply(&mut scene, &command).unwrap().unwrap();
+        let shape = shape_of(&scene, model);
+        assert_eq!(shape.get(IVec3::new(0, 2, 1)), Some(material(40)));
+        assert_eq!(shape.get(IVec3::new(0, 1, 1)), Some(material(1)));
+    }
+
+    #[test]
+    fn volume_fill_never_leaves_the_volume() {
+        let mut scene = Scene::new();
+        attach(&mut scene, IVec3::ZERO, 1);
+        attach(&mut scene, IVec3::new(3, 0, 3), 3);
+        let model = first_model(&scene);
+        let before = shape_of(&scene, model).volume().unwrap();
+        let command = Command::Fill {
+            model,
+            mode: FillMode::Volume,
+            hit: RayHit {
+                voxel: IVec3::ZERO,
+                face: Face::PosY,
+                target: HitTarget::Voxel,
+            },
+            material: material(7),
+            mirror: Mirror::default(),
+        };
+        apply(&mut scene, &command).unwrap().unwrap();
+        let shape = shape_of(&scene, model);
+        assert_eq!(shape.volume(), Some(before));
+        assert_eq!(
+            shape.used_count(),
+            u64::try_from(before.size().element_product()).unwrap()
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn undoing_every_edit_empties_the_shape_and_redoing_restores_it(
+            strokes in proptest::collection::vec((-40..40_i32, 0..6_i32, -40..40_i32, 1..4_u32), 1..10),
+        ) {
+            let mut scene = Scene::new();
+            let mut history = History::new(64);
+            let model = first_model(&scene);
+            for (x, y, z, size) in strokes {
+                if let Some(edit) = apply(&mut scene, &attach_command(model, IVec3::new(x, y, z), size)).unwrap() {
+                    history.push(edit);
+                }
+            }
+            let filled = shape_of(&scene, model).used_count();
+            while history.can_undo() {
+                history.undo(&mut scene);
+            }
+            proptest::prop_assert_eq!(shape_of(&scene, model).used_count(), 0);
+            while history.can_redo() {
+                history.redo(&mut scene);
+            }
+            proptest::prop_assert_eq!(shape_of(&scene, model).used_count(), filled);
+        }
+
+        #[test]
+        fn mirrored_attach_always_produces_a_symmetric_shape(
+            strokes in proptest::collection::vec((-30..30_i32, 0..6_i32, -30..30_i32, 1..4_u32), 1..8),
+        ) {
+            let mut scene = Scene::new();
+            let model = first_model(&scene);
+            let volume = crate::Volume { min: IVec3::new(-50, 0, -50), max: IVec3::new(50, 10, 50) };
+            for (x, y, z, size) in strokes {
+                let mut command = attach_command(model, IVec3::new(x, y, z), size);
+                if let Command::ApplyBrush { mirror, .. } = &mut command {
+                    *mirror = Mirror::around([true, false, false], Some(volume));
+                }
+                apply(&mut scene, &command).unwrap();
+            }
+            let shape = shape_of(&scene, model);
+            for (cell, _) in shape.voxels() {
+                proptest::prop_assert!(shape.get(IVec3::new(-cell.x, cell.y, cell.z)).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn moving_voxels_grows_the_volume_and_undoes() {
+        let mut scene = Scene::new();
+        let mut history = History::new(10);
+        attach(&mut scene, IVec3::ZERO, 2);
+        let model = first_model(&scene);
+        let selection: Selection = [IVec3::ZERO].into_iter().collect();
+        let command = Command::MoveVoxels {
+            model,
+            selection,
+            offset: IVec3::new(10, 0, 0),
+        };
+        history.push(apply(&mut scene, &command).unwrap().unwrap());
+        let shape = shape_of(&scene, model);
+        assert!(shape.get(IVec3::ZERO).is_none() && shape.get(IVec3::new(10, 0, 0)).is_some());
+        assert_eq!(shape.volume().unwrap().max.x, 10);
+        history.undo(&mut scene);
+        let shape = shape_of(&scene, model);
+        assert!(shape.get(IVec3::ZERO).is_some());
+        assert_eq!(shape.volume().unwrap().max.x, 1);
     }
 }

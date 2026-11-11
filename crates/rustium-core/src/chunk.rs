@@ -2,6 +2,7 @@ use std::fmt;
 
 use glam::IVec3;
 
+use crate::palette::MaterialId;
 use crate::shape::Voxel;
 
 /// Edge length of a [`Chunk`] in voxels.
@@ -35,6 +36,7 @@ pub(crate) fn local_of(position: IVec3) -> IVec3 {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Chunk {
     voxels: Box<[Voxel]>,
+    filled: u32,
 }
 
 impl Chunk {
@@ -42,6 +44,7 @@ impl Chunk {
     pub fn empty() -> Self {
         Self {
             voxels: vec![None; CHUNK_VOLUME].into_boxed_slice(),
+            filled: 0,
         }
     }
 
@@ -57,20 +60,43 @@ impl Chunk {
             return false;
         };
         let changed = *slot != voxel;
-        *slot = voxel;
+        if changed {
+            self.filled = self.filled + u32::from(voxel.is_some()) - u32::from(slot.is_some());
+            *slot = voxel;
+        }
         changed
     }
 
     /// Whether every voxel is empty.
     pub fn is_empty(&self) -> bool {
-        self.voxels.iter().all(Option::is_none)
+        self.filled == 0
+    }
+
+    /// Number of filled voxels.
+    pub fn filled(&self) -> u32 {
+        self.filled
+    }
+
+    /// Every filled voxel as its position inside the chunk and its Material.
+    pub fn iter(&self) -> impl Iterator<Item = (IVec3, MaterialId)> + '_ {
+        self.voxels.iter().enumerate().filter_map(|(idx, voxel)| {
+            let material = (*voxel)?;
+            let idx = i32::try_from(idx).ok()?;
+            let local = IVec3::new(
+                idx % CHUNK_SIZE,
+                idx / (CHUNK_SIZE * CHUNK_SIZE),
+                (idx / CHUNK_SIZE) % CHUNK_SIZE,
+            );
+            Some((local, material))
+        })
     }
 }
 
 impl fmt::Debug for Chunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let filled = self.voxels.iter().filter(|voxel| voxel.is_some()).count();
-        f.debug_struct("Chunk").field("filled", &filled).finish()
+        f.debug_struct("Chunk")
+            .field("filled", &self.filled)
+            .finish_non_exhaustive()
     }
 }
 

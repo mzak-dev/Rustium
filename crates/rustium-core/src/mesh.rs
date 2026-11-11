@@ -1,3 +1,9 @@
+#![expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "loop counters and run lengths never exceed 34"
+)]
+
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -39,9 +45,11 @@ const PADDED_I32: i32 = CHUNK_SIZE + 2;
 ///
 /// Neighbouring chunks are read for face culling and ambient occlusion, so a chunk must be remeshed when a
 /// voxel on the border of a neighbour changes.
+///
+/// Binary greedy meshing: occupancy lives in `u64` column bitmasks (one bit per voxel along an axis, with the
+/// one-voxel border), so the exposed faces of a whole column fall out of two shifts, and runs of equal faces
+/// are merged with bit scans instead of per-voxel comparisons.
 // HOT PATH: runs for every changed chunk during a gesture; no allocations beyond growing `mesh`.
-// ponytail: classic slice-mask greedy meshing; switch to binary greedy meshing (u64 column masks) if
-// profiling shows remeshing over ~1 ms per chunk.
 pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
     mesh.vertices.clear();
     mesh.indices.clear();
@@ -49,8 +57,11 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
         return;
     }
     let padded = PaddedChunk::new(shape, coord);
+    let columns = Columns::new(&padded);
     let origin = coord.origin().as_vec3();
-    let mut mask = [0_u32; SIZE * SIZE];
+    // `rows[depth * SIZE + v]` has bit `u` set when the voxel at (u, v) of that slice has an exposed face.
+    let mut rows = [0_u32; SIZE * SIZE];
+    let mut keys = [0_u32; SIZE * SIZE];
 
     for face in Face::ALL {
         let axis = face.axis();
@@ -60,79 +71,149 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
         let u_dir = unit(u_axis);
         let v_dir = unit(v_axis);
 
-        for depth in 0..CHUNK_SIZE {
-            // Build the mask of visible faces in this slice; each entry encodes Color + 4 AO values.
-            for v in 0..CHUNK_SIZE {
-                for u in 0..CHUNK_SIZE {
+        rows.fill(0);
+        for v in 0..SIZE {
+            for u in 0..SIZE {
+                let column = columns.column(axis, u, v);
+                let exposed = if face.is_positive() {
+                    column & !(column >> 1)
+                } else {
+                    column & !(column << 1)
+                };
+                let mut bits = exposed & INNER_BITS;
+                while bits != 0 {
+                    let depth = bits.trailing_zeros() as usize - 1;
+                    bits &= bits - 1;
+                    if let Some(row) = rows.get_mut(depth * SIZE + v) {
+                        *row |= 1 << u;
+                    }
+                }
+            }
+        }
+
+        for depth in 0..SIZE {
+            let Some(slice) = rows.get_mut(depth * SIZE..(depth + 1) * SIZE) else {
+                continue;
+            };
+            // Key of every exposed face: Color + 4 AO values.
+            for (v, &row) in slice.iter().enumerate() {
+                let mut bits = row;
+                while bits != 0 {
+                    let u = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
                     let mut position = IVec3::ZERO;
-                    position[axis] = depth;
-                    position[u_axis] = u;
-                    position[v_axis] = v;
-                    let color = padded.get(position);
-                    let key = if color != 0 && padded.get(position + normal) == 0 {
-                        let ao = |su: i32, sv: i32| -> u32 {
-                            let outside = position + normal;
-                            let side_u = padded.get(outside + u_dir * su) != 0;
-                            let side_v = padded.get(outside + v_dir * sv) != 0;
-                            let corner = padded.get(outside + u_dir * su + v_dir * sv) != 0;
-                            if side_u && side_v {
-                                0
-                            } else {
-                                3 - u32::from(side_u) - u32::from(side_v) - u32::from(corner)
-                            }
-                        };
-                        let ao = ao(-1, -1) | ao(1, -1) << 2 | ao(1, 1) << 4 | ao(-1, 1) << 6;
-                        u32::from(color) | ao << 8 | 1 << 16
-                    } else {
-                        0
-                    };
-                    mask[slot(u, v)] = key;
+                    position[axis] = depth as i32;
+                    position[u_axis] = u as i32;
+                    position[v_axis] = v as i32;
+                    if let Some(key) = keys.get_mut(v * SIZE + u) {
+                        *key = face_key(&padded, position, normal, u_dir, v_dir);
+                    }
                 }
             }
 
             // Merge equal neighbours into rectangles.
-            for v in 0..CHUNK_SIZE {
-                let mut u = 0;
-                while u < CHUNK_SIZE {
-                    let key = mask[slot(u, v)];
-                    if key == 0 {
-                        u += 1;
-                        continue;
+            for v in 0..SIZE {
+                while let Some(&row) = slice.get(v) {
+                    if row == 0 {
+                        break;
                     }
+                    let u = row.trailing_zeros() as usize;
+                    let key = keys.get(v * SIZE + u).copied().unwrap_or(0);
+                    let run = (!(row >> u)).trailing_zeros() as usize;
                     let mut width = 1;
-                    while u + width < CHUNK_SIZE && mask[slot(u + width, v)] == key {
+                    while width < run && keys.get(v * SIZE + u + width) == Some(&key) {
                         width += 1;
                     }
+                    let span = (((1_u64 << width) - 1) as u32) << u;
                     let mut height = 1;
-                    'grow: while v + height < CHUNK_SIZE {
+                    'grow: while v + height < SIZE {
+                        if slice.get(v + height).is_none_or(|next| next & span != span) {
+                            break;
+                        }
                         for du in 0..width {
-                            if mask[slot(u + du, v + height)] != key {
+                            if keys.get((v + height) * SIZE + u + du) != Some(&key) {
                                 break 'grow;
                             }
                         }
                         height += 1;
                     }
-                    for dv in 0..height {
-                        for du in 0..width {
-                            mask[slot(u + du, v + dv)] = 0;
-                        }
+                    for next in slice.iter_mut().skip(v).take(height) {
+                        *next &= !span;
                     }
                     let mut corner = IVec3::ZERO;
-                    corner[axis] = depth + i32::from(face.is_positive());
-                    corner[u_axis] = u;
-                    corner[v_axis] = v;
+                    corner[axis] = depth as i32 + i32::from(face.is_positive());
+                    corner[u_axis] = u as i32;
+                    corner[v_axis] = v as i32;
                     push_quad(
                         mesh,
                         origin + corner.as_vec3(),
-                        u_dir * width,
-                        v_dir * height,
+                        u_dir * width as i32,
+                        v_dir * height as i32,
                         face,
                         key,
                     );
-                    u += width;
                 }
             }
         }
+    }
+}
+
+/// Bits 1..=32 of a column: the chunk's own voxels, without the border.
+const INNER_BITS: u64 = ((1_u64 << SIZE) - 1) << 1;
+
+/// Merge key of the exposed face of the voxel at `position`: Color (bits 0–7), four AO values (8–15) and a
+/// marker bit so a key is never zero.
+fn face_key(padded: &PaddedChunk, position: IVec3, normal: IVec3, u_dir: IVec3, v_dir: IVec3) -> u32 {
+    let material = padded.get(position);
+    let ao = |su: i32, sv: i32| -> u32 {
+        let outside = position + normal;
+        let side_u = padded.get(outside + u_dir * su) != 0;
+        let side_v = padded.get(outside + v_dir * sv) != 0;
+        let corner = padded.get(outside + u_dir * su + v_dir * sv) != 0;
+        if side_u && side_v {
+            0
+        } else {
+            3 - u32::from(side_u) - u32::from(side_v) - u32::from(corner)
+        }
+    };
+    let ao = ao(-1, -1) | ao(1, -1) << 2 | ao(1, 1) << 4 | ao(-1, 1) << 6;
+    u32::from(material) | ao << 8 | 1 << 16
+}
+
+/// Occupancy of the padded chunk as one `u64` per voxel column and axis; bit `i` is padded coordinate `i`.
+struct Columns {
+    /// `[axis * PADDED² + padded v * PADDED + padded u]`, with u and v the two axes following `axis` cyclically.
+    bits: Box<[u64]>,
+}
+
+impl Columns {
+    // HOT PATH: one pass over the padded voxels.
+    fn new(padded: &PaddedChunk) -> Self {
+        let mut bits = vec![0_u64; 3 * PADDED * PADDED].into_boxed_slice();
+        for (y, plane) in padded.voxels.as_chunks::<{ PADDED * PADDED }>().0.iter().enumerate() {
+            for (z, line) in plane.as_chunks::<PADDED>().0.iter().enumerate() {
+                for (x, &voxel) in line.iter().enumerate() {
+                    if voxel == 0 {
+                        continue;
+                    }
+                    // Axis 0 (X): u = Y, v = Z. Axis 1 (Y): u = Z, v = X. Axis 2 (Z): u = X, v = Y.
+                    for (axis, index, bit) in [(0, z * PADDED + y, x), (1, x * PADDED + z, y), (2, y * PADDED + x, z)] {
+                        if let Some(column) = bits.get_mut(axis * PADDED * PADDED + index) {
+                            *column |= 1 << bit;
+                        }
+                    }
+                }
+            }
+        }
+        Self { bits }
+    }
+
+    /// The column along `axis` at chunk-local `(u, v)`.
+    fn column(&self, axis: usize, u: usize, v: usize) -> u64 {
+        self.bits
+            .get(axis * PADDED * PADDED + (v + 1) * PADDED + u + 1)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -168,10 +249,6 @@ fn unit(axis: usize) -> IVec3 {
     let mut vector = IVec3::ZERO;
     vector[axis] = 1;
     vector
-}
-
-fn slot(u: i32, v: i32) -> usize {
-    usize::try_from(u + v * CHUNK_SIZE).unwrap_or(0)
 }
 
 /// The chunk plus a one-voxel border from its 26 neighbours, as raw Color numbers (0 = empty).

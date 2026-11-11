@@ -139,7 +139,7 @@ fn wire_line(point: vec3<f32>, hit: Hit) -> f32 {
     ));
     let cell = vec3<i32>(floor(local_point - local_normal * 0.5));
     let front = vec3<i32>(local_normal);
-    let width = 0.07;
+    let width = 0.06;
     for (var axis = 0; axis < 3; axis += 1) {
         if (front[axis] != 0) {
             continue;

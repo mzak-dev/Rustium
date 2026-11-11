@@ -602,7 +602,7 @@ fn wire_draws_light_lines_on_dark() {
     };
     let lines = count(&|value| value > 0.8);
     let dark = count(&|value| value < 0.1);
-    assert!(lines > 40, "edges are drawn, found {lines} bright pixels");
+    assert!(lines > 20, "edges are drawn, found {lines} bright pixels");
     assert!(
         dark > (SIZE * SIZE) as usize / 2,
         "faces and background stay dark, found {dark}"

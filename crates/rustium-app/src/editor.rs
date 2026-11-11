@@ -174,6 +174,13 @@ pub(crate) struct Distance {
     pub(crate) metres: f32,
 }
 
+/// What a finished script run did.
+#[derive(Debug)]
+pub(crate) struct ScriptRun {
+    pub(crate) changed: bool,
+    pub(crate) log: Vec<String>,
+}
+
 /// The document plus everything about how the user is editing it.
 #[derive(Debug)]
 pub(crate) struct Editor {
@@ -791,20 +798,63 @@ impl Editor {
 
     /// Applies a Command and marks the touched chunks for remeshing; the caller decides about History.
     fn apply_command(&mut self, command: &Command) -> Option<Edit> {
-        match apply(&mut self.scene, command) {
-            Ok(Some(edit)) => {
-                let changed: Vec<(ShapeId, ChunkCoord)> = edit.changed_chunks().collect();
-                self.mark_dirty(changed);
-                self.revision += 1;
-                self.palette_dirty |= edit.touches_materials();
-                Some(edit)
-            }
-            Ok(None) => None,
+        match self.apply_checked(command) {
+            Ok(edit) => edit,
             Err(error) => {
                 warn!(%error, "command rejected");
                 None
             }
         }
+    }
+
+    /// Like [`Editor::apply_command`], but reports why a Command was rejected.
+    fn apply_checked(&mut self, command: &Command) -> Result<Option<Edit>, rustium_core::Error> {
+        let edit = apply(&mut self.scene, command)?;
+        if let Some(edit) = &edit {
+            self.note_applied(edit);
+        }
+        Ok(edit)
+    }
+
+    /// Bookkeeping for an Edit that is already applied to the Scene: remesh, re-upload, bump the revision.
+    fn note_applied(&mut self, edit: &Edit) {
+        let changed: Vec<(ShapeId, ChunkCoord)> = edit.changed_chunks().collect();
+        self.mark_dirty(changed);
+        self.revision += 1;
+        self.palette_dirty |= edit.touches_materials();
+    }
+
+    /// Applies a Command from outside the viewport (MCP) as one History step. Unlike [`Editor::execute`] it
+    /// reports rejections; returns whether anything changed.
+    pub(crate) fn execute_checked(&mut self, command: &Command) -> Result<bool, rustium_core::Error> {
+        self.release();
+        let Some(edit) = self.apply_checked(command)? else {
+            return Ok(false);
+        };
+        self.history.push(edit);
+        self.validate();
+        Ok(true)
+    }
+
+    /// Runs a Luau script on the Model `model` as one History step. A failing script changes nothing.
+    pub(crate) fn run_script(
+        &mut self,
+        model: NodeId,
+        source: &str,
+        limits: &rustium_script::Limits,
+    ) -> Result<ScriptRun, rustium_script::Error> {
+        self.release();
+        let output = rustium_script::run(&mut self.scene, model, source, limits)?;
+        let changed = output.edit.is_some();
+        if let Some(edit) = output.edit {
+            self.note_applied(&edit);
+            self.history.push(edit);
+            self.validate();
+        }
+        Ok(ScriptRun {
+            changed,
+            log: output.log,
+        })
     }
 
     /// Applies a Command as its own History step; returns the Nodes it created.

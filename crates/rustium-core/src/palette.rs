@@ -57,6 +57,17 @@ impl Palette {
     /// Most Materials one Palette can hold.
     pub const MAX_LEN: usize = 255;
 
+    /// Changes the color of `id`; returns whether anything changed.
+    pub(crate) fn set_color(&mut self, id: MaterialId, color: [u8; 3]) -> bool {
+        match self.materials.get_mut(id.slot()) {
+            Some(material) if material.color != color => {
+                material.color = color;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Material for `id`, if the Palette has that many entries.
     pub fn get(&self, id: MaterialId) -> Option<&Material> {
         self.materials.get(id.slot())

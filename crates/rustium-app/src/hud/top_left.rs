@@ -88,6 +88,10 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
             item(ui, hud.tr("menu-open"), "Ctrl O", false).on_disabled_hover_text(hud.tr("later-milestone"));
             item(ui, hud.tr("menu-save"), "Ctrl S", false).on_disabled_hover_text(hud.tr("later-milestone"));
             ui.separator();
+            if item(ui, hud.tr("menu-run-script"), "", true).clicked() {
+                hud.send(AppCommand::RunScript);
+            }
+            ui.separator();
             if item(ui, hud.tr("menu-settings"), "Ctrl ,", true).clicked() {
                 hud.ui.settings_section = Some(Section::General);
             }

@@ -66,7 +66,7 @@ mod tools;
 mod transform;
 
 pub use chunk::{CHUNK_SIZE, Chunk, ChunkCoord};
-pub use command::{Command, VoxelTool, apply};
+pub use command::{COORD_LIMIT, Command, MAX_BATCH, VoxelTool, apply};
 pub use edit::{Edit, EditKind, History};
 pub use error::Error;
 pub use face::Face;

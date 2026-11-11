@@ -1,0 +1,17 @@
+[package]
+name = "rustium-script"
+description = "Sandboxed Luau scripting for the Rustium voxel editor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+glam.workspace = true
+mlua.workspace = true
+rustium-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -4,14 +4,16 @@ use egui::load::SizedTexture;
 use egui::{
     Color32, ComboBox, Context, DragValue, Id, Key, Rect, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, vec2,
 };
+use rustium_mcp::Permission;
 
 use crate::hud::widgets::{self, Look};
-use crate::hud::{AppCommand, Glass, Hud};
+use crate::hud::{self, AppCommand, Glass, Hud};
 use crate::icons::Icon;
+use crate::mcp::{McpStatus, McpTransport, permission_key};
 use crate::settings::{Accent, Backend, FrameLimit, Language, Motion, OrbitStyle, Settings};
 use crate::theme;
 
-/// Sections of the Settings window (MCP joins in the MCP milestone).
+/// Sections of the Settings window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
     General,
@@ -19,15 +21,17 @@ pub(crate) enum Section {
     Viewport,
     Input,
     Performance,
+    Mcp,
 }
 
 impl Section {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Interface,
         Self::Viewport,
         Self::Input,
         Self::Performance,
+        Self::Mcp,
     ];
 
     fn title_key(self) -> &'static str {
@@ -37,6 +41,7 @@ impl Section {
             Self::Viewport => "section-viewport",
             Self::Input => "section-input",
             Self::Performance => "section-performance",
+            Self::Mcp => "section-mcp",
         }
     }
 
@@ -47,6 +52,7 @@ impl Section {
             Self::Viewport => Icon::Cube,
             Self::Input => Icon::Grid,
             Self::Performance => Icon::Attach,
+            Self::Mcp => Icon::Folder,
         }
     }
 
@@ -83,6 +89,17 @@ impl Section {
                 "setting-backend",
                 "setting-vsync",
                 "setting-frame-limit",
+            ],
+            Self::Mcp => &[
+                "setting-mcp-enabled",
+                "setting-mcp-transport",
+                "setting-mcp-port",
+                "mcp-read-model",
+                "mcp-edit-voxels",
+                "mcp-edit-palette",
+                "mcp-run-scripts",
+                "mcp-start-renders",
+                "mcp-copy-config",
             ],
         }
     }
@@ -271,6 +288,7 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section) {
                 Section::Viewport => viewport(ui, hud),
                 Section::Input => input(ui, hud),
                 Section::Performance => performance(ui, hud),
+                Section::Mcp => mcp(ui, hud),
             });
     });
 
@@ -604,4 +622,58 @@ fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
                 }
             });
     });
+}
+
+fn mcp(ui: &mut Ui, hud: &mut Hud<'_>) {
+    let i18n = hud.i18n;
+    let status = hud.mcp_status;
+    let status_text = match status {
+        McpStatus::Failed(message) => format!("{}: {message}", status.text(i18n)),
+        other => other.text(i18n),
+    };
+    let settings: &mut Settings = hud.settings;
+    row(ui, &i18n.tr("setting-mcp-enabled"), Some(&status_text), |ui| {
+        widgets::switch(ui, &mut settings.mcp.enabled, true);
+    });
+    row(
+        ui,
+        &i18n.tr("setting-mcp-transport"),
+        Some(&i18n.tr("setting-mcp-transport-hint")),
+        |ui| {
+            widgets::segmented(
+                ui,
+                &mut settings.mcp.transport,
+                &[
+                    (McpTransport::Stdio, "stdio".to_owned()),
+                    (McpTransport::Http, "HTTP".to_owned()),
+                ],
+                true,
+            );
+        },
+    );
+    row(
+        ui,
+        &i18n.tr("setting-mcp-port"),
+        Some(&i18n.tr("setting-mcp-port-hint")),
+        |ui| {
+            ui.add(DragValue::new(&mut settings.mcp.port).range(1024..=65535).speed(1));
+        },
+    );
+    for permission in Permission::ALL {
+        row(ui, &i18n.tr(permission_key(permission)), None, |ui| {
+            widgets::switch(ui, settings.mcp.permissions.flag_mut(permission), true);
+        });
+    }
+    let mut copy = false;
+    row(
+        ui,
+        &i18n.tr("mcp-copy-config"),
+        Some(&i18n.tr("setting-mcp-copy-hint")),
+        |ui| {
+            copy = widgets::text_button(ui, &i18n.tr("mcp-copy-button"), 32.0, Look::On, true).clicked();
+        },
+    );
+    if copy {
+        hud::copy_client_config(ui.ctx(), hud);
+    }
 }

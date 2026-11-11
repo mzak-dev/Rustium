@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use glam::{IVec3, Vec3};
 use rustium_core::{
-    Brush, BrushKind, ChunkCoord, Command, Edit, Face, FillMode, History, HitTarget, MaterialId, Mirror, NodeId,
+    Brush, BrushKind, ChunkCoord, ColorId, Command, Edit, Face, FillMode, History, HitTarget, Mirror, NodeId,
     Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, SurfaceConstants, Volume, VoxelTool, apply,
-    brush_bounds, pick_scene, select_box, select_by_material,
+    brush_bounds, pick_scene, select_box, select_by_color,
 };
 use tracing::warn;
 
@@ -190,7 +190,7 @@ pub(crate) struct Editor {
     pub(crate) brush: Brush,
     pub(crate) fill_mode: FillMode,
     pub(crate) mirror: [bool; 3],
-    pub(crate) slots: [MaterialId; 10],
+    pub(crate) slots: [ColorId; 10],
     pub(crate) active_slot: usize,
     /// The Node the user has stepped into.
     pub(crate) focus: NodeId,
@@ -227,9 +227,9 @@ impl Editor {
     pub(crate) fn new(voxel_size: f32, undo_steps: usize) -> Self {
         let scene = Scene::with_voxel_size(voxel_size);
         let slots = DEFAULT_SLOTS.map(|number| {
-            MaterialId::new(number)
+            ColorId::new(number)
                 .filter(|id| scene.palette().get(*id).is_some())
-                .unwrap_or(MaterialId::FIRST)
+                .unwrap_or(ColorId::FIRST)
         });
         let focus = scene
             .node(NodeId::ROOT)
@@ -269,7 +269,7 @@ impl Editor {
         (self.tool, self.brush, self.fill_mode, self.mirror) = (tool, brush, fill_mode, mirror);
     }
 
-    pub(crate) fn material(&self) -> MaterialId {
+    pub(crate) fn color(&self) -> ColorId {
         self.slots[self.active_slot.min(self.slots.len() - 1)]
     }
 
@@ -554,9 +554,9 @@ impl Editor {
     fn pick_color(&mut self, hit: &SceneHit) {
         if let (HitTarget::Voxel, Some(node)) = (hit.world.target, hit.node)
             && let Some((_, shape)) = self.scene.model_shape(node)
-            && let Some(material) = shape.get(hit.local.voxel)
+            && let Some(color) = shape.get(hit.local.voxel)
         {
-            self.slots[self.active_slot] = material;
+            self.slots[self.active_slot] = color;
         }
     }
 
@@ -649,7 +649,7 @@ impl Editor {
             model: self.focus,
             mode: self.fill_mode,
             hit: self.local_hit(hit),
-            material: self.material(),
+            color: self.color(),
             mirror: self.mirror_now(),
         };
         if let Some(edit) = self.apply_command(&command) {
@@ -662,13 +662,13 @@ impl Editor {
             return;
         };
         let local = self.local_hit(hit);
-        let Some(material) = (local.target == HitTarget::Voxel)
+        let Some(color) = (local.target == HitTarget::Voxel)
             .then(|| shape.get(local.voxel))
             .flatten()
         else {
             return;
         };
-        let picked = select_by_material(shape, material);
+        let picked = select_by_color(shape, color);
         self.selection = if extend { self.selection.union(&picked) } else { picked };
     }
 
@@ -790,7 +790,7 @@ impl Editor {
             brush: self.brush,
             hit,
             end,
-            material: self.material(),
+            color: self.color(),
             mirror,
         };
         self.apply_command(&command)
@@ -871,13 +871,13 @@ impl Editor {
 
     pub(crate) fn undo(&mut self) {
         self.release();
-        let (changed, materials) = self
+        let (changed, colors) = self
             .history
             .undo(&mut self.scene)
             .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
             .unwrap_or_default();
         self.revision += 1;
-        self.palette_dirty |= materials;
+        self.palette_dirty |= colors;
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
@@ -885,19 +885,19 @@ impl Editor {
 
     pub(crate) fn redo(&mut self) {
         self.release();
-        let (changed, materials) = self
+        let (changed, colors) = self
             .history
             .redo(&mut self.scene)
             .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
             .unwrap_or_default();
         self.revision += 1;
-        self.palette_dirty |= materials;
+        self.palette_dirty |= colors;
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
     }
 
-    /// Ends a material slider drag: its Edits become one History step.
+    /// Ends a Material slider drag: its Edits become one History step.
     pub(crate) fn finish_material_edit(&mut self) {
         if let Some(edit) = self.material_edit.take() {
             self.history.push(edit);
@@ -927,7 +927,7 @@ impl Editor {
     pub(crate) fn assign_graph(&mut self, graph: u32) {
         self.finish_material_edit();
         self.apply_material_command(&Command::AssignGraph {
-            id: self.material(),
+            id: self.color(),
             graph,
         });
         self.finish_material_edit();
@@ -1053,7 +1053,7 @@ mod tests {
         editor.release();
     }
 
-    fn voxel(editor: &Editor, cell: IVec3) -> Option<MaterialId> {
+    fn voxel(editor: &Editor, cell: IVec3) -> Option<ColorId> {
         editor
             .scene
             .model_shape(editor.focus)
@@ -1099,10 +1099,10 @@ mod tests {
     }
 
     #[test]
-    fn pick_color_puts_the_voxel_material_in_the_active_slot() {
+    fn pick_color_puts_the_voxel_color_in_the_active_slot() {
         let mut editor = Editor::new(0.25, 50);
         editor.active_slot = 0;
-        let placed = editor.material();
+        let placed = editor.color();
         click(&mut editor, 0, 0);
         editor.active_slot = 5;
         editor.tool = Tool::Pick;
@@ -1193,9 +1193,9 @@ mod tests {
     }
 
     #[test]
-    fn a_slider_drag_is_one_history_step_and_flags_the_materials() {
+    fn a_slider_drag_is_one_history_step_and_flags_the_colors() {
         let mut editor = Editor::new(0.25, 50);
-        assert!(editor.take_palette_dirty(), "a new editor uploads its materials once");
+        assert!(editor.take_palette_dirty(), "a new editor uploads its colors once");
         assert!(!editor.take_palette_dirty());
         let index = editor.create_graph();
         assert_eq!(index, 1);
@@ -1212,14 +1212,14 @@ mod tests {
         assert_eq!(editor.history.done().count(), 2);
         editor.undo();
         assert_eq!(editor.scene.material_graphs()[1].surface, SurfaceConstants::MATTE);
-        assert!(editor.take_palette_dirty(), "undo changes the materials too");
+        assert!(editor.take_palette_dirty(), "undo changes the colors too");
     }
 
     #[test]
     fn assigning_a_graph_changes_the_active_color_only() {
         let mut editor = Editor::new(0.25, 50);
         let index = editor.create_graph();
-        let active = editor.material();
+        let active = editor.color();
         editor.assign_graph(index);
         assert_eq!(editor.scene.palette().get(active).unwrap().graph, index);
         let users = editor

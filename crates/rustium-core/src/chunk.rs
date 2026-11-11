@@ -2,7 +2,7 @@ use std::fmt;
 
 use glam::IVec3;
 
-use crate::palette::MaterialId;
+use crate::palette::ColorId;
 use crate::shape::Voxel;
 
 /// Edge length of a [`Chunk`] in voxels.
@@ -77,17 +77,17 @@ impl Chunk {
         self.filled
     }
 
-    /// Every filled voxel as its position inside the chunk and its Material.
-    pub fn iter(&self) -> impl Iterator<Item = (IVec3, MaterialId)> + '_ {
+    /// Every filled voxel as its position inside the chunk and its Color.
+    pub fn iter(&self) -> impl Iterator<Item = (IVec3, ColorId)> + '_ {
         self.voxels.iter().enumerate().filter_map(|(idx, voxel)| {
-            let material = (*voxel)?;
+            let color = (*voxel)?;
             let idx = i32::try_from(idx).ok()?;
             let local = IVec3::new(
                 idx % CHUNK_SIZE,
                 idx / (CHUNK_SIZE * CHUNK_SIZE),
                 (idx / CHUNK_SIZE) % CHUNK_SIZE,
             );
-            Some((local, material))
+            Some((local, color))
         })
     }
 }

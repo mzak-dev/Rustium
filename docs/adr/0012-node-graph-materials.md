@@ -13,4 +13,4 @@ A palette entry is now a Color (sRGB plus a reference to one Material), and a Ma
 
 - Changing a graph rebuilds the material pipelines, so the UI shows a "Compiled" status.
 - Glass (transmission, IOR) lives on the Surface output and haze on a separate Volume output.
-- The core types still named `Material`/`MaterialId` for palette entries get renamed to `Color`/`ColorId` once the M2 and M3 branches have merged.
+- The core palette types were renamed from `Material`/`MaterialId` to `Color`/`ColorId`; `Material` now means the node graph only (still `MaterialGraph` in code until the graph editor lands).

@@ -26,8 +26,8 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
-// Binding 1 is the material table, declared in material.wgsl.
-// 32768 voxels per chunk, one byte each (the Material id, 0 = empty), four to a word.
+// Binding 1 is the Color and Material table, declared in material.wgsl.
+// 32768 voxels per chunk, one byte each (the Color id, 0 = empty), four to a word.
 @group(0) @binding(2) var<storage, read> pool: array<u32>;
 // The chunk grids of all Shapes, one after the other: pool slot + 1 per cell, or 0 for a cell without voxels.
 @group(0) @binding(3) var<storage, read> chunk_grid: array<u32>;
@@ -105,7 +105,7 @@ struct Hit {
     t: f32,
     // Face normal in Scene space, pointing back towards the ray origin.
     normal: vec3<f32>,
-    material: u32,
+    color_index: u32,
     // Index of the Model that was hit.
     model: u32,
 };
@@ -358,18 +358,18 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
         }
 
         var surface: Surface;
-        if (hit.material == GROUND_ID) {
+        if (hit.color_index == GROUND_ID) {
             surface.base_color = params.ground.rgb;
             surface.normal = hit.normal;
             surface.roughness = 1.0;
             surface.ior = 1.5;
         } else {
-            surface = evaluate_material(hit.material, point, hit.normal);
+            surface = evaluate_material(hit.color_index, point, hit.normal);
             color += throughput * surface.emission_color * surface.emission_strength;
         }
         let normal = surface.normal;
 
-        if (hit.material == GROUND_ID && bounces == 0u && params.options.x == 2u) {
+        if (hit.color_index == GROUND_ID && bounces == 0u && params.options.x == 2u) {
             // Shadow catcher: show only how much light the ground loses to the model.
             let up = vec3<f32>(0.0, 1.0, 0.0);
             let sun = sun_sample();
@@ -400,7 +400,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
                     dir = normalize(dir + surface.roughness * surface.roughness * 0.5 * unit_sphere());
                 }
                 origin = point - normal * EPS;
-                inside = hit.material;
+                inside = hit.color_index;
                 inside_model = hit.model;
                 throughput *= surface.base_color;
             }

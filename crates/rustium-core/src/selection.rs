@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use glam::IVec3;
 
-use crate::palette::MaterialId;
+use crate::palette::ColorId;
 use crate::shape::Shape;
 
 /// A set of Voxels inside the Focus Model that later Tools act on, in the Model's own cell coordinates.
@@ -83,11 +83,11 @@ pub fn select_box(shape: &Shape, a: IVec3, b: IVec3) -> Selection {
         .collect()
 }
 
-/// Every voxel of `shape` that shows `material`.
-pub fn select_by_material(shape: &Shape, material: MaterialId) -> Selection {
+/// Every voxel of `shape` that shows `color`.
+pub fn select_by_color(shape: &Shape, color: ColorId) -> Selection {
     shape
         .voxels()
-        .filter(|(_, voxel)| *voxel == material)
+        .filter(|(_, voxel)| *voxel == color)
         .map(|(cell, _)| cell)
         .collect()
 }
@@ -99,20 +99,20 @@ mod tests {
     #[test]
     fn box_selection_takes_only_filled_voxels_inside() {
         let mut shape = Shape::new();
-        let material = MaterialId::new(1);
-        shape.set(IVec3::new(1, 1, 1), material);
-        shape.set(IVec3::new(5, 5, 5), material);
+        let color = ColorId::new(1);
+        shape.set(IVec3::new(1, 1, 1), color);
+        shape.set(IVec3::new(5, 5, 5), color);
         let selection = select_box(&shape, IVec3::new(3, 3, 3), IVec3::ZERO);
         assert_eq!(selection.len(), 1);
         assert!(selection.contains(IVec3::ONE));
     }
 
     #[test]
-    fn color_selection_matches_the_material() {
+    fn color_selection_matches_the_color() {
         let mut shape = Shape::new();
-        shape.set(IVec3::ZERO, MaterialId::new(1));
-        shape.set(IVec3::X, MaterialId::new(2));
-        let selection = select_by_material(&shape, MaterialId::FIRST);
+        shape.set(IVec3::ZERO, ColorId::new(1));
+        shape.set(IVec3::X, ColorId::new(2));
+        let selection = select_by_color(&shape, ColorId::FIRST);
         assert_eq!(selection.len(), 1);
         assert!(selection.contains(IVec3::ZERO));
     }

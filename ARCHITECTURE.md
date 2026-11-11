@@ -46,10 +46,10 @@ Scene upload and traversal are separate so a ray-query backend can reuse the upl
   (Fresnel + refraction, tinted by the base color), emission found by path hits, an analytic sky with presets, and
   a ground of None, Studio or Shadow catcher.
 - **Materials**: a Scene holds material graphs (index 0 is the Default material); each Palette Color points at one
-  (`Material::graph`). Today a graph is constant Surface parameters. `GpuMaterialTable` uploads one record per
+  (`Color::graph`). Today a graph is constant Surface parameters. `GpuMaterialTable` uploads one record per
   graph and one entry per Color into a single uniform buffer shared by the raster pass and the path tracer.
   **Contract:** `fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>) -> Surface`
-  in `shaders/material.wgsl` is the only code that reads material data; both renderers shade through it. The
+  in `shaders/material.wgsl` is the only code that reads Color and Material data; both renderers shade through it. The
   Effects milestone replaces its body with WGSL generated from the node graphs. Raster shows emission unlit and
   treats transmission as opaque until M4.
 - **Accumulation**: one pass per frame writes `prev + (sample - prev) / n` into an `Rgba32Float` texture,
@@ -80,7 +80,7 @@ UI thread: user_event → McpHost::drain → automation::handle → Editor::exec
 - **One sync/async boundary**, `Bridge::call`. Past it the server never sees Scene state; the UI thread builds the
   JSON answer. tokio is used only in `rustium-mcp`, on one named thread; every connection task lives in a
   `JoinSet` owned by the accept loop, and dropping or stopping the `Server` cancels and joins everything.
-- **Every change is a Command.** MCP edits (`SetVoxels`, `ApplyBrush`, `SetMaterialColor`) and script runs go
+- **Every change is a Command.** MCP edits (`SetVoxels`, `ApplyBrush`, `SetColor`) and script runs go
   through `rustium_core::apply` and land in `History` as one step each, so they show up live and undo with Ctrl+Z.
   Voxel Commands name a Model by `NodeId` and use that Model's cell space; MCP tools and scripts default to the
   Focus Model and refuse a Group, a hidden Model or a locked Model with a clear error. A script buffers its writes

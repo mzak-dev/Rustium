@@ -13,7 +13,7 @@ const DEFAULT_REGION_LIMIT: usize = 10_000;
 const MAX_REGION_LIMIT: usize = 100_000;
 
 const INSTRUCTIONS: &str = "Rustium is a voxel editor. Voxel positions are integer (x, y, z) with Y up, in the cells of a Model (a Model node of the scene tree; omit `model` to use the Focus Model); \
-materials are palette numbers 1-255. Every edit is applied live in the editor and is one undo step for the \
+colors are palette numbers 1-255. Every edit is applied live in the editor and is one undo step for the \
 user. Tools are grouped by permission; a tool whose permission the user switched off returns an error.";
 
 /// The MCP tools of the editor; each one becomes a [`Request`] for the UI thread.
@@ -54,8 +54,8 @@ pub(crate) struct VoxelParam {
     y: i32,
     /// Z position.
     z: i32,
-    /// Palette material 1-255; omit or 0 to erase the voxel.
-    material: Option<u8>,
+    /// Palette color 1-255; omit or 0 to erase the voxel.
+    color: Option<u8>,
 }
 
 /// Arguments of `set_voxels`.
@@ -93,8 +93,8 @@ pub(crate) struct ApplyBrushParams {
     face: FaceDirection,
     /// Cube edge length in voxels (default 1, at most 64).
     size: Option<u32>,
-    /// Palette material 1-255 for attach and paint (default 1).
-    material: Option<u8>,
+    /// Palette color 1-255 for attach and paint (default 1).
+    color: Option<u8>,
     /// Treat the hit as the ground plane under (x, z) instead of a voxel; set y to -1 and face to "+y".
     ground: Option<bool>,
 }
@@ -102,8 +102,8 @@ pub(crate) struct ApplyBrushParams {
 /// Arguments of `set_palette_color`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SetPaletteColorParams {
-    /// Palette material 1-255.
-    material: u8,
+    /// Palette entry 1-255.
+    id: u8,
     /// New color as `[r, g, b]`, 0-255 each.
     color: [u8; 3],
 }
@@ -113,8 +113,8 @@ pub(crate) struct SetPaletteColorParams {
 pub(crate) struct RunScriptParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
-    /// Luau source. API: `scene.get(x,y,z)`, `scene.set(x,y,z,material)`, `scene.erase(x,y,z)`,
-    /// `scene.fill(x1,y1,z1,x2,y2,z2,material)`, `palette.len()`, `palette.color(m)`, `palette.nearest(r,g,b)`
+    /// Luau source. API: `scene.get(x,y,z)`, `scene.set(x,y,z,color)`, `scene.erase(x,y,z)`,
+    /// `scene.fill(x1,y1,z1,x2,y2,z2,color)`, `palette.len()`, `palette.color(n)`, `palette.nearest(r,g,b)`
     /// and `print(...)`.
     source: String,
 }
@@ -141,7 +141,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Material number (or null when empty) at each of the given positions of a Model (cell coordinates)."
+        description = "Color number (or null when empty) at each of the given positions of a Model (cell coordinates)."
     )]
     async fn get_voxels(&self, Parameters(params): Parameters<GetVoxelsParams>) -> Result<String, String> {
         self.ask(Request::GetVoxels {
@@ -151,9 +151,7 @@ impl Tools {
         .await
     }
 
-    #[tool(
-        description = "Every filled voxel of a Model inside a box, as [x, y, z, material] lists (cell coordinates)."
-    )]
+    #[tool(description = "Every filled voxel of a Model inside a box, as [x, y, z, color] lists (cell coordinates).")]
     async fn get_region(&self, Parameters(params): Parameters<GetRegionParams>) -> Result<String, String> {
         let limit = params.limit.unwrap_or(DEFAULT_REGION_LIMIT).min(MAX_REGION_LIMIT);
         self.ask(Request::GetRegion {
@@ -165,12 +163,12 @@ impl Tools {
         .await
     }
 
-    #[tool(description = "The palette: material number, hex color and rgb of every entry.")]
+    #[tool(description = "The palette: id, hex color and rgb of every entry.")]
     async fn get_palette(&self) -> Result<String, String> {
         self.ask(Request::GetPalette).await
     }
 
-    #[tool(description = "Sets voxels at explicit positions as one undoable step. Material 0 or omitted erases.")]
+    #[tool(description = "Sets voxels at explicit positions as one undoable step. Color 0 or omitted erases.")]
     async fn set_voxels(&self, Parameters(params): Parameters<SetVoxelsParams>) -> Result<String, String> {
         let model = params.model;
         let voxels = params
@@ -178,7 +176,7 @@ impl Tools {
             .into_iter()
             .map(|voxel| VoxelWrite {
                 position: [voxel.x, voxel.y, voxel.z],
-                material: voxel.material.filter(|material| *material != 0),
+                color: voxel.color.filter(|color| *color != 0),
             })
             .collect();
         self.ask(Request::SetVoxels { model, voxels }).await
@@ -190,10 +188,7 @@ impl Tools {
         let voxels = params
             .positions
             .into_iter()
-            .map(|position| VoxelWrite {
-                position,
-                material: None,
-            })
+            .map(|position| VoxelWrite { position, color: None })
             .collect();
         self.ask(Request::SetVoxels { model, voxels }).await
     }
@@ -209,7 +204,7 @@ impl Tools {
             voxel: [params.x, params.y, params.z],
             face: params.face,
             ground: params.ground.unwrap_or(false),
-            material: params.material.unwrap_or(1),
+            color: params.color.unwrap_or(1),
         })
         .await
     }
@@ -217,7 +212,7 @@ impl Tools {
     #[tool(description = "Changes the color of one palette entry (undoable).")]
     async fn set_palette_color(&self, Parameters(params): Parameters<SetPaletteColorParams>) -> Result<String, String> {
         self.ask(Request::SetPaletteColor {
-            material: params.material,
+            id: params.id,
             color: params.color,
         })
         .await

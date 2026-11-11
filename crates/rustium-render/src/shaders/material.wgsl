@@ -1,6 +1,6 @@
 // Material evaluation shared by the raster pass and the path tracer. Concatenated before every scene shader.
 //
-// `evaluate_material` is the ONLY place that reads material data. The Effects milestone replaces its body with
+// `evaluate_material` is the ONLY place that reads color data. The Effects milestone replaces its body with
 // code generated from the Material node graphs; callers keep using the same signature.
 
 // One Color of the Palette: linear base color and the index of its material graph.

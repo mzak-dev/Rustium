@@ -1,4 +1,4 @@
-// Greedy-meshed voxel chunks. Vertex packing matches rustium_core::MeshVertex. All material data is read by
+// Greedy-meshed voxel chunks. Vertex packing matches rustium_core::MeshVertex. All Color and Material data is read by
 // `evaluate_material` (material.wgsl, concatenated before common.wgsl).
 // Every Model is drawn as one instance: three columns (images of the X, Y and Z axes) and an origin place the
 // Shape in the Scene. column_x.w is the dim factor of Models outside the Focus, column_y.w the drawing rank.

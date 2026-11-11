@@ -19,7 +19,7 @@ pub enum BrushKind {
     Line,
     /// A rectangle on the pressed face between the press and the release, `size` voxels deep.
     Box,
-    /// The whole connected face of the same Material under the pointer, `size` voxels deep.
+    /// The whole connected face of the same Color under the pointer, `size` voxels deep.
     Face,
 }
 
@@ -49,7 +49,7 @@ impl Default for Brush {
 /// Which kind of Fill to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FillMode {
-    /// Repaints the connected face of the same Material on the plane of the hit face.
+    /// Repaints the connected face of the same Color on the plane of the hit face.
     #[default]
     Surface,
     /// Fills the connected empty space in front of the hit face, never leaving the Volume.
@@ -255,13 +255,13 @@ fn face_positions(shape: &Shape, tool: VoxelTool, size: u32, hit: RayHit) -> Vec
     cells
 }
 
-/// The connected patch of voxels of the hit voxel's Material that lie on its plane and show a face in the same
+/// The connected patch of voxels of the hit voxel's Color that lie on its plane and show a face in the same
 /// direction; empty unless the hit is a voxel.
 pub(crate) fn face_region(shape: &Shape, hit: RayHit) -> Vec<IVec3> {
     if hit.target != HitTarget::Voxel {
         return Vec::new();
     }
-    let Some(material) = shape.get(hit.voxel) else {
+    let Some(color) = shape.get(hit.voxel) else {
         return Vec::new();
     };
     let normal = hit.face.normal();
@@ -274,7 +274,7 @@ pub(crate) fn face_region(shape: &Shape, hit: RayHit) -> Vec<IVec3> {
             [step, -step]
         })
         .collect::<Vec<_>>();
-    let exposed = |cell: IVec3| shape.get(cell) == Some(material) && shape.get(cell + normal).is_none();
+    let exposed = |cell: IVec3| shape.get(cell) == Some(color) && shape.get(cell + normal).is_none();
     if !exposed(hit.voxel) {
         return Vec::new();
     }
@@ -332,7 +332,7 @@ pub(crate) fn fill_volume(shape: &Shape, hit: RayHit) -> Result<Vec<IVec3>, Erro
 mod tests {
     use super::*;
     use crate::face::Face;
-    use crate::palette::MaterialId;
+    use crate::palette::ColorId;
 
     fn voxel(x: i32, y: i32, z: i32) -> IVec3 {
         IVec3::new(x, y, z)
@@ -348,10 +348,10 @@ mod tests {
 
     fn slab(width: i32) -> Shape {
         let mut shape = Shape::new();
-        let material = MaterialId::new(1);
+        let color = ColorId::new(1);
         for x in 0..width {
             for z in 0..width {
-                shape.set(voxel(x, 0, z), material);
+                shape.set(voxel(x, 0, z), color);
             }
         }
         shape
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn face_brush_selects_the_connected_exposed_patch_only() {
         let mut shape = slab(4);
-        shape.set(voxel(1, 1, 1), MaterialId::new(1));
+        shape.set(voxel(1, 1, 1), ColorId::new(1));
         let region = face_region(&shape, top_hit(voxel(0, 0, 0)));
         // The patch is the 4×4 slab minus the cell under the bump.
         assert_eq!(region.len(), 15);
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn fill_volume_stays_inside_the_volume() {
         let mut shape = slab(5);
-        shape.set(voxel(4, 3, 4), MaterialId::new(1));
+        shape.set(voxel(4, 3, 4), ColorId::new(1));
         let region = fill_volume(&shape, top_hit(voxel(0, 0, 0))).unwrap();
         let volume = shape.volume().unwrap();
         // Everything above the slab up to the highest voxel: 5 × 3 × 5 minus the bump.
@@ -436,13 +436,13 @@ mod tests {
     #[test]
     fn fill_volume_of_a_sealed_room_stops_at_the_walls() {
         let mut shape = Shape::new();
-        let material = MaterialId::new(1);
+        let color = ColorId::new(1);
         for x in 0..5 {
             for y in 0..5 {
                 for z in 0..5 {
                     let edge = [x, y, z].iter().any(|v| *v == 0 || *v == 4);
                     if edge {
-                        shape.set(voxel(x, y, z), material);
+                        shape.set(voxel(x, y, z), color);
                     }
                 }
             }

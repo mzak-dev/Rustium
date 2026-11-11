@@ -15,7 +15,7 @@ use crate::theme;
 pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
     let graph_count = hud.editor.scene.material_graphs().len();
     let selected = hud.ui.render.preview_graph.min(graph_count.saturating_sub(1));
-    let active = hud.editor.material();
+    let active = hud.editor.color();
     let active_graph = hud
         .editor
         .scene
@@ -37,7 +37,7 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
             ui.label(RichText::new(hud.tr("mp-hint")).color(theme::SUBTLE).size(11.0));
             ui.add_space(6.0);
 
-            // The active Color and the material it uses.
+            // The active Color and the Material it uses.
             ui.horizontal(|ui| {
                 let (swatch, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
                 ui.painter().rect_filled(swatch, 5, active_color);

@@ -8,7 +8,7 @@ use crate::edit::{Edit, EditKind, Recorder};
 use crate::error::Error;
 use crate::ids::{NodeId, ShapeId};
 use crate::node::{Node, NodeKind};
-use crate::palette::MaterialId;
+use crate::palette::ColorId;
 use crate::scene::Scene;
 use crate::selection::Selection;
 use crate::shape::Shape;
@@ -305,20 +305,20 @@ pub(crate) fn merge(scene: &mut Scene, nodes: &[NodeId]) -> Result<Option<Edit>,
         return Ok(None);
     }
     let into_target = scene.world_transform(target).inverse();
-    let mut moved: Vec<(IVec3, MaterialId)> = Vec::new();
+    let mut moved: Vec<(IVec3, ColorId)> = Vec::new();
     for source in sources {
         let Some((_, shape)) = scene.model_shape(*source) else {
             continue;
         };
         let transform = into_target.compose(scene.world_transform(*source));
-        moved.extend(shape.voxels().map(|(cell, material)| (transform.cell(cell), material)));
+        moved.extend(shape.voxels().map(|(cell, color)| (transform.cell(cell), color)));
     }
     let mut rec = Recorder::new(scene);
     let shape = ensure_unique(&mut rec, target)?;
     // Earlier Models are higher in the tree and win where they overlap.
-    for (cell, material) in moved {
+    for (cell, color) in moved {
         if rec.voxel(shape, cell).is_none() {
-            rec.set(shape, cell, Some(material));
+            rec.set(shape, cell, Some(color));
         }
     }
     for node in nodes.iter().chain(sources) {
@@ -342,7 +342,7 @@ pub(crate) fn split(
         let source = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
         selection
             .iter()
-            .filter_map(|cell| source.get(cell).map(|material| (cell, material)))
+            .filter_map(|cell| source.get(cell).map(|color| (cell, color)))
             .collect()
     };
     if cells.is_empty() {
@@ -356,8 +356,8 @@ pub(crate) fn split(
     let mut rec = Recorder::new(scene);
     let source = ensure_unique(&mut rec, model)?;
     let target = rec.add_shape(Shape::new()).ok_or(Error::TooManyNodes)?;
-    for (cell, material) in cells {
-        rec.set(target, cell, Some(material));
+    for (cell, color) in cells {
+        rec.set(target, cell, Some(color));
         rec.set(source, cell, None);
     }
     let mut node = blank(name, NodeKind::Model { shape: target });
@@ -389,7 +389,7 @@ mod tests {
                 target: HitTarget::Ground,
             },
             end: None,
-            material: MaterialId::FIRST,
+            color: ColorId::FIRST,
             mirror: Mirror::default(),
         };
         apply(scene, &command).unwrap().unwrap()

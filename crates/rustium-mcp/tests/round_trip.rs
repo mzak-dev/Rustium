@@ -117,7 +117,7 @@ fn a_client_lists_tools_and_reads_the_model_through_the_ui_thread() {
         &url,
         4,
         "set_voxels",
-        &json!({"voxels": [{"x": 1, "y": 2, "z": 3, "material": 5}, {"x": 0, "y": 0, "z": 0}]}),
+        &json!({"voxels": [{"x": 1, "y": 2, "z": 3, "color": 5}, {"x": 0, "y": 0, "z": 0}]}),
     );
     assert!(
         reply["result"]["content"][0]["text"]
@@ -132,7 +132,7 @@ fn a_client_lists_tools_and_reads_the_model_through_the_ui_thread() {
     drop(fixture.server);
     let seen = fixture.ui.join().unwrap();
     assert_eq!(seen.len(), 2);
-    assert!(matches!(&seen[1], Request::SetVoxels { voxels, .. } if voxels.len() == 2 && voxels[1].material.is_none()));
+    assert!(matches!(&seen[1], Request::SetVoxels { voxels, .. } if voxels.len() == 2 && voxels[1].color.is_none()));
 }
 
 #[test]

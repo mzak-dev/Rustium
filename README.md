@@ -26,7 +26,7 @@ Most voxel editors make you choose: a polished UI or a renderer you can trust an
 - 🧊 **Unbounded models.** Shapes grow in any direction, stored as copy-on-write 32³ chunks. Undo costs only the chunks you touched.
 - ⚡ **Own renderer.** Greedy-meshed chunks rasterized with MSAA for editing. A compute path tracer for final renders is next ([ADR 0001](docs/adr/0001-hybrid-renderer.md)).
 - 🪟 **Viewport-first HUD.** Floating glass islands over a full-window viewport, with real backdrop blur, a frameless window and keyboard-first tools.
-- 🎨 **PBR-ready palette.** One byte per voxel, 255 Materials per Scene, `.vox`-compatible by design.
+- 🎨 **PBR-ready palette.** One byte per voxel, 255 Colors per Scene, `.vox`-compatible by design.
 - 🤖 **Built for automation.** Every edit is a `Command`, the same API that the planned MCP server and Luau scripts will use.
 - 🌍 **Polish and English** from day one, through Fluent.
 

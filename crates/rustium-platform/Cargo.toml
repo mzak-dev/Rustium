@@ -1,0 +1,18 @@
+[package]
+name = "rustium-platform"
+description = "Operating-system integration for Rustium: Win32 hit-testing for Snap Layouts on the frameless window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+raw-window-handle.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[lints]
+workspace = true

@@ -83,6 +83,8 @@ pub(crate) struct UiState {
     pub(crate) recent: Vec<RecentItem>,
     /// File name of the open document; empty while it has never been saved.
     pub(crate) document_name: String,
+    /// Where the maximize button was drawn last frame, in points; Windows shows Snap Layouts over it.
+    pub(crate) maximize_button: Option<Rect>,
 }
 
 impl UiState {
@@ -106,6 +108,7 @@ impl UiState {
             prompt: None,
             recent: Vec::new(),
             document_name: String::new(),
+            maximize_button: None,
         }
     }
 

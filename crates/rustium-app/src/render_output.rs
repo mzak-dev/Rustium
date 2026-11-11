@@ -19,6 +19,13 @@ use crate::render_mode::ImageFormat;
 #[derive(Debug)]
 pub(crate) enum SaveOutcome {
     Saved(PathBuf),
+    /// A queue wrote `count` files into `folder`.
+    Batch {
+        folder: PathBuf,
+        count: usize,
+    },
+    /// `ffmpeg` is missing, so the video's frames are PNG files in this folder.
+    Sequence(PathBuf),
     Cancelled,
     Failed(String),
 }
@@ -56,7 +63,15 @@ fn to_bytes(image: &TraceImage, with_alpha: bool, exposure: f32) -> Vec<u8> {
         let [r, g, b, a] = [texel[0], texel[1], texel[2], texel[3]];
         // The accumulator holds premultiplied radiance; PNG wants straight color.
         let unpremultiply = if with_alpha && a > 1e-4 { 1.0 / a } else { 1.0 };
-        bytes.extend([r, g, b].map(|channel| srgb8(aces(channel * unpremultiply * exposure))));
+        bytes.extend([r, g, b].map(|channel| {
+            let linear = channel * unpremultiply;
+            // AOV passes are display colors already.
+            srgb8(if image.display_ready {
+                linear
+            } else {
+                aces(linear * exposure)
+            })
+        }));
         if with_alpha {
             bytes.push(unit_to_u8(a));
         }
@@ -64,8 +79,13 @@ fn to_bytes(image: &TraceImage, with_alpha: bool, exposure: f32) -> Vec<u8> {
     bytes
 }
 
+/// The image as tightly packed 8-bit RGB, one frame of a video.
+pub(crate) fn rgb_bytes(image: &TraceImage, exposure: f32) -> Vec<u8> {
+    to_bytes(image, false, exposure)
+}
+
 /// Writes `image` as an 8-bit PNG, with an alpha channel when `with_alpha`.
-fn write_png(path: &Path, image: &TraceImage, with_alpha: bool, exposure: f32) -> Result<()> {
+pub(crate) fn write_png(path: &Path, image: &TraceImage, with_alpha: bool, exposure: f32) -> Result<()> {
     let file = BufWriter::new(File::create(path).wrap_err("cannot create the file")?);
     let mut encoder = png::Encoder::new(file, image.width, image.height);
     encoder.set_color(if with_alpha {
@@ -82,7 +102,7 @@ fn write_png(path: &Path, image: &TraceImage, with_alpha: bool, exposure: f32) -
 }
 
 /// Writes `image` as a 32-bit float RGBA `OpenEXR` with the raw linear radiance (premultiplied alpha).
-fn write_exr(path: &Path, image: &TraceImage) -> Result<()> {
+pub(crate) fn write_exr(path: &Path, image: &TraceImage) -> Result<()> {
     let width = image.width as usize;
     exr::prelude::write_rgba_file(path, width, image.height as usize, |x, y| {
         let index = (y * width + x) * 4;
@@ -106,7 +126,7 @@ pub(crate) fn save_with_dialog(
         .name("save-image".to_owned())
         .spawn(move || {
             let (label, extension) = match format {
-                ImageFormat::Png => ("PNG", "png"),
+                ImageFormat::Png | ImageFormat::Mp4 => ("PNG", "png"),
                 ImageFormat::Exr => ("OpenEXR", "exr"),
             };
             let Some(path) = rfd::FileDialog::new()
@@ -119,7 +139,7 @@ pub(crate) fn save_with_dialog(
             };
             let path = path.with_extension(extension);
             let result = match format {
-                ImageFormat::Png => write_png(&path, &image, transparent, exposure),
+                ImageFormat::Png | ImageFormat::Mp4 => write_png(&path, &image, transparent, exposure),
                 ImageFormat::Exr => write_exr(&path, &image),
             };
             let outcome = match result {
@@ -155,6 +175,7 @@ mod tests {
             height,
             samples: 8,
             rgba,
+            display_ready: false,
         }
     }
 
@@ -198,6 +219,7 @@ mod tests {
             samples: 1,
             // Half-covered pixel: premultiplied radiance 0.25 at alpha 0.5 is straight radiance 0.5.
             rgba: vec![0.25, 0.25, 0.25, 0.5],
+            display_ready: false,
         };
         let bytes = to_bytes(&image, true, 1.0);
         assert_eq!(bytes[0], srgb8(aces(0.5)));

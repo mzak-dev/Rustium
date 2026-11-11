@@ -107,6 +107,23 @@ pub(crate) fn paint(ui: &Ui, hud: &Hud<'_>) {
         painter.rect_stroke(region, 0, Stroke::new(1.5, hud.accent()), StrokeKind::Inside);
     }
 
+    if render.dof
+        && render.tool == RenderTool::PickFocus
+        && let Some([fx, fy]) = render.focus_marker
+    {
+        let centre = pos2(frame.left() + frame.width() * fx, frame.top() + frame.height() * fy);
+        let stroke = Stroke::new(1.5, hud.accent());
+        painter.circle_stroke(centre, 9.0, stroke);
+        for (from, to) in [
+            (vec2(-15.0, 0.0), vec2(-9.0, 0.0)),
+            (vec2(9.0, 0.0), vec2(15.0, 0.0)),
+            (vec2(0.0, -15.0), vec2(0.0, -9.0)),
+            (vec2(0.0, 9.0), vec2(0.0, 15.0)),
+        ] {
+            painter.line_segment([centre + from, centre + to], stroke);
+        }
+    }
+
     let bar = Rect::from_min_size(pos2(frame.left(), frame.bottom() + 7.0), vec2(frame.width(), 3.0));
     painter.rect_filled(bar, 2, Color32::from_white_alpha(26));
     let filled = Rect::from_min_size(bar.min, vec2(bar.width() * render.fraction_done(), bar.height()));
@@ -134,6 +151,7 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     if response.drag_started_by(PointerButton::Primary) {
         match hud.ui.render.tool {
             RenderTool::Orbit => choose_pivot(hud, pointer, frame),
+            RenderTool::PickFocus => pick_focus(hud, pointer, frame),
             RenderTool::Region => {
                 hud.ui.render.region_anchor = pointer.zip(frame).map(|(position, frame)| fraction(frame, position));
             }
@@ -162,8 +180,11 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
                     hud.ui.render.region = Some([anchor[0], anchor[1], now[0], now[1]]);
                 }
             }
-            RenderTool::PickFocus => {}
+            RenderTool::PickFocus => pick_focus(hud, pointer, frame),
         }
+    }
+    if response.clicked_by(PointerButton::Primary) && hud.ui.render.tool == RenderTool::PickFocus {
+        pick_focus(hud, pointer, frame);
     }
     if response.drag_stopped_by(PointerButton::Primary) && hud.ui.render.tool == RenderTool::Region {
         hud.ui.render.region_anchor = None;
@@ -189,6 +210,27 @@ fn pan(hud: &mut Hud<'_>, delta: egui::Vec2, viewport_height: f32) {
     let mut camera = hud.ui.render.render_camera(hud.camera);
     camera.pan(GlamVec2::new(delta.x, delta.y), viewport_height);
     hud.camera.target = camera.target;
+}
+
+/// Sets the focus distance to the depth of the point under the pointer and turns depth of field on. Dragging
+/// scrubs the focus over the model.
+fn pick_focus(hud: &mut Hud<'_>, pointer: Option<Pos2>, frame: Option<Rect>) {
+    let Some((position, frame)) = pointer.zip(frame) else {
+        return;
+    };
+    let Some(point) = point_under(hud, frame, position) else {
+        return;
+    };
+    let camera = &*hud.camera;
+    let forward = (camera.target - camera.eye()).normalize_or_zero();
+    let depth = (point - camera.eye()).dot(forward);
+    if depth <= 0.0 {
+        return;
+    }
+    let render = &mut hud.ui.render;
+    render.focus_m = Some(depth * hud.editor.scene.voxel_size());
+    render.dof = true;
+    render.focus_marker = Some(fraction(frame, position));
 }
 
 /// Orbit pivot at the start of a drag: the model's centre, or the point under the cursor.
@@ -234,7 +276,7 @@ fn point_under(hud: &Hud<'_>, frame: Rect, position: Pos2) -> Option<Vec3> {
 /// Render-mode keyboard shortcuts: tool letters, F5 and Escape.
 pub(crate) fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
     for tool in RenderTool::ALL {
-        if tool.is_available() && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
             hud.ui.render.tool = tool;
         }
     }

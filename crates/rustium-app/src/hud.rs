@@ -114,8 +114,12 @@ pub(crate) enum AppCommand {
     FrameModel,
     HistoryJump(usize),
     SettingsChanged,
-    /// Save the traced image through a file dialog.
+    /// Save the traced image through a file dialog; with the MP4 format it renders a turntable video instead.
     SaveImage,
+    /// Render every Shot to a file in a folder chosen in a dialog.
+    QueueShots,
+    /// Stop the running render job.
+    CancelJob,
     /// Throw away accumulated samples and trace again.
     RestartRender,
     /// Run a Luau script chosen in a file dialog.

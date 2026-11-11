@@ -92,8 +92,7 @@ pub(crate) fn toolbar(ctx: &Context, hud: &mut Hud<'_>) {
                     } else {
                         Look::Plain
                     };
-                    let available = tool.is_available();
-                    let response = widgets::icon_button(ui, tool.icon(), 44.0, look, available);
+                    let response = widgets::icon_button(ui, tool.icon(), 44.0, look, true);
                     let key = format!("{:?}", tool.key());
                     if hud.settings.shortcut_letters {
                         let color = if look == Look::Accent {
@@ -110,12 +109,8 @@ pub(crate) fn toolbar(ctx: &Context, hud: &mut Hud<'_>) {
                         );
                     }
                     let tooltip = format!("{} ({key})", hud.tr(tool.message_key()));
-                    if available {
-                        if response.on_hover_text(tooltip).clicked() {
-                            hud.ui.render.tool = tool;
-                        }
-                    } else {
-                        response.on_disabled_hover_text(format!("{tooltip} · {}", hud.tr("later-milestone")));
+                    if response.on_hover_text(tooltip).clicked() {
+                        hud.ui.render.tool = tool;
                     }
                 }
             });

@@ -23,7 +23,8 @@ use crate::editor::Editor;
 use crate::hud::{self, AppCommand, Hud, Mode, Toast, UiState};
 use crate::i18n::I18n;
 use crate::mcp::McpHost;
-use crate::render_mode::Backdrop;
+use crate::render_job::{self, Destination, JobSpec, Output, OutputKind};
+use crate::render_mode::{Backdrop, ImageFormat};
 use crate::render_output::{self, SaveOutcome};
 use crate::settings::{Backend, FrameLimit, Settings};
 use crate::{settings_window, splash, theme};
@@ -73,6 +74,13 @@ impl std::fmt::Debug for App {
             .field("running", &self.running.is_some())
             .finish_non_exhaustive()
     }
+}
+
+/// What a render job produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobKind {
+    Turntable,
+    Queue,
 }
 
 /// Everything that exists while the window is open.
@@ -310,6 +318,8 @@ impl Running {
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
         let repaint_delay = if self.ui.mode == Mode::Render && self.ui.render.is_accumulating() {
             Duration::ZERO
+        } else if self.ui.render.job.is_some() {
+            repaint_delay.min(Duration::from_millis(200))
         } else {
             repaint_delay
         };
@@ -449,7 +459,19 @@ impl Running {
                 }
             }
             AppCommand::SettingsChanged => self.apply_settings(settings),
-            AppCommand::SaveImage => self.save_image(),
+            AppCommand::SaveImage => {
+                if self.ui.render.format == ImageFormat::Mp4 {
+                    self.start_job(JobKind::Turntable);
+                } else {
+                    self.save_image();
+                }
+            }
+            AppCommand::QueueShots => self.start_job(JobKind::Queue),
+            AppCommand::CancelJob => {
+                if let Some(job) = &self.ui.render.job {
+                    job.cancel();
+                }
+            }
             AppCommand::RestartRender => self.viewport.restart_trace(),
             AppCommand::RunScript => self.run_script_file(),
         }
@@ -540,6 +562,7 @@ impl Running {
             }
             self.ui.render.sync_active_shot(&self.camera);
             self.poll_saves();
+            self.poll_job();
         }
         self.last_mode = mode;
     }
@@ -547,7 +570,9 @@ impl Running {
     /// The path tracer's input for this frame, or `None` outside Render mode.
     fn trace_frame(&self, pixels_per_point: f32) -> Option<TraceFrame> {
         if self.ui.mode == Mode::Render {
-            self.ui.render.trace_frame(&self.camera, pixels_per_point)
+            self.ui
+                .render
+                .trace_frame(&self.camera, pixels_per_point, self.editor.scene.voxel_size())
         } else {
             None
         }
@@ -575,18 +600,116 @@ impl Running {
 
     fn poll_saves(&mut self) {
         while let Ok(outcome) = self.save_results.try_recv() {
-            self.ui.render.message = match outcome {
-                SaveOutcome::Saved(path) => Some(
+            self.report(outcome);
+        }
+    }
+
+    /// Starts a turntable or queue job on a worker thread, unless one is already running.
+    fn start_job(&mut self, kind: JobKind) {
+        if self.ui.render.job.is_some() {
+            return;
+        }
+        let render = &self.ui.render;
+        let voxel_size = self.editor.scene.voxel_size();
+        let still_format = if render.format == ImageFormat::Exr {
+            ImageFormat::Exr
+        } else {
+            ImageFormat::Png
+        };
+        let outputs = match kind {
+            JobKind::Turntable => vec![Output {
+                name: "turntable".to_owned(),
+                kind: OutputKind::Video,
+                frames: render.turntable_frames(&self.camera, render.lens_mm, render.size, voxel_size),
+            }],
+            JobKind::Queue => render
+                .shots
+                .iter()
+                .enumerate()
+                .map(|(index, shot)| {
+                    let name = format!("shot-{}", index + 1);
+                    if render.format == ImageFormat::Mp4 {
+                        let frames = render.turntable_frames(&shot.camera, shot.lens_mm, shot.size, voxel_size);
+                        Output {
+                            name,
+                            kind: OutputKind::Video,
+                            frames,
+                        }
+                    } else {
+                        let frame = render.frame_for(&shot.camera, shot.lens_mm, shot.size, voxel_size);
+                        Output {
+                            name,
+                            kind: OutputKind::Still(still_format),
+                            frames: vec![frame],
+                        }
+                    }
+                })
+                .collect(),
+        };
+        let spec = JobSpec {
+            outputs,
+            destination: match kind {
+                JobKind::Turntable => Destination::File,
+                JobKind::Queue => Destination::Folder,
+            },
+            exposure: render.exposure(),
+            transparent: render.backdrop == Backdrop::Transparent,
+        };
+        let renderer = self.viewport.offline_renderer(&self.gpu);
+        let scene = self.editor.scene.clone();
+        self.ui.render.message = None;
+        self.ui.render.job = Some(render_job::spawn(spec, renderer, scene));
+    }
+
+    /// Picks up the result of the running render job.
+    fn poll_job(&mut self) {
+        let Some(outcome) = self.ui.render.job.as_ref().and_then(render_job::JobHandle::poll) else {
+            return;
+        };
+        self.ui.render.job = None;
+        self.report(outcome);
+    }
+
+    /// Shows the result of a save or job under the Output tab, and as a toast for the cases that need attention.
+    fn report(&mut self, outcome: SaveOutcome) {
+        let (message, warning) = match outcome {
+            SaveOutcome::Saved(path) => (
+                Some(
                     self.i18n
                         .tr_args("save-done", &[("path", FluentValue::from(path.display().to_string()))]),
                 ),
-                SaveOutcome::Cancelled => None,
-                SaveOutcome::Failed(reason) => Some(
+                false,
+            ),
+            SaveOutcome::Batch { folder, count } => (
+                Some(self.i18n.tr_args(
+                    "queue-done",
+                    &[
+                        ("count", FluentValue::from(count)),
+                        ("path", FluentValue::from(folder.display().to_string())),
+                    ],
+                )),
+                false,
+            ),
+            SaveOutcome::Sequence(directory) => (
+                Some(self.i18n.tr_args(
+                    "video-no-ffmpeg",
+                    &[("path", FluentValue::from(directory.display().to_string()))],
+                )),
+                true,
+            ),
+            SaveOutcome::Cancelled => (None, false),
+            SaveOutcome::Failed(reason) => (
+                Some(
                     self.i18n
                         .tr_args("save-failed", &[("reason", FluentValue::from(reason))]),
                 ),
-            };
+                true,
+            ),
+        };
+        if warning && let Some(text) = &message {
+            self.ui.toast = Some(Toast::new(text.clone(), true));
         }
+        self.ui.render.message = message;
     }
 
     /// The Models to draw; everything outside the Focus is dimmed.

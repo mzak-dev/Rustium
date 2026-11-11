@@ -4,6 +4,7 @@ mod corners;
 mod hotbar;
 mod inspector;
 mod materials_preview;
+mod prompt;
 mod render_bottom;
 mod render_inspector;
 mod render_tools;
@@ -19,8 +20,10 @@ mod viewport;
 pub(crate) mod widgets;
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Key, Modifiers, Order, Pos2, Rect, Ui, Vec2};
+pub(crate) use prompt::Prompt;
 use rustium_core::{Face, NodeId};
 pub(crate) use toast::Toast;
 use winit::window::ResizeDirection;
@@ -29,6 +32,7 @@ use crate::camera::OrbitCamera;
 use crate::editor::{Editor, Tool};
 use crate::i18n::I18n;
 use crate::mcp::McpStatus;
+use crate::recent::RecentItem;
 use crate::render_mode::RenderState;
 use crate::settings::{Motion, Settings};
 use crate::settings_window::Section;
@@ -73,6 +77,12 @@ pub(crate) struct UiState {
     pub(crate) renaming: Option<(NodeId, String)>,
     /// A short message under the top bar, e.g. the result of a script run.
     pub(crate) toast: Option<Toast>,
+    /// A question that blocks the interface until answered.
+    pub(crate) prompt: Option<Prompt>,
+    /// Recently opened files for the start screen.
+    pub(crate) recent: Vec<RecentItem>,
+    /// File name of the open document; empty while it has never been saved.
+    pub(crate) document_name: String,
 }
 
 impl UiState {
@@ -93,19 +103,44 @@ impl UiState {
             collapsed: HashSet::new(),
             renaming: None,
             toast: None,
+            prompt: None,
+            recent: Vec::new(),
+            document_name: String::new(),
         }
     }
 
     /// Whether a modal (start screen or Settings) covers the HUD.
     pub(crate) fn modal_open(&self) -> bool {
-        self.splash_open || self.settings_section.is_some()
+        self.splash_open || self.settings_section.is_some() || self.prompt.is_some()
     }
 }
 
 /// Things the HUD asks the application to do after the frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppCommand {
+    /// Start an empty Scene (asks first when there are unsaved changes).
     NewScene,
+    /// Open this file, or ask for one (asks first when there are unsaved changes).
+    Open(Option<PathBuf>),
+    /// Save to the document's file, or ask for one.
+    Save,
+    /// Save to a file chosen in a dialog.
+    SaveAs,
+    /// Import a MagicaVoxel file as a new Scene.
+    ImportVox,
+    /// Export the Scene as a MagicaVoxel file.
+    ExportVox,
+    /// Replace Palette colors from a `.pal` or PNG file.
+    ImportPalette,
+    /// Export the Palette as a `.pal` file.
+    ExportPalette,
+    /// Answers of the "save changes?" and recovery prompts.
+    PromptSave,
+    PromptDiscard,
+    PromptCancel,
+    RecoveryRestore,
+    RecoveryDiscard,
+    /// Leave the application (asks first when there are unsaved changes).
     Quit,
     Minimize,
     ToggleMaximize,
@@ -283,6 +318,7 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     if !hud.ui.modal_open() {
         shortcuts(ctx, hud);
     }
+    prompt::show(ctx, hud);
 }
 
 /// Puts the MCP client configuration snippet on the clipboard and says so.
@@ -397,6 +433,15 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
     }
     if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::N)) {
         hud.send(AppCommand::NewScene);
+    }
+    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O)) {
+        hud.send(AppCommand::Open(None));
+    }
+    // Ctrl Shift S first: Ctrl S would also match while Shift is held.
+    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)) {
+        hud.send(AppCommand::SaveAs);
+    } else if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::S)) {
+        hud.send(AppCommand::Save);
     }
     if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Comma)) {
         hud.ui.settings_section = Some(Section::General);

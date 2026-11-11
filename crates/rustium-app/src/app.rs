@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -20,14 +21,20 @@ use winit::window::{Icon, Window, WindowId};
 
 use crate::camera::OrbitCamera;
 use crate::editor::Editor;
+use crate::files::{self, Document, Io, Pending};
 use crate::hud::{self, AppCommand, Hud, Mode, Toast, UiState};
 use crate::i18n::I18n;
 use crate::mcp::McpHost;
+use crate::recent::{self, RecentFile};
 use crate::render_job::{self, Destination, JobSpec, Output, OutputKind};
 use crate::render_mode::{Backdrop, ImageFormat};
 use crate::render_output::{self, SaveOutcome};
 use crate::settings::{Backend, FrameLimit, Settings};
 use crate::{settings_window, splash, theme};
+
+mod documents;
+
+use documents::PromptAnswer;
 
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 
@@ -36,6 +43,8 @@ const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 pub(crate) enum UserEvent {
     /// The MCP server queued requests for the UI thread.
     Automation,
+    /// The IO thread finished a job.
+    Io,
 }
 
 /// The winit application: owns the settings and, once resumed, the running editor.
@@ -44,15 +53,18 @@ pub(crate) struct App {
     proxy: EventLoopProxy<UserEvent>,
     running: Option<Running>,
     error: Option<color_eyre::Report>,
+    /// A file named on the command line, opened at startup.
+    open_path: Option<PathBuf>,
 }
 
 impl App {
-    pub(crate) fn new(settings: Settings, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub(crate) fn new(settings: Settings, proxy: EventLoopProxy<UserEvent>, open_path: Option<PathBuf>) -> Self {
         Self {
             settings,
             proxy,
             running: None,
             error: None,
+            open_path,
         }
     }
 
@@ -106,6 +118,11 @@ struct Running {
     save_results: Receiver<SaveOutcome>,
     save_sender: mpsc::Sender<SaveOutcome>,
     mcp: McpHost,
+    io: Io,
+    doc: Document,
+    recent: Vec<RecentFile>,
+    splash_was_open: bool,
+    title: String,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -113,7 +130,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.running.is_some() {
             return;
         }
-        match Running::new(event_loop, &self.settings, &self.proxy) {
+        match Running::new(event_loop, &self.settings, &self.proxy, self.open_path.take()) {
             Ok(running) => self.running = Some(running),
             Err(report) => self.fail(event_loop, report),
         }
@@ -125,7 +142,11 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let response = running.egui_state.on_window_event(&running.window, &event);
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if running.run_command(AppCommand::Quit, &mut self.settings) {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 running.gpu.resize(size.width, size.height);
                 running.window.request_redraw();
@@ -144,7 +165,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(running) = &mut self.running else {
             return;
         };
@@ -153,14 +174,25 @@ impl ApplicationHandler<UserEvent> for App {
                 running.mcp.drain(&mut running.editor);
                 running.window.request_redraw();
             }
+            UserEvent::Io => {
+                if running.handle_io(&self.settings) {
+                    event_loop.exit();
+                }
+                running.window.request_redraw();
+            }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(running) = &self.running else {
+        let Some(running) = &mut self.running else {
             return;
         };
-        match running.next_frame {
+        running.autosave_tick(&self.settings);
+        let wake = [running.next_frame, running.next_autosave(&self.settings)]
+            .into_iter()
+            .flatten()
+            .min();
+        match wake {
             Some(when) if when <= Instant::now() => {
                 running.window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::Wait);
@@ -172,7 +204,12 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl Running {
-    fn new(event_loop: &ActiveEventLoop, settings: &Settings, proxy: &EventLoopProxy<UserEvent>) -> Result<Self> {
+    fn new(
+        event_loop: &ActiveEventLoop,
+        settings: &Settings,
+        proxy: &EventLoopProxy<UserEvent>,
+        open_path: Option<PathBuf>,
+    ) -> Result<Self> {
         let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
         let attributes = Window::default_attributes()
             .with_title("Rustium")
@@ -249,6 +286,18 @@ impl Running {
             field_of_view_degrees: settings.field_of_view_degrees,
             ..OrbitCamera::default()
         };
+        let io_proxy = proxy.clone();
+        let io = Io::new(Arc::new(move || {
+            let _ = io_proxy.send_event(UserEvent::Io);
+        }));
+        let recent_files = recent::load();
+        let mut ui = UiState::new(settings.show_start_screen && open_path.is_none());
+        ui.recent = recent::check(recent_files.clone());
+        ui.prompt = startup_recovery(&recent_files).map(hud::Prompt::Recovery);
+        if let Some(path) = open_path {
+            io.submit(files::IoJob::Load { path });
+        }
+        let doc = Document::new(editor.revision);
         Ok(Self {
             window,
             gpu,
@@ -259,7 +308,7 @@ impl Running {
             logo,
             editor,
             camera,
-            ui: UiState::new(settings.show_start_screen),
+            ui,
             i18n: I18n::new(settings.language),
             mesh: ChunkMesh::default(),
             sample_counts,
@@ -270,11 +319,21 @@ impl Running {
             save_results,
             save_sender,
             mcp,
+            io,
+            doc,
+            recent: recent_files,
+            splash_was_open: false,
+            title: String::new(),
         })
     }
 
     /// Runs the interface, applies its commands and draws one frame. Returns `true` to quit.
     fn redraw(&mut self, settings: &mut Settings) -> Result<bool> {
+        self.update_title();
+        self.refresh_recent_on_splash();
+        if self.handle_io(settings) {
+            return Ok(true);
+        }
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let ctx = self.egui_ctx.clone();
         let maximized = self.window.is_maximized();
@@ -429,14 +488,22 @@ impl Running {
     /// Applies one HUD command; returns `true` when the app should quit.
     fn run_command(&mut self, command: AppCommand, settings: &mut Settings) -> bool {
         match command {
-            AppCommand::Quit => return true,
-            AppCommand::NewScene => {
-                self.editor
-                    .new_scene(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
-                self.viewport.clear_chunks();
-                self.trace_revision = None;
-                self.camera.frame(None);
+            AppCommand::Quit => return self.request(Pending::Quit, settings),
+            AppCommand::NewScene => return self.request(Pending::New, settings),
+            AppCommand::Open(path) => return self.request(Pending::Open(path), settings),
+            AppCommand::ImportVox => return self.request(Pending::ImportVox, settings),
+            AppCommand::Save => self.save(None, false),
+            AppCommand::SaveAs => self.save(None, true),
+            AppCommand::ExportVox => self.export_vox(),
+            AppCommand::ImportPalette => self.io.pick_import_palette(self.i18n.tr("dialog-import-palette")),
+            AppCommand::ExportPalette => self.export_palette(),
+            AppCommand::PromptSave | AppCommand::RecoveryRestore => {
+                return self.answer_prompt(PromptAnswer::Primary, settings);
             }
+            AppCommand::PromptDiscard | AppCommand::RecoveryDiscard => {
+                return self.answer_prompt(PromptAnswer::Secondary, settings);
+            }
+            AppCommand::PromptCancel => return self.answer_prompt(PromptAnswer::Cancel, settings),
             AppCommand::Minimize => self.window.set_minimized(true),
             AppCommand::ToggleMaximize => self.window.set_maximized(!self.window.is_maximized()),
             AppCommand::DragWindow => {
@@ -784,6 +851,11 @@ impl Running {
         }
         lines
     }
+}
+
+/// A recovery copy left by a session that did not end cleanly: the unsaved Scene's, else the newest file's.
+fn startup_recovery(recent: &[RecentFile]) -> Option<files::RecoveryOffer> {
+    files::find_recovery(None).or_else(|| recent.iter().find_map(|file| files::find_recovery(Some(&file.path))))
 }
 
 fn push_box(lines: &mut Vec<LineVertex>, volume: Volume, inflate: f32, color: [f32; 4]) {

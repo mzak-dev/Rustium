@@ -136,16 +136,20 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 hud.send(AppCommand::NewScene);
                 hud.ui.splash_open = false;
             }
-            action(
+            if action(
                 ui,
                 Icon::Folder,
                 &hud.tr("splash-open"),
                 "Ctrl O",
                 width,
                 Look::Plain,
-                false,
+                true,
             )
-            .on_disabled_hover_text(hud.tr("later-milestone"));
+            .clicked()
+                || ui.input(|input| input.modifiers.command && input.key_pressed(Key::O))
+            {
+                hud.send(AppCommand::Open(None));
+            }
         });
         ui.add_space(18.0);
         ui.label(
@@ -153,7 +157,8 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 .size(10.0)
                 .color(theme::SUBTLE),
         );
-        ui.label(RichText::new(hud.tr("splash-no-recent")).size(12.0).color(theme::MUTED));
+        let list_height = (content.bottom() - 40.0 - ui.cursor().top()).max(0.0);
+        recent_list(ui, hud, list_height);
     });
 
     // Startup progress and the start-screen preference along the bottom.
@@ -201,6 +206,66 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
             );
         },
     );
+}
+
+/// The recent files: file name in mono, the Scene's root name on the right; missing files are greyed out.
+fn recent_list(ui: &mut egui::Ui, hud: &mut Hud<'_>, max_height: f32) {
+    if hud.ui.recent.is_empty() {
+        ui.label(RichText::new(hud.tr("splash-no-recent")).size(12.0).color(theme::MUTED));
+        return;
+    }
+    let mut chosen = None;
+    egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for item in &hud.ui.recent {
+            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+            let (name_color, note_color) = if item.exists {
+                (theme::TEXT, theme::SUBTLE)
+            } else {
+                (theme::DISABLED, theme::DISABLED)
+            };
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 7, theme::HOVER);
+            }
+            Icon::Cube.paint(
+                ui.painter(),
+                Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0)),
+                note_color,
+            );
+            let file_name = item
+                .file
+                .path
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            ui.painter().text(
+                rect.left_center() + vec2(32.0, 0.0),
+                Align2::LEFT_CENTER,
+                file_name,
+                egui::FontId::monospace(12.0),
+                name_color,
+            );
+            if !item.file.name.is_empty() {
+                ui.painter().text(
+                    rect.right_center() - vec2(8.0, 0.0),
+                    Align2::RIGHT_CENTER,
+                    &item.file.name,
+                    egui::FontId::proportional(11.0),
+                    note_color,
+                );
+            }
+            let response = response.on_hover_text(if item.exists {
+                item.file.path.display().to_string()
+            } else {
+                hud.tr("splash-recent-missing")
+            });
+            if response.clicked() {
+                chosen = Some(item.file.path.clone());
+            }
+        }
+    });
+    if let Some(path) = chosen {
+        hud.send(AppCommand::Open(Some(path)));
+    }
 }
 
 fn action(

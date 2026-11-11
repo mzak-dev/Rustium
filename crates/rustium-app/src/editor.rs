@@ -225,7 +225,11 @@ const OUTLINE_LIMIT: usize = 1500;
 
 impl Editor {
     pub(crate) fn new(voxel_size: f32, undo_steps: usize) -> Self {
-        let scene = Scene::with_voxel_size(voxel_size);
+        Self::with_scene(Scene::with_voxel_size(voxel_size), undo_steps)
+    }
+
+    /// An Editor on `scene` with a fresh History and default tool state.
+    fn with_scene(scene: Scene, undo_steps: usize) -> Self {
         let slots = DEFAULT_SLOTS.map(|number| {
             ColorId::new(number)
                 .filter(|id| scene.palette().get(*id).is_some())
@@ -262,11 +266,52 @@ impl Editor {
 
     /// Starts a new Scene with one empty Model and clears History.
     pub(crate) fn new_scene(&mut self, voxel_size: f32, undo_steps: usize) {
+        self.replace_scene(Scene::with_voxel_size(voxel_size), undo_steps);
+    }
+
+    /// Swaps in another Scene (a new or a loaded one), clears History and keeps the tool settings. The revision keeps
+    /// counting up so that a stored revision never matches the new Scene by accident.
+    pub(crate) fn replace_scene(&mut self, scene: Scene, undo_steps: usize) {
         let slots = self.slots;
         let (tool, brush, fill_mode, mirror) = (self.tool, self.brush, self.fill_mode, self.mirror);
-        *self = Self::new(voxel_size, undo_steps);
-        self.slots = slots;
+        let revision = self.revision + 1;
+        *self = Self::with_scene(scene, undo_steps);
+        self.revision = revision;
+        self.slots = slots.map(|id| {
+            if self.scene.palette().get(id).is_some() {
+                id
+            } else {
+                ColorId::FIRST
+            }
+        });
         (self.tool, self.brush, self.fill_mode, self.mirror) = (tool, brush, fill_mode, mirror);
+    }
+
+    /// Sets the Palette entries to `colors` in one History step; entries beyond the Palette's size are ignored.
+    /// Returns how many Colors were applied.
+    pub(crate) fn import_palette(&mut self, colors: &[[u8; 3]]) -> usize {
+        self.release();
+        let mut merged: Option<Edit> = None;
+        let mut applied = 0;
+        for (index, color) in colors.iter().enumerate() {
+            let Some(id) = u8::try_from(index + 1).ok().and_then(ColorId::new) else {
+                break;
+            };
+            if self.scene.palette().get(id).is_none() {
+                break;
+            }
+            applied += 1;
+            if let Some(edit) = self.apply_command(&Command::SetColor { id, color: *color }) {
+                merged = Some(match merged.take() {
+                    Some(pending) => pending.merge(edit),
+                    None => edit,
+                });
+            }
+        }
+        if let Some(edit) = merged {
+            self.history.push(edit);
+        }
+        applied
     }
 
     pub(crate) fn color(&self) -> ColorId {

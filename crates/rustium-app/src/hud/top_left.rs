@@ -72,21 +72,41 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
     egui::Popup::menu(button)
         .close_behavior(PopupCloseBehavior::CloseOnClick)
         .show(|ui| {
-            ui.set_min_width(200.0);
+            ui.set_min_width(220.0);
             let item = |ui: &mut egui::Ui, label: String, shortcut: &str, enabled: bool| {
                 ui.add_enabled(
                     enabled,
                     egui::Button::new(label)
                         .shortcut_text(shortcut)
                         .frame(false)
-                        .min_size(vec2(200.0, 28.0)),
+                        .min_size(vec2(220.0, 28.0)),
                 )
             };
             if item(ui, hud.tr("menu-new"), "Ctrl N", true).clicked() {
                 hud.send(AppCommand::NewScene);
             }
-            item(ui, hud.tr("menu-open"), "Ctrl O", false).on_disabled_hover_text(hud.tr("later-milestone"));
-            item(ui, hud.tr("menu-save"), "Ctrl S", false).on_disabled_hover_text(hud.tr("later-milestone"));
+            if item(ui, hud.tr("menu-open"), "Ctrl O", true).clicked() {
+                hud.send(AppCommand::Open(None));
+            }
+            if item(ui, hud.tr("menu-save"), "Ctrl S", true).clicked() {
+                hud.send(AppCommand::Save);
+            }
+            if item(ui, hud.tr("menu-save-as"), "Ctrl Shift S", true).clicked() {
+                hud.send(AppCommand::SaveAs);
+            }
+            ui.separator();
+            if item(ui, hud.tr("menu-import-vox"), "", true).clicked() {
+                hud.send(AppCommand::ImportVox);
+            }
+            if item(ui, hud.tr("menu-import-palette"), "", true).clicked() {
+                hud.send(AppCommand::ImportPalette);
+            }
+            if item(ui, hud.tr("menu-export-vox"), "", true).clicked() {
+                hud.send(AppCommand::ExportVox);
+            }
+            if item(ui, hud.tr("menu-export-palette"), "", true).clicked() {
+                hud.send(AppCommand::ExportPalette);
+            }
             ui.separator();
             if item(ui, hud.tr("menu-run-script"), "", true).clicked() {
                 hud.send(AppCommand::RunScript);

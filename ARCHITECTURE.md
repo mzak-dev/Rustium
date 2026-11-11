@@ -6,9 +6,9 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 
 | Crate | Owns | Must not depend on |
 |---|---|---|
-| `rustium-core` | Scene graph (Groups, Models, Instances), Shape (copy-on-write 32³ chunks), Palette, material graphs, Commands → Edits, History, raycast and Scene picking, Brush / Fill / Mirror geometry, greedy meshing | GPU, windowing, async |
+| `rustium-core` | Scene graph (Groups, Models, Instances), Shape (copy-on-write 32³ chunks), Palette, material graphs, Commands → Edits, History, raycast and Scene picking, Brush / Fill / Mirror geometry, greedy meshing, the `.ruv`, MagicaVoxel `.vox` and JASC `.pal` readers and writers (pure bytes in, bytes out) | GPU, windowing, async |
 | `rustium-render` | wgpu device and surface, chunk raster with MSAA, ground grid, overlay lines, glass blur and composite, the Render-mode path tracer | windowing, egui |
-| `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging | — |
+| `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging, documents (Open / Save, dirty tracking, autosave and recovery, recent files) | — |
 | `rustium-mcp` | in-process MCP server (streamable HTTP on `127.0.0.1:7420`) and the `--mcp-stdio` bridge; the only crate with tokio | the Scene (it depends on no other Rustium crate) |
 | `rustium-script` | sandboxed Luau scripting through mlua; a run is one `Edit` | GPU, windowing, async |
 
@@ -111,6 +111,20 @@ UI thread: user_event → McpHost::drain → automation::handle → Editor::exec
   interrupt budget and wall-clock limit (`Limits`), so a runaway script cannot hang the editor.
 - **Tests without a window**: `rustium-mcp/tests/round_trip.rs` drives the server with a fake UI thread;
   `rustium-app/src/mcp.rs` drives a real `Editor` through the stdio bridge, HTTP, the channel and `McpHost::drain`.
+
+## Files
+
+- **Formats** live in `rustium-core` (`ruv.rs`, `vox.rs`, `pal.rs`) and never touch the disk; see ADR 0010. Loading
+  validates everything and returns a `FileError`, so a damaged file is a toast, not a crash.
+- **IO** in `rustium-app/src/files.rs` runs on one `io-worker` thread; native dialogs run on short-lived threads and
+  turn a chosen path into a job. The UI thread only clones the Scene (chunks are shared) and polls outcomes, which
+  wake the event loop through a `UserEvent`. Writes go to `<file>.tmp` and are renamed over the target.
+- **Dirty** means the Editor revision differs from the one saved; the window title carries an asterisk. New, Open,
+  Import and closing ask first through a modal `Prompt`.
+- **Autosave** writes `<file>.ruv.recovery` beside the document (or `recovery/untitled.ruv.recovery` in the data
+  directory for a Scene that was never saved) every Settings interval while the Scene is dirty. A clean save, a
+  clean exit and "Discard" delete it; at startup, and after opening a file, a newer recovery copy is offered.
+- **Recent files** are kept in `recent.toml` in the data directory, with the root Node's name as secondary text.
 
 ## Coordinates
 

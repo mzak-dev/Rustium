@@ -8,11 +8,13 @@ mod app;
 mod automation;
 mod camera;
 mod editor;
+mod files;
 mod hud;
 mod i18n;
 mod icons;
 mod logging;
 mod mcp;
+mod recent;
 mod render_job;
 mod render_mode;
 mod render_output;
@@ -35,7 +37,12 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::with_user_event()
         .build()
         .wrap_err("cannot create the event loop")?;
-    let mut app = app::App::new(settings::Settings::load(), event_loop.create_proxy());
+    // A file named on the command line (a file association, or `rustium scene.ruv`) is opened at startup.
+    let open_path = std::env::args_os()
+        .skip(1)
+        .find(|argument| !argument.to_string_lossy().starts_with("--"))
+        .map(std::path::PathBuf::from);
+    let mut app = app::App::new(settings::Settings::load(), event_loop.create_proxy(), open_path);
     event_loop.run_app(&mut app).wrap_err("event loop failed")?;
     app.into_result()
 }

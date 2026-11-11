@@ -14,4 +14,4 @@ mod viewport_renderer;
 pub use error::Error;
 pub use glass_pass::GlassRect;
 pub use gpu_context::{GpuContext, GpuPreferences, GraphicsBackend};
-pub use viewport_renderer::{CameraUniform, LineVertex, ViewportFrame, ViewportRenderer};
+pub use viewport_renderer::{CameraUniform, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};

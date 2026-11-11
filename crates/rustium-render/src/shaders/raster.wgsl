@@ -1,22 +1,15 @@
 // Greedy-meshed voxel chunks. Vertex packing matches rustium_core::MeshVertex.
+// Every Model is drawn as one instance: three columns (images of the X, Y and Z axes) and an origin place the
+// Shape in the Scene. column_x.w is the dim factor of Models outside the Focus, column_y.w the drawing rank.
 @group(0) @binding(1) var<uniform> palette: array<vec4<f32>, 256>;
 
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) albedo: vec3<f32>,
-    @location(1) @interpolate(flat) face: u32,
+    @location(1) @interpolate(flat) normal: vec3<f32>,
     @location(2) ao: f32,
+    @location(3) @interpolate(flat) dim: f32,
 };
-
-@vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) packed: u32) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.face = packed & 7u;
-    out.ao = f32((packed >> 3u) & 3u) / 3.0;
-    out.albedo = palette[(packed >> 8u) & 255u].rgb;
-    return out;
-}
 
 fn face_normal(face: u32) -> vec3<f32> {
     let axis = face / 2u;
@@ -24,14 +17,40 @@ fn face_normal(face: u32) -> vec3<f32> {
     return vec3<f32>(f32(axis == 0u), f32(axis == 1u), f32(axis == 2u)) * sign;
 }
 
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) packed: u32,
+    @location(2) column_x: vec4<f32>,
+    @location(3) column_y: vec4<f32>,
+    @location(4) column_z: vec4<f32>,
+    @location(5) origin: vec4<f32>,
+) -> VertexOutput {
+    var out: VertexOutput;
+    let world = column_x.xyz * position.x + column_y.xyz * position.y + column_z.xyz * position.z + origin.xyz;
+    out.clip = camera.view_proj * vec4<f32>(world, 1.0);
+    // Where Models overlap the one higher in the tree (lower rank) must win; the nudge is far below one voxel.
+    out.clip.z += min(column_y.w, 32.0) * 4e-7 * out.clip.w;
+    let local_normal = face_normal(packed & 7u);
+    out.normal = column_x.xyz * local_normal.x + column_y.xyz * local_normal.y + column_z.xyz * local_normal.z;
+    out.ao = f32((packed >> 3u) & 3u) / 3.0;
+    out.albedo = palette[(packed >> 8u) & 255u].rgb;
+    out.dim = column_x.w;
+    return out;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = face_normal(in.face);
+    let normal = in.normal;
     let sky = vec3<f32>(0.62, 0.68, 0.78);
     let ground = vec3<f32>(0.24, 0.22, 0.21);
     let ambient = mix(ground, sky, normal.y * 0.5 + 0.5);
     let sun = max(dot(normal, camera.sun.xyz), 0.0);
     let occlusion = mix(0.38, 1.0, in.ao);
     let light = ambient * 0.62 + vec3<f32>(1.0, 0.96, 0.9) * sun * 0.7;
-    return vec4<f32>(in.albedo * light * occlusion, 1.0);
+    var color = in.albedo * light * occlusion;
+    // Models outside the Focus stay readable but recede: desaturate and darken.
+    let grey = vec3<f32>(dot(color, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    color = mix(color, grey, in.dim * 0.45) * mix(1.0, 0.42, in.dim);
+    return vec4<f32>(color, 1.0);
 }

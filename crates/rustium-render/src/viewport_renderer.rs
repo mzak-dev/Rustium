@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use rustium_core::{ChunkCoord, ChunkMesh, MeshVertex, Palette};
+use rustium_core::{ChunkCoord, ChunkMesh, MeshVertex, Palette, Placement, ShapeId};
 use wgpu::util::DeviceExt;
 
 use crate::glass_pass::{GlassPass, GlassRect};
@@ -35,9 +35,55 @@ pub struct LineVertex {
 
 const _: () = assert!(size_of::<LineVertex>() == 28);
 
+/// One Model to draw this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModelDraw {
+    /// Which Shape to draw, where and in what drawing order.
+    pub placement: Placement,
+    /// How strongly the Model is dimmed, from 0 (normal) to 1 (fully dimmed); used for everything outside the Focus.
+    pub dim: f32,
+}
+
+/// Per-Model data read by the raster vertex shader (`shaders/raster.wgsl`).
+///
+/// The three columns hold the images of the X, Y and Z axes and `origin` the translation; the `w` components carry
+/// the dim factor (`column_x`) and the drawing rank (`column_y`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+struct InstanceData {
+    column_x: [f32; 4],
+    column_y: [f32; 4],
+    column_z: [f32; 4],
+    origin: [f32; 4],
+}
+
+const _: () = assert!(size_of::<InstanceData>() == 64);
+
+impl InstanceData {
+    fn new(model: &ModelDraw) -> Self {
+        let [x, y, z] = model
+            .placement
+            .transform
+            .orientation
+            .columns()
+            .map(glam::IVec3::as_vec3);
+        let origin = model.placement.transform.offset.as_vec3();
+        // The rank only needs to separate neighbours in drawing order, so f32 precision is plenty.
+        let rank = model.placement.rank as f32;
+        Self {
+            column_x: [x.x, x.y, x.z, model.dim],
+            column_y: [y.x, y.y, y.z, rank],
+            column_z: [z.x, z.y, z.z, 0.0],
+            origin: [origin.x, origin.y, origin.z, 0.0],
+        }
+    }
+}
+
 /// Everything the viewport needs to draw one frame.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportFrame<'frame> {
+    /// The Models to draw, in drawing order.
+    pub models: &'frame [ModelDraw],
     /// Camera and lighting.
     pub camera: CameraUniform,
     /// Background color as linear RGB.
@@ -70,6 +116,7 @@ struct SceneTargets {
 #[derive(Debug)]
 struct Pipelines {
     raster: wgpu::RenderPipeline,
+    raster_mirrored: wgpu::RenderPipeline,
     grid: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
 }
@@ -88,7 +135,8 @@ pub struct ViewportRenderer {
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: Pipelines,
     line_buffer: wgpu::Buffer,
-    chunks: HashMap<ChunkCoord, GpuChunk>,
+    instance_buffer: wgpu::Buffer,
+    chunks: HashMap<ShapeId, HashMap<ChunkCoord, GpuChunk>>,
     targets: Option<SceneTargets>,
     glass: GlassPass,
 }
@@ -144,6 +192,7 @@ impl ViewportRenderer {
         });
         let pipelines = create_pipelines(device, &pipeline_layout, sample_count);
         let line_buffer = create_line_buffer(device, 256);
+        let instance_buffer = create_instance_buffer(device, 64);
         let glass = GlassPass::new(device, gpu.surface_srgb_format());
         Self {
             sample_count,
@@ -153,6 +202,7 @@ impl ViewportRenderer {
             pipeline_layout,
             pipelines,
             line_buffer,
+            instance_buffer,
             chunks: HashMap::new(),
             targets: None,
             glass,
@@ -187,14 +237,16 @@ impl ViewportRenderer {
             .write_buffer(&self.palette_buffer, 0, bytemuck::cast_slice(&colors));
     }
 
-    /// Replaces the GPU mesh of one chunk; an empty mesh removes it.
+    /// Replaces the GPU mesh of one chunk of `shape`; an empty mesh removes it.
     // ponytail: new buffers per upload; switch to a pooled allocator if strokes show allocation stalls.
-    pub fn upload_chunk(&mut self, gpu: &GpuContext, coord: ChunkCoord, mesh: &ChunkMesh) {
+    pub fn upload_chunk(&mut self, gpu: &GpuContext, shape: ShapeId, coord: ChunkCoord, mesh: &ChunkMesh) {
         let Ok(index_count) = u32::try_from(mesh.indices.len()) else {
             return;
         };
         if index_count == 0 {
-            self.chunks.remove(&coord);
+            if let Some(chunks) = self.chunks.get_mut(&shape) {
+                chunks.remove(&coord);
+            }
             return;
         }
         let device = gpu.device();
@@ -208,7 +260,7 @@ impl ViewportRenderer {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        self.chunks.insert(
+        self.chunks.entry(shape).or_default().insert(
             coord,
             GpuChunk {
                 vertices,
@@ -247,6 +299,11 @@ impl ViewportRenderer {
             self.line_buffer = create_line_buffer(gpu.device(), frame.lines.len().next_power_of_two());
         }
         queue.write_buffer(&self.line_buffer, 0, line_bytes);
+        let instances: Vec<InstanceData> = frame.models.iter().map(InstanceData::new).collect();
+        if instances.len() * size_of::<InstanceData>() > usize::try_from(self.instance_buffer.size()).unwrap_or(0) {
+            self.instance_buffer = create_instance_buffer(gpu.device(), instances.len().next_power_of_two());
+        }
+        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
 
         let (view, resolve_target) = match &targets.multisampled {
             Some(multisampled) => (multisampled, Some(&targets.color)),
@@ -278,11 +335,23 @@ impl ViewportRenderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.scene_group, &[]);
-            pass.set_pipeline(&self.pipelines.raster);
-            for chunk in self.chunks.values() {
-                pass.set_vertex_buffer(0, chunk.vertices.slice(..));
-                pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            for (index, model) in frame.models.iter().enumerate() {
+                let (Some(chunks), Ok(index)) = (self.chunks.get(&model.placement.shape), u32::try_from(index)) else {
+                    continue;
+                };
+                // A mirror flips the winding of every face, so mirrored Models need the opposite front face.
+                let pipeline = if model.placement.transform.orientation.is_mirrored() {
+                    &self.pipelines.raster_mirrored
+                } else {
+                    &self.pipelines.raster
+                };
+                pass.set_pipeline(pipeline);
+                for chunk in chunks.values() {
+                    pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                    pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..chunk.index_count, 0, index..index + 1);
+                }
             }
             if frame.show_grid {
                 pass.set_pipeline(&self.pipelines.grid);
@@ -313,6 +382,15 @@ fn create_line_buffer(device: &wgpu::Device, vertices: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("overlay lines"),
         size: (vertices.max(2) * size_of::<LineVertex>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_instance_buffer(device: &wgpu::Device, instances: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("model instances"),
+        size: (instances.max(1) * size_of::<InstanceData>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
@@ -372,6 +450,7 @@ struct PipelineSpec<'spec> {
     buffers: &'spec [Option<wgpu::VertexBufferLayout<'spec>>],
     topology: wgpu::PrimitiveTopology,
     cull_mode: Option<wgpu::Face>,
+    front_face: wgpu::FrontFace,
     depth_write: bool,
     blend: Option<wgpu::BlendState>,
 }
@@ -400,6 +479,7 @@ fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample
             primitive: wgpu::PrimitiveState {
                 topology: spec.topology,
                 cull_mode: spec.cull_mode,
+                front_face: spec.front_face,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -439,22 +519,33 @@ fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
     };
-    Pipelines {
-        raster: build(PipelineSpec {
-            label: "raster pipeline",
+    let instance_layout = wgpu::VertexBufferLayout {
+        array_stride: size_of::<InstanceData>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4],
+    };
+    let raster = |label, front_face| {
+        build(PipelineSpec {
+            label,
             module: &raster_module,
-            buffers: &[Some(mesh_layout)],
+            buffers: &[Some(mesh_layout.clone()), Some(instance_layout.clone())],
             topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: Some(wgpu::Face::Back),
+            front_face,
             depth_write: true,
             blend: None,
-        }),
+        })
+    };
+    Pipelines {
+        raster: raster("raster pipeline", wgpu::FrontFace::Ccw),
+        raster_mirrored: raster("mirrored raster pipeline", wgpu::FrontFace::Cw),
         grid: build(PipelineSpec {
             label: "grid pipeline",
             module: &grid_module,
             buffers: &[],
             topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: None,
+            front_face: wgpu::FrontFace::Ccw,
             depth_write: false,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
         }),
@@ -464,6 +555,7 @@ fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample
             buffers: &[Some(line_layout)],
             topology: wgpu::PrimitiveTopology::LineList,
             cull_mode: None,
+            front_face: wgpu::FrontFace::Ccw,
             depth_write: false,
             blend: Some(wgpu::BlendState::ALPHA_BLENDING),
         }),

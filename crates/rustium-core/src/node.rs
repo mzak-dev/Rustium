@@ -102,6 +102,11 @@ impl Graph {
     }
 
     /// Number of Nodes in the arena, deleted ones included.
+    /// A graph of the given arena; the caller guarantees ids and parents are consistent.
+    pub(crate) fn from_nodes(nodes: Vec<Node>) -> Self {
+        Self { nodes }
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }

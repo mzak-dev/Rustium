@@ -6,3 +6,4 @@ allow-print-in-tests = true
 avoid-breaking-exported-api = false   # let clippy suggest API improvements in pre-1.0 crates
 max-fn-params-bools = 1               # 2+ bool params → use enums (§6.4)
 too-many-arguments-threshold = 7      # default, stated explicitly (§6.4)
+doc-valid-idents = ["MagicaVoxel", "JASC-PAL", ".."]

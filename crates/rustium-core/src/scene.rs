@@ -71,6 +71,23 @@ impl Scene {
         scene
     }
 
+    /// Assembles a Scene read from a file; the caller has validated the parts.
+    pub(crate) fn from_parts(
+        graph: Graph,
+        shapes: Vec<Shape>,
+        palette: Palette,
+        material_graphs: Vec<MaterialGraph>,
+        voxel_size: f32,
+    ) -> Self {
+        Self {
+            graph: Arc::new(graph),
+            shapes,
+            palette,
+            material_graphs,
+            voxel_size,
+        }
+    }
+
     /// Colors voxels can use.
     pub fn palette(&self) -> &Palette {
         &self.palette

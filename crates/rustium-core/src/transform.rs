@@ -34,6 +34,19 @@ impl Orientation {
         result
     }
 
+    /// Builds an Orientation from its three columns, or `None` unless they form a signed permutation of the axes.
+    pub fn from_columns(columns: [IVec3; 3]) -> Option<Self> {
+        let mut used = [false; 3];
+        for column in columns {
+            let axis = (0..3).find(|axis| column[*axis].abs() == 1)?;
+            if column[(axis + 1) % 3] != 0 || column[(axis + 2) % 3] != 0 || used[axis] {
+                return None;
+            }
+            used[axis] = true;
+        }
+        Some(Self { columns })
+    }
+
     /// Flips `axis` (0 = X, 1 = Y, 2 = Z).
     #[must_use]
     pub fn mirror(axis: usize) -> Self {

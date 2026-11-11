@@ -109,6 +109,9 @@ async fn serve(listener: TcpListener, bridge: Bridge, cancel: &CancellationToken
         .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_sse_keep_alive(None)
+        // Host checks (loopback names only) are on by default and stop DNS rebinding; any request that carries
+        // an Origin header comes from a web page, never from an MCP client, so refuse those too.
+        .enforce_origin_validation()
         .with_cancellation_token(cancel.child_token());
     let service = StreamableHttpService::new(
         move || Ok(Tools::new(bridge.clone())),

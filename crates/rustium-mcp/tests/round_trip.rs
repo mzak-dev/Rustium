@@ -215,3 +215,26 @@ fn a_busy_port_is_reported_as_a_bind_error() {
     let error = Server::start(port, bridge).unwrap_err();
     assert!(error.to_string().contains(&port.to_string()), "{error}");
 }
+
+#[test]
+fn web_pages_and_foreign_hosts_are_refused() {
+    let fixture = start();
+    let url = fixture.server.url();
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+    let body =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "scene_info", "arguments": {}}});
+    let send = |header: &str, value: &str| {
+        agent
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header(header, value)
+            .send(body.to_string())
+            .unwrap()
+            .status()
+    };
+    assert_eq!(send("Origin", "https://evil.example"), 403);
+    assert_eq!(send("Host", "evil.example"), 403);
+    drop(fixture.server);
+    assert!(fixture.ui.join().unwrap().is_empty(), "nothing reached the UI thread");
+}

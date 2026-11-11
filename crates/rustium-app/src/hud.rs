@@ -3,18 +3,19 @@
 mod corners;
 mod hotbar;
 mod inspector;
+mod scene_tree;
 mod tool_options;
 mod toolbar;
 mod top_left;
 mod top_right;
 mod view_cube;
+mod viewport;
 pub(crate) mod widgets;
 
-use egui::{
-    Align2, Context, CornerRadius, Id, InnerResponse, Key, Modifiers, Order, PointerButton, Pos2, Rect, Ui, Vec2,
-};
-use glam::Vec2 as GlamVec2;
-use rustium_core::{Face, HitTarget, pick};
+use std::collections::HashSet;
+
+use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Key, Modifiers, Order, Pos2, Rect, Ui, Vec2};
+use rustium_core::{Face, NodeId};
 use winit::window::ResizeDirection;
 
 use crate::camera::OrbitCamera;
@@ -42,6 +43,14 @@ pub(crate) struct UiState {
     pub(crate) splash_opened_at: Option<f64>,
     pub(crate) settings_section: Option<Section>,
     pub(crate) settings_search: String,
+    /// Where the Tool wheel is open, in points.
+    pub(crate) tool_wheel: Option<Pos2>,
+    /// Where a marquee drag started, in points.
+    pub(crate) marquee: Option<Pos2>,
+    /// Groups collapsed in the Scene tree.
+    pub(crate) collapsed: HashSet<NodeId>,
+    /// The Node being renamed in the Scene tree and the text typed so far.
+    pub(crate) renaming: Option<(NodeId, String)>,
 }
 
 impl UiState {
@@ -55,6 +64,10 @@ impl UiState {
             splash_opened_at: None,
             settings_section: None,
             settings_search: String::new(),
+            tool_wheel: None,
+            marquee: None,
+            collapsed: HashSet::new(),
+            renaming: None,
         }
     }
 
@@ -261,66 +274,7 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         return;
     }
 
-    // Hover picking.
-    let aspect = screen.width() / screen.height().max(1.0);
-    hud.editor.hover = None;
-    let mut focus = hud.camera.target;
-    if let Some(position) = pointer.filter(|_| response.hovered() || hud.editor.is_stroking()) {
-        let ndc = GlamVec2::new(
-            (position.x - screen.min.x) / screen.width() * 2.0 - 1.0,
-            1.0 - (position.y - screen.min.y) / screen.height() * 2.0,
-        );
-        let ray = hud.camera.ray(ndc, aspect);
-        hud.editor.hover = pick(hud.editor.scene.shape(), ray, 4000.0);
-        if let Some(hit) = hud.editor.hover {
-            focus = match hit.target {
-                HitTarget::Voxel => hit.voxel.as_vec3() + 0.5,
-                HitTarget::Ground => (hit.voxel + glam::IVec3::Y).as_vec3() + glam::Vec3::new(0.5, 0.0, 0.5),
-            };
-        }
-    }
-
-    // Brush strokes with the primary button.
-    let (pressed, down, released) = ctx.input(|input| {
-        (
-            input.pointer.primary_pressed(),
-            input.pointer.primary_down(),
-            input.pointer.primary_released(),
-        )
-    });
-    if pressed
-        && response.hovered()
-        && hud.editor.tool.is_available()
-        && let Some(hit) = hud.editor.hover
-    {
-        hud.editor.press(hit);
-    } else if down
-        && hud.editor.is_stroking()
-        && let Some(hit) = hud.editor.hover
-    {
-        hud.editor.drag(hit);
-    }
-    if released || (!down && hud.editor.is_stroking()) {
-        hud.editor.release();
-    }
-
-    // Camera: middle drag orbits, Shift + middle drag pans, the wheel zooms towards the cursor.
-    if response.dragged_by(PointerButton::Middle) {
-        let delta = response.drag_delta();
-        if ctx.input(|input| input.modifiers.shift) {
-            hud.camera.pan(GlamVec2::new(delta.x, delta.y), screen.height());
-        } else {
-            hud.camera
-                .orbit(GlamVec2::new(delta.x, delta.y), hud.settings.orbit_style);
-        }
-    }
-    if response.hovered() {
-        let scroll = ctx.input(|input| input.smooth_scroll_delta.y);
-        if scroll.abs() > f32::EPSILON {
-            let direction = if hud.settings.invert_zoom { -1.0 } else { 1.0 };
-            hud.camera.zoom_towards(scroll / 60.0 * direction, focus);
-        }
-    }
+    viewport::interact(ctx, hud, &response, screen, pointer);
 }
 
 fn resize_direction(screen: Rect, position: Pos2) -> Option<ResizeDirection> {
@@ -388,13 +342,47 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
         hud.send(AppCommand::FrameModel);
     }
     for tool in Tool::ALL {
-        if tool.is_available() && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
+        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
             hud.editor.tool = tool;
         }
     }
+    focus_keys(ctx, hud);
     for (slot, key) in SLOT_KEYS.into_iter().enumerate() {
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, key)) {
             hud.editor.active_slot = slot;
+        }
+    }
+}
+
+/// Enter steps into the selected Node, Esc clears the voxel selection and then steps out, Delete removes Nodes.
+fn focus_keys(ctx: &Context, hud: &mut Hud<'_>) {
+    if hud.ui.renaming.is_some() {
+        return;
+    }
+    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
+        let target = hud
+            .editor
+            .node_selection
+            .last()
+            .copied()
+            .or_else(|| hud.editor.hover.and_then(|hit| hit.node))
+            .and_then(|node| hud.editor.scene.child_toward(hud.editor.focus, node).or(Some(node)));
+        if let Some(target) = target {
+            hud.editor.step_in(target);
+        }
+    }
+    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
+        if !hud.editor.selection.is_empty() {
+            hud.editor.selection = rustium_core::Selection::new();
+        } else if !hud.editor.node_selection.is_empty() && !hud.editor.focus_is_model() {
+            hud.editor.node_selection.clear();
+        } else {
+            hud.editor.step_out();
+        }
+    }
+    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Delete)) {
+        for node in hud.editor.node_selection.clone() {
+            hud.editor.execute(&rustium_core::Command::Delete { node });
         }
     }
 }

@@ -2,9 +2,9 @@
 
 use egui::{Align2, Context, RichText, vec2};
 use fluent_bundle::FluentValue;
-use rustium_core::HitTarget;
 
 use super::{Hud, Intro, Place, corner, island, widgets};
+use crate::editor::Tool;
 use crate::theme;
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
@@ -68,16 +68,22 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(34.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
-                let position = hud.editor.hover.map(|hit| match hit.target {
-                    HitTarget::Voxel => hit.voxel,
-                    HitTarget::Ground => hit.voxel + glam::IVec3::Y,
-                });
+                let position = hud.editor.hover_cell();
                 let position = position.map_or_else(
                     || "X –  Y –  Z –".to_owned(),
                     |p| format!("X {}  Y {}  Z {}", p.x, p.y, p.z),
                 );
                 ui.label(widgets::mono(position, 11.0));
-                if let Some(volume) = hud.editor.scene.shape().volume() {
+                if let Some((_, _, distance)) = hud.editor.distance().filter(|_| hud.editor.tool == Tool::Measure) {
+                    let delta = distance.delta;
+                    ui.label(widgets::mono(
+                        format!(
+                            "Δ {} {} {}  ·  {:.2} vox  ·  {:.2} m",
+                            delta.x, delta.y, delta.z, distance.voxels, distance.metres
+                        ),
+                        11.0,
+                    ));
+                } else if let Some(volume) = hud.editor.scene.world_volume(hud.editor.focus) {
                     let size = volume.size();
                     ui.label(widgets::mono(format!("{} × {} × {}", size.x, size.y, size.z), 11.0));
                 }

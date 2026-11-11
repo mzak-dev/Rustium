@@ -51,7 +51,8 @@ Most voxel editors make you choose: a polished UI or a renderer you can trust an
 
 | Area | What you get |
 |---|---|
-| **Editing** | Attach, Erase and Paint with a cubic brush (1–64 voxels), Pick color. A drag stroke is one undo step. Attach strokes stay on their starting plane, so they never stack toward the camera. |
+| **Editing** | Attach, Erase and Paint with Voxel, Line, Box and Face brushes (1–64 voxels), surface and 3D Fill, live Mirror X/Y/Z, Select box / by color, Move, Measure, Pick color. A drag stroke is one undo step. Attach strokes stay on their starting plane, so they never stack toward the camera. |
+| **Scene** | Groups, Models and Instances with a tree in the inspector (hide, lock, rename, drag to reparent, ×N instance counters), Duplicate / Duplicate as Instance / Make Unique / Merge / Split, step into a Node with Enter and out with Esc; the rest of the Scene dims while you edit. |
 | **History** | Undo / redo (`Ctrl Z`, `Ctrl Y`), a configurable step limit, and a History tab where clicking any step jumps there. |
 | **Colors** | 10-slot hotbar on keys `1`–`0` and a 96-color palette popover. |
 | **Viewport** | Orbit (turntable or free), pan, zoom to cursor, perspective / orthographic, view cube with click-to-snap, ground grid, Volume bounds, hover preview of the brush. |

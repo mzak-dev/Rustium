@@ -1256,7 +1256,10 @@ mod tests {
         editor.finish_material_edit();
         assert_eq!(editor.history.done().count(), 2);
         editor.undo();
-        assert_eq!(editor.scene.material_graphs()[1].surface, SurfaceConstants::MATTE);
+        assert_eq!(
+            editor.scene.material_graphs()[1].surface_constants(),
+            SurfaceConstants::MATTE
+        );
         assert!(editor.take_palette_dirty(), "undo changes the colors too");
     }
 

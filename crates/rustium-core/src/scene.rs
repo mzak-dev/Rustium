@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::ids::{NodeId, ShapeId};
 use crate::material_graph::MaterialGraph;
 use crate::node::{Graph, Node};
-use crate::palette::Palette;
+use crate::palette::{ColorId, Palette};
 use crate::shape::{Shape, Volume};
 use crate::transform::Transform;
 
@@ -96,6 +96,15 @@ impl Scene {
     /// Material graphs, shared by every Model; index 0 is the Default material.
     pub fn material_graphs(&self) -> &[MaterialGraph] {
         &self.material_graphs
+    }
+
+    /// The Colors of the Palette that use the Material at `graph` (the Material's "Used by" list).
+    pub fn colors_using(&self, graph: u32) -> Vec<ColorId> {
+        self.palette
+            .iter()
+            .filter(|(_, color)| color.graph == graph)
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Edge length of one voxel in metres.

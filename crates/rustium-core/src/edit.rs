@@ -56,6 +56,32 @@ pub enum EditKind {
     CreateGraph,
     /// A Color was assigned to a material graph.
     AssignGraph,
+    /// A Material was copied.
+    DuplicateGraph,
+    /// A Material was deleted.
+    DeleteGraph,
+    /// A Material was renamed.
+    RenameGraph,
+    /// "Casts shadow" of a Material was switched.
+    CastsShadow,
+    /// A node was added to a Material graph.
+    AddGraphNode,
+    /// Nodes were removed from a Material graph.
+    RemoveGraphNodes,
+    /// Nodes or frames of a Material graph moved.
+    MoveGraphNodes,
+    /// Two sockets of a Material graph were linked.
+    ConnectGraph,
+    /// A link of a Material graph was removed.
+    DisconnectGraph,
+    /// A node's parameter or input constant changed.
+    SetGraphParam,
+    /// A node of a Material graph was renamed.
+    RenameGraphNode,
+    /// A node's Bypass was switched.
+    BypassGraphNode,
+    /// A frame of a Material graph was added, changed or removed.
+    GraphFrame,
     /// A batch of voxels was set or erased at explicit positions.
     SetVoxels,
     /// The base color of a Palette entry changed.

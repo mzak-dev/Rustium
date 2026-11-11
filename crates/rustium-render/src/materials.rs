@@ -48,7 +48,7 @@ impl GpuMaterialTable {
     pub fn new(palette: &Palette, graphs: &[MaterialGraph]) -> Self {
         let mut table = Self::zeroed();
         for (slot, graph) in table.surfaces.iter_mut().zip(graphs) {
-            let surface = &graph.surface;
+            let surface = graph.surface_constants();
             let [r, g, b] = surface.emission_color.map(srgb_to_linear);
             *slot = GpuSurface {
                 emission: [r, g, b, surface.emission_strength],
@@ -100,9 +100,9 @@ mod tests {
     fn surface_constants_land_in_the_expected_lanes() {
         let graphs = [
             MaterialGraph::default_material(),
-            MaterialGraph {
-                name: "Lamp".to_owned(),
-                surface: SurfaceConstants {
+            MaterialGraph::from_constants(
+                "Lamp",
+                SurfaceConstants {
                     roughness: 0.25,
                     metallic: 1.0,
                     emission_color: [255, 255, 255],
@@ -110,7 +110,7 @@ mod tests {
                     transmission: 0.5,
                     ior: 1.33,
                 },
-            },
+            ),
         ];
         let table = GpuMaterialTable::new(&Palette::default(), &graphs);
         assert_eq!(table.surfaces[1].params, [0.25, 1.0, 0.5, 1.33]);

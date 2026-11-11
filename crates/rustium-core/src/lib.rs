@@ -75,7 +75,11 @@ pub use error::Error;
 pub use face::Face;
 pub use file_error::FileError;
 pub use ids::{NodeId, ShapeId};
-pub use material_graph::{MaterialGraph, SurfaceConstants};
+pub use material_graph::{
+    Frame, FrameId, GraphEdit, GraphError, GraphNode, GraphNodeId, GraphNodeKind, InputRef, InputSpec, InputValue,
+    Link, MaterialGraph, NodeCategory, NodeSpec, OutputRef, OutputSpec, ParamKind, ParamSpec, ParamValue, RAMP_STOPS,
+    RampStop, SampleMaterial, SocketType, SurfaceConstants,
+};
 pub use mesh::{ChunkMesh, MeshVertex, mesh_chunk};
 pub use node::{Node, NodeKind};
 pub use pal::{MAX_COLORS as PAL_MAX_COLORS, parse_pal, write_pal};

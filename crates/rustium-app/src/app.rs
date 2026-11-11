@@ -166,17 +166,17 @@ impl ApplicationHandler<UserEvent> for App {
 impl Running {
     fn new(event_loop: &ActiveEventLoop, settings: &Settings, proxy: &EventLoopProxy<UserEvent>) -> Result<Self> {
         let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
-        let mut attributes = Window::default_attributes()
+        let attributes = Window::default_attributes()
             .with_title("Rustium")
             .with_decorations(false)
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(960.0, 640.0))
             .with_window_icon(Icon::from_rgba(logo_rgba.clone(), logo_size.0, logo_size.1).ok());
         #[cfg(windows)]
-        {
+        let attributes = {
             use winit::platform::windows::WindowAttributesExtWindows;
-            attributes = attributes.with_undecorated_shadow(true);
-        }
+            attributes.with_undecorated_shadow(true)
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)

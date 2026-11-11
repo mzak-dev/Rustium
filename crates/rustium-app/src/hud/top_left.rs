@@ -4,7 +4,7 @@ use egui::load::SizedTexture;
 use egui::{Align2, Context, Image, PopupCloseBehavior, vec2};
 
 use super::widgets::{self, Look};
-use super::{AppCommand, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, island};
+use super::{AppCommand, Hud, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island};
 use crate::icons::Icon;
 use crate::settings_window::Section;
 use crate::theme;
@@ -42,11 +42,20 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     widgets::icon_button(ui, Icon::Menu, 32.0, Look::Plain, true).on_hover_text(hud.tr("main-menu"));
                 main_menu(&menu_button, hud);
                 widgets::divider(ui, 32.0);
-                widgets::text_button(ui, &hud.tr("mode-model"), 32.0, Look::On, true);
+                let current = hud.ui.mode;
+                let look = |mode| if current == mode { Look::On } else { Look::Plain };
+                if widgets::text_button(ui, &hud.tr("mode-model"), 32.0, look(Mode::Model), true).clicked() {
+                    hud.ui.mode = Mode::Model;
+                }
                 widgets::text_button(ui, &hud.tr("mode-effects"), 32.0, Look::Plain, false)
                     .on_hover_text(hud.tr("planned"));
-                widgets::text_button(ui, &hud.tr("mode-render"), 32.0, Look::Plain, false)
-                    .on_hover_text(hud.tr("later-milestone"));
+                if widgets::text_button(ui, &hud.tr("mode-render"), 32.0, look(Mode::Render), true).clicked()
+                    && hud.ui.mode != Mode::Render
+                {
+                    hud.editor.release();
+                    hud.ui.render.enter(hud.camera);
+                    hud.ui.mode = Mode::Render;
+                }
             });
         },
     );

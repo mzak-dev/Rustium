@@ -3,7 +3,7 @@
 use egui::{Align2, Context, vec2};
 
 use super::widgets::{self, Look};
-use super::{AppCommand, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, island};
+use super::{AppCommand, Hud, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island};
 use crate::camera::Projection;
 use crate::icons::Icon;
 use crate::theme;
@@ -38,31 +38,41 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     hud.editor.redo();
                 }
                 widgets::divider(ui, 32.0);
-                let grid_look = if hud.settings.show_grid { Look::On } else { Look::Plain };
-                if widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true)
-                    .on_hover_text(hud.tr("grid"))
-                    .clicked()
-                {
-                    hud.settings.show_grid = !hud.settings.show_grid;
-                    hud.send(AppCommand::SettingsChanged);
+                if hud.ui.mode == Mode::Render {
+                    let look = if hud.ui.render.guides { Look::On } else { Look::Plain };
+                    if widgets::icon_button(ui, Icon::Guides, 32.0, look, true)
+                        .on_hover_text(hud.tr("frame-guides"))
+                        .clicked()
+                    {
+                        hud.ui.render.guides = !hud.ui.render.guides;
+                    }
+                } else {
+                    let grid_look = if hud.settings.show_grid { Look::On } else { Look::Plain };
+                    if widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true)
+                        .on_hover_text(hud.tr("grid"))
+                        .clicked()
+                    {
+                        hud.settings.show_grid = !hud.settings.show_grid;
+                        hud.send(AppCommand::SettingsChanged);
+                    }
+                    let shading = widgets::dropdown_button(ui, &hud.tr("shading-shaded"));
+                    egui::Popup::menu(&shading).show(|ui| {
+                        ui.set_min_width(170.0);
+                        let _ = ui.selectable_label(true, hud.tr("shading-shaded"));
+                        ui.separator();
+                        let camera = &mut *hud.camera;
+                        ui.selectable_value(
+                            &mut camera.projection,
+                            Projection::Perspective,
+                            hud.i18n.tr("projection-perspective"),
+                        );
+                        ui.selectable_value(
+                            &mut camera.projection,
+                            Projection::Orthographic,
+                            hud.i18n.tr("projection-orthographic"),
+                        );
+                    });
                 }
-                let shading = widgets::dropdown_button(ui, &hud.tr("shading-shaded"));
-                egui::Popup::menu(&shading).show(|ui| {
-                    ui.set_min_width(170.0);
-                    let _ = ui.selectable_label(true, hud.tr("shading-shaded"));
-                    ui.separator();
-                    let camera = &mut *hud.camera;
-                    ui.selectable_value(
-                        &mut camera.projection,
-                        Projection::Perspective,
-                        hud.i18n.tr("projection-perspective"),
-                    );
-                    ui.selectable_value(
-                        &mut camera.projection,
-                        Projection::Orthographic,
-                        hud.i18n.tr("projection-orthographic"),
-                    );
-                });
                 widgets::divider(ui, 32.0);
                 if widgets::icon_button(ui, Icon::Minimize, 32.0, Look::Plain, true)
                     .on_hover_text(hud.tr("window-minimize"))

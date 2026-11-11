@@ -40,6 +40,14 @@ pub(crate) enum Icon {
     EyeOff,
     Lock,
     Unlock,
+    Orbit,
+    Dolly,
+    Focus,
+    Sun,
+    Play,
+    Pause,
+    Plus,
+    Guides,
 }
 
 impl Icon {
@@ -81,6 +89,14 @@ impl Icon {
                 "M2 12c3-5 6-7 10-7c4 0 7 2 10 7c-3 5-6 7-10 7c-4 0-7-2-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M4 4l16 16"
             }
             Self::Lock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 8 0v3",
+            Self::Orbit => "M20 12a8 8 0 1 1-3-6.2 M20 4v5h-5",
+            Self::Dolly => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M16 16l4 4 M11 8v6 M8 11h6",
+            Self::Focus => "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M12 2v4 M12 18v4 M2 12h4 M18 12h4",
+            Self::Sun => "M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8z M13 13l7 7 M20 15v5h-5",
+            Self::Play => "M7 4l13 8-13 8z",
+            Self::Pause => "M8 5v14 M16 5v14",
+            Self::Plus => "M12 5v14 M5 12h14",
+            Self::Guides => "M4 4h16v16H4z M4 9.5h16 M4 14.5h16 M9.5 4v16 M14.5 4v16",
             Self::Unlock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 7.5-2",
         }
     }

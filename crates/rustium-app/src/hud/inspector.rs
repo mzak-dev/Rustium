@@ -1,10 +1,14 @@
-//! Right island: Scene, History and MCP tabs. Collapses to a small tab on the right edge.
+//! Right island: Scene, History and MCP tabs in Model mode, Render/Camera/Light/Output in Render mode. Collapses to a
+//! small tab on the right edge.
 
 use egui::{Context, Grid, Id, RichText, ScrollArea, Sense, Stroke, vec2};
 use rustium_core::EditKind;
 
 use super::widgets::{self, Look};
-use super::{AppCommand, Glass, Hud, INSPECTOR_WIDTH, InspectorTab, Intro, MARGIN, Place, TOP_BAR_HEIGHT, island};
+use super::{
+    AppCommand, Glass, Hud, INSPECTOR_WIDTH, InspectorTab, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island,
+    render_inspector,
+};
 use crate::icons::Icon;
 use crate::settings::Motion;
 use crate::theme;
@@ -34,6 +38,13 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 ui.set_width(INSPECTOR_WIDTH);
                 ui.set_height(height);
                 ui.vertical(|ui| {
+                    if hud.ui.mode == Mode::Render {
+                        render_tabs(ui, hud);
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| render_inspector::content(ui, hud));
+                        return;
+                    }
                     tabs(ui, hud);
                     ScrollArea::vertical()
                         .auto_shrink([false, false])
@@ -72,6 +83,36 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             hud.ui.inspector_open = true;
         }
     }
+}
+
+/// The Render-mode tab row: Render, Camera, Light and Output, plus the collapse button.
+fn render_tabs(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
+    egui::Frame::new().inner_margin(4).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, key) in render_inspector::TABS {
+                let look = if hud.ui.render.tab == tab {
+                    Look::On
+                } else {
+                    Look::Plain
+                };
+                if widgets::text_button(ui, &hud.tr(key), 32.0, look, true).clicked() {
+                    hud.ui.render.tab = tab;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::icon_button(ui, Icon::ChevronRight, 32.0, Look::Plain, true)
+                    .on_hover_text(hud.tr("inspector-collapse"))
+                    .clicked()
+                {
+                    hud.ui.inspector_open = false;
+                }
+            });
+        });
+    });
+    let rect = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER));
 }
 
 fn tabs(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
@@ -131,6 +172,9 @@ fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
         EditKind::Split => "edit-split",
         EditKind::MoveNode => "edit-move-node",
         EditKind::Transform => "edit-transform",
+        EditKind::EditGraph => "edit-graph",
+        EditKind::CreateGraph => "create-graph",
+        EditKind::AssignGraph => "assign-graph",
     })
 }
 

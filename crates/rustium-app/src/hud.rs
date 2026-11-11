@@ -3,6 +3,11 @@
 mod corners;
 mod hotbar;
 mod inspector;
+mod materials_preview;
+mod render_bottom;
+mod render_inspector;
+mod render_tools;
+mod render_viewport;
 mod scene_tree;
 mod tool_options;
 mod toolbar;
@@ -21,10 +26,20 @@ use winit::window::ResizeDirection;
 use crate::camera::OrbitCamera;
 use crate::editor::{Editor, Tool};
 use crate::i18n::I18n;
+use crate::render_mode::RenderState;
 use crate::settings::{Motion, Settings};
 use crate::settings_window::Section;
 
-/// Tabs of the right-hand inspector.
+/// The app's modes, switched in the top-left island.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    /// Editing voxels with the raster viewport.
+    Model,
+    /// Path-traced preview and image output.
+    Render,
+}
+
+/// Tabs of the right-hand inspector in Model mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InspectorTab {
     Scene,
@@ -36,6 +51,8 @@ pub(crate) enum InspectorTab {
 #[derive(Debug)]
 pub(crate) struct UiState {
     pub(crate) started_at: Option<f64>,
+    pub(crate) mode: Mode,
+    pub(crate) render: RenderState,
     pub(crate) inspector_open: bool,
     pub(crate) inspector_tab: InspectorTab,
     pub(crate) palette_open: bool,
@@ -57,6 +74,8 @@ impl UiState {
     pub(crate) fn new(show_splash: bool) -> Self {
         Self {
             started_at: None,
+            mode: Mode::Model,
+            render: RenderState::new(&OrbitCamera::default()),
             inspector_open: true,
             inspector_tab: InspectorTab::Scene,
             palette_open: false,
@@ -89,6 +108,10 @@ pub(crate) enum AppCommand {
     FrameModel,
     HistoryJump(usize),
     SettingsChanged,
+    /// Save the traced image through a file dialog.
+    SaveImage,
+    /// Throw away accumulated samples and trace again.
+    RestartRender,
 }
 
 /// One glass panel: the rect in points and its corner radius.
@@ -221,15 +244,28 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     if hud.ui.started_at.is_none() {
         hud.ui.started_at = Some(ctx.input(|input| input.time));
     }
+    if hud.ui.mode == Mode::Render {
+        render_viewport::layout(ctx, hud);
+    }
     viewport_input(ctx, hud);
     top_left::show(ctx, hud);
-    tool_options::show(ctx, hud);
     top_right::show(ctx, hud);
-    toolbar::show(ctx, hud);
     inspector::show(ctx, hud);
-    view_cube::show(ctx, hud);
-    hotbar::show(ctx, hud);
-    corners::show(ctx, hud);
+    match hud.ui.mode {
+        Mode::Model => {
+            tool_options::show(ctx, hud);
+            toolbar::show(ctx, hud);
+            view_cube::show(ctx, hud);
+            hotbar::show(ctx, hud);
+            corners::show(ctx, hud);
+        }
+        Mode::Render => {
+            render_tools::options(ctx, hud);
+            render_tools::toolbar(ctx, hud);
+            render_bottom::shots(ctx, hud);
+            render_bottom::corners(ctx, hud);
+        }
+    }
     if !hud.ui.modal_open() {
         shortcuts(ctx, hud);
     }
@@ -247,6 +283,9 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         .sense(egui::Sense::click_and_drag())
         .show(ctx, |ui| {
             ui.set_min_size(screen.size());
+            if hud.ui.mode == Mode::Render {
+                render_viewport::paint(ui, hud);
+            }
         })
         .response;
 
@@ -274,6 +313,10 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         return;
     }
 
+    if hud.ui.mode == Mode::Render {
+        render_viewport::input(ctx, hud, &response, pointer);
+        return;
+    }
     viewport::interact(ctx, hud, &response, screen, pointer);
 }
 
@@ -340,6 +383,10 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
     }
     if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Home)) {
         hud.send(AppCommand::FrameModel);
+    }
+    if hud.ui.mode == Mode::Render {
+        render_viewport::shortcuts(ctx, hud);
+        return;
     }
     for tool in Tool::ALL {
         if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {

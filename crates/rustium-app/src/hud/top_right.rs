@@ -98,10 +98,10 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 {
                     hud.send(AppCommand::Minimize);
                 }
-                if widgets::icon_button(ui, Icon::Maximize, 32.0, Look::Plain, true)
-                    .on_hover_text(hud.tr("window-maximize"))
-                    .clicked()
-                {
+                let maximize = widgets::icon_button(ui, Icon::Maximize, 32.0, Look::Plain, true)
+                    .on_hover_text(hud.tr("window-maximize"));
+                hud.ui.maximize_button = Some(maximize.rect);
+                if maximize.clicked() {
                     hud.send(AppCommand::ToggleMaximize);
                 }
                 if widgets::icon_button(ui, Icon::Close, 32.0, Look::Plain, true)

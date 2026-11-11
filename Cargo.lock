@@ -3108,6 +3108,7 @@ dependencies = [
  "rfd",
  "rustium-core",
  "rustium-mcp",
+ "rustium-platform",
  "rustium-render",
  "rustium-script",
  "serde",
@@ -3153,6 +3154,15 @@ dependencies = [
  "tokio-util",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "rustium-platform"
+version = "0.1.0"
+dependencies = [
+ "raw-window-handle",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

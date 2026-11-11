@@ -1,7 +1,7 @@
 # Architecture
 
 Rustium is a Cargo workspace. Dependencies point down: `rustium-app → rustium-render → rustium-core`; `rustium-app` also uses
-`rustium-mcp` and `rustium-script` (`rustium-script → rustium-core`).
+`rustium-mcp`, `rustium-script` (`rustium-script → rustium-core`) and `rustium-platform`.
 Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons are in [docs/adr](docs/adr).
 
 | Crate | Owns | Must not depend on |
@@ -11,6 +11,7 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 | `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging, documents (Open / Save, dirty tracking, autosave and recovery, recent files) | — |
 | `rustium-mcp` | in-process MCP server (streamable HTTP on `127.0.0.1:7420`) and the `--mcp-stdio` bridge; the only crate with tokio | the Scene (it depends on no other Rustium crate) |
 | `rustium-script` | sandboxed Luau scripting through mlua; a run is one `Edit` | GPU, windowing, async |
+| `rustium-platform` | Win32 `WM_NCHITTEST` for the frameless window (Snap Layouts over the maximize button, native title-bar drag and resize edges); a no-op off Windows; the only crate with `unsafe` | everything else |
 
 ## Data flow of one frame
 

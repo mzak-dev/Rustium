@@ -8,6 +8,7 @@ use egui::ViewportId;
 use fluent_bundle::FluentValue;
 use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
+use rustium_platform::{HitRegions, Platform};
 use rustium_render::{
     CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, TraceFrame,
     ViewportFrame, ViewportRenderer,
@@ -123,6 +124,8 @@ struct Running {
     recent: Vec<RecentFile>,
     splash_was_open: bool,
     title: String,
+    /// Win32 hit-testing for Snap Layouts; `None` off Windows.
+    platform: Option<Platform>,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -227,6 +230,7 @@ impl Running {
                 .create_window(attributes)
                 .wrap_err("cannot create the window")?,
         );
+        let platform = Platform::attach(&*window);
         let size = window.inner_size();
         let preferences = GpuPreferences {
             backend: match settings.backend {
@@ -324,7 +328,41 @@ impl Running {
             recent: recent_files,
             splash_was_open: false,
             title: String::new(),
+            platform,
         })
+    }
+
+    /// Reports the title strip, the controls inside it and the maximize button to the platform layer.
+    fn update_platform(&self, glass: &[hud::Glass], pixels_per_point: f32) {
+        let Some(platform) = &self.platform else {
+            return;
+        };
+        let to_pixels = |rect: egui::Rect| rustium_platform::Rect {
+            left: rect.min.x * pixels_per_point,
+            top: rect.min.y * pixels_per_point,
+            right: rect.max.x * pixels_per_point,
+            bottom: rect.max.y * pixels_per_point,
+        };
+        let size = self.window.inner_size();
+        let strip = hud::MARGIN + hud::TOP_BAR_HEIGHT;
+        let regions = HitRegions {
+            size: (size.width as f32, size.height as f32),
+            resize_border: 6.0 * pixels_per_point,
+            caption: Some(rustium_platform::Rect {
+                left: 0.0,
+                top: 0.0,
+                right: size.width as f32,
+                bottom: strip * pixels_per_point,
+            }),
+            controls: glass
+                .iter()
+                .map(|glass| glass.rect)
+                .filter(|rect| rect.min.y < strip)
+                .map(to_pixels)
+                .collect(),
+            maximize_button: self.ui.maximize_button.map(to_pixels),
+        };
+        platform.update(&regions);
     }
 
     /// Runs the interface, applies its commands and draws one frame. Returns `true` to quit.
@@ -416,6 +454,8 @@ impl Running {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
+
+        self.update_platform(&glass, pixels_per_point);
 
         let lines = self.overlay_lines(settings);
         let glass_rects: Vec<GlassRect> = glass

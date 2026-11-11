@@ -5,6 +5,7 @@ members = [
     "crates/rustium-render",
     "crates/rustium-script",
     "crates/rustium-mcp",
+    "crates/rustium-platform",
     "crates/rustium-app",
 ]
 
@@ -19,6 +20,7 @@ rustium-core = { path = "crates/rustium-core" }
 rustium-render = { path = "crates/rustium-render" }
 rustium-script = { path = "crates/rustium-script" }
 rustium-mcp = { path = "crates/rustium-mcp" }
+rustium-platform = { path = "crates/rustium-platform" }
 
 bytemuck = { version = "1.25", features = ["derive"] }
 color-eyre = "0.6"
@@ -39,6 +41,7 @@ mlua = { version = "0.12", features = ["luau", "vendored"] }
 png = "0.18"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 pollster = "0.4"
+raw-window-handle = "0.6"
 proptest = "1"
 rfd = "0.18"
 rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
@@ -57,6 +60,7 @@ ureq = { version = "3", default-features = false }
 unic-langid = "0.9"
 wgpu = "30"
 winit = "0.30"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.dev]
 opt-level = 1

@@ -26,6 +26,7 @@ pollster.workspace = true
 rfd.workspace = true
 rustium-core.workspace = true
 rustium-mcp.workspace = true
+rustium-platform.workspace = true
 rustium-render.workspace = true
 rustium-script.workspace = true
 serde.workspace = true

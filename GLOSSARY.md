@@ -43,20 +43,46 @@ _Avoid_: scale, resolution, unit
 ## Voxels and color
 
 **Voxel**:
-One cell of a Shape: either empty or showing one Material.
+One cell of a Shape: either empty or showing one Color.
 _Avoid_: block, cube, pixel
 
-**Material**:
-One entry of the Palette that says how a Voxel looks: color plus surface, glass, glow or haze properties.
-_Avoid_: color, texture, paint
+**Color**:
+One entry of the Palette: an sRGB color and the Material it is drawn with.
+_Avoid_: swatch, palette index
 
 **Palette**:
-The ordered list of up to 255 Materials a Scene can use.
+The ordered list of up to 255 Colors a Scene can use.
 _Avoid_: swatches, color table
 
 **Color slot**:
-One of the ten quick-pick entries on the hotbar, each pointing at a Material.
+One of the ten quick-pick entries on the hotbar, each pointing at a Color.
 _Avoid_: favorite, hotkey color
+
+## Materials
+
+**Material**:
+A named node graph that decides how surfaces look; one Material can be shared by several Colors.
+_Avoid_: shader, texture, palette entry
+
+**Default material**:
+The built-in Material used by every Color that has not been given another one.
+_Avoid_: fallback shader
+
+**Node**:
+One operation in a Material graph (a pattern, a color mix, a math step or an output), joined to others by links between sockets.
+_Avoid_: block, operator (and do not confuse with a Scene **Node**: say "graph node" when both are in play)
+
+**Surface output**:
+The graph node that ends a Material: base color, metallic, roughness, normal, emission, transmission and IOR.
+_Avoid_: BSDF, material output
+
+**Volume output**:
+The graph node that gives a Material haze inside the voxel: density and scattering color.
+_Avoid_: medium node, fog
+
+**Bake**:
+Turning a Material graph into PBR texture maps on a Model's surface, for export to other tools.
+_Avoid_: render to texture, flatten
 
 ## Editing
 
@@ -91,7 +117,7 @@ _Avoid_: step, transaction, change
 ## Rendering
 
 **Mode**:
-The editor's top-level activity: Model (editing) or Render (making images).
+The editor's top-level activity: Model (editing voxels), Effects (editing Materials and, later, textures and scripts) or Render (making images).
 _Avoid_: workspace, tab
 
 **Shot**:

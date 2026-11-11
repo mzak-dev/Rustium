@@ -8,6 +8,7 @@ use glam::Vec3;
 use tracing::warn;
 
 use crate::error::Error;
+use crate::resolve::{self, ResolveInput, Resolver};
 use crate::trace_scene::TraceScene;
 
 const ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
@@ -52,6 +53,48 @@ pub enum Ground {
     Shadow,
 }
 
+/// How the image is shaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderStyle {
+    /// Full path tracing with the Colors' material graphs.
+    Traced,
+    /// Every surface the same matte grey, lit by the sun and sky.
+    Clay,
+    /// Sun light in three flat bands with dark outlines on silhouettes and creases.
+    Toon,
+    /// Rendered at a coarse resolution and enlarged without smoothing.
+    Pixel,
+    /// Light lines on the edges between voxel faces over dark faces.
+    Wire,
+}
+
+impl RenderStyle {
+    /// Every style, in the order of the Style row.
+    pub const ALL: [Self; 5] = [Self::Traced, Self::Clay, Self::Toon, Self::Pixel, Self::Wire];
+
+    /// The number the shaders use for this style.
+    pub(crate) fn index(self) -> u32 {
+        match self {
+            Self::Traced => 0,
+            Self::Clay => 1,
+            Self::Toon => 2,
+            Self::Pixel => 3,
+            Self::Wire => 4,
+        }
+    }
+}
+
+/// A thin lens for depth of field. Lengths are in voxels, the unit of the Scene.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThinLens {
+    /// Camera position.
+    pub eye: [f32; 3],
+    /// Radius of the aperture; zero is a pinhole.
+    pub radius: f32,
+    /// Distance from the camera to the plane that is in focus, along the view direction.
+    pub focus_distance: f32,
+}
+
 /// Everything the path tracer needs for one frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceFrame {
@@ -81,6 +124,12 @@ pub struct TraceFrame {
     pub frame_rect: [f32; 4],
     /// Linear exposure multiplier applied before tonemapping.
     pub exposure: f32,
+    /// How the image is shaded.
+    pub style: RenderStyle,
+    /// Whether the accumulated image is denoised for display and readback.
+    pub denoise: bool,
+    /// Depth of field; `None` renders with a pinhole.
+    pub lens: Option<ThinLens>,
 }
 
 /// The part of a [`TraceFrame`] that changes what is rendered; any difference restarts accumulation.
@@ -94,6 +143,8 @@ struct TraceKey {
     ground: Ground,
     transparent: bool,
     region: Option<[u32; 4]>,
+    style: RenderStyle,
+    lens: Option<ThinLens>,
 }
 
 impl TraceFrame {
@@ -107,6 +158,18 @@ impl TraceFrame {
             ground: self.ground,
             transparent: self.transparent,
             region: self.region,
+            style: self.style,
+            lens: self.lens,
+        }
+    }
+
+    fn resolve_input(&self, samples: u32) -> ResolveInput {
+        ResolveInput {
+            inv_view_proj: self.inv_view_proj,
+            size: self.size,
+            style: self.style,
+            denoise: self.denoise,
+            samples,
         }
     }
 }
@@ -149,9 +212,11 @@ struct Params {
     region: [u32; 4],
     options: [u32; 4],
     ground: [f32; 4],
+    style: [u32; 4],
+    lens: [f32; 4],
 }
 
-const _: () = assert!(size_of::<Params>() == 64 + 9 * 16);
+const _: () = assert!(size_of::<Params>() == 64 + 11 * 16);
 
 /// Uniform block of `shaders/present.wgsl`.
 #[repr(C)]
@@ -164,13 +229,29 @@ struct PresentParams {
 
 const _: () = assert!(size_of::<PresentParams>() == 48);
 
+/// First-hit data the trace pass writes for the resolve stage.
+#[derive(Debug)]
+struct GBuffer {
+    geometry: wgpu::Texture,
+    albedo: wgpu::Texture,
+}
+
 #[derive(Debug)]
 struct Accumulation {
     size: (u32, u32),
     textures: [wgpu::Texture; 2],
+    gbuffer: GBuffer,
     /// `compute_groups[i]` reads texture `i` and writes texture `1 - i`.
     compute_groups: [wgpu::BindGroup; 2],
-    present_groups: [wgpu::BindGroup; 2],
+    present_group: wgpu::BindGroup,
+}
+
+/// The inputs of the resolve stage that are not samples.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResolveKey {
+    size: (u32, u32),
+    style: RenderStyle,
+    denoise: bool,
 }
 
 /// The compute pipeline, its accumulation textures and the GPU scene it walks.
@@ -182,6 +263,9 @@ pub struct PathTracer {
     compute_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
+    resolver: Resolver,
+    /// What the resolved texture was last produced from; a difference means it is stale.
+    resolved_for: Option<ResolveKey>,
     params_buffer: wgpu::Buffer,
     present_buffer: wgpu::Buffer,
     accumulation: Option<Accumulation>,
@@ -202,7 +286,10 @@ impl PathTracer {
         let compute_source = format!(
             "{}{}",
             include_str!("shaders/material.wgsl"),
-            include_str!("shaders/pathtracer.wgsl")
+            concat!(
+                include_str!("shaders/pathtracer.wgsl"),
+                include_str!("shaders/trace_style.wgsl")
+            )
         );
         let compute_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("path tracer shader"),
@@ -228,6 +315,16 @@ impl PathTracer {
             },
             count: None,
         };
+        let storage_texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: ACCUM_FORMAT,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        };
         let uniform = wgpu::BufferBindingType::Uniform;
         let storage = wgpu::BufferBindingType::Storage { read_only: true };
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -248,16 +345,9 @@ impl PathTracer {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: ACCUM_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
+                storage_texture_entry(5),
+                storage_texture_entry(7),
+                storage_texture_entry(8),
             ],
         });
         let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -345,6 +435,8 @@ impl PathTracer {
             compute_pipeline,
             present_layout,
             present_pipeline,
+            resolver: Resolver::new(device),
+            resolved_for: None,
             params_buffer: uniform_buffer("path tracer params", size_of::<Params>()),
             present_buffer: uniform_buffer("path tracer present params", size_of::<PresentParams>()),
             accumulation: None,
@@ -381,7 +473,7 @@ impl PathTracer {
     }
 
     // HOT PATH: runs every frame while Render mode is open. Everything else in this file runs on change only.
-    /// Accumulates at most one pass of samples and draws the tonemapped image into `target`.
+    /// Accumulates at most one pass of samples and draws the resolved image into `target`.
     pub fn encode(
         &mut self,
         device: &wgpu::Device,
@@ -390,92 +482,17 @@ impl PathTracer {
         target: &wgpu::TextureView,
         frame: &TraceFrame,
     ) {
-        let max_dimension = device.limits().max_texture_dimension_2d;
-        let size = (
-            frame.size.0.clamp(1, max_dimension),
-            frame.size.1.clamp(1, max_dimension),
-        );
-        let frame = TraceFrame { size, ..*frame };
-        if self
-            .accumulation
-            .as_ref()
-            .is_none_or(|accumulation| accumulation.size != size)
-        {
-            self.accumulation = Some(self.create_accumulation(device, size));
-            self.bound_generation = self.scene.generation();
-            self.restart();
-        } else if self.bound_generation != self.scene.generation() {
-            self.rebuild_groups(device);
-        }
-        let key = frame.key();
-        if self.key != Some(key) {
-            self.key = Some(key);
-            self.samples_done = 0;
-            self.generation += 1;
-        }
-        self.target_samples = frame.samples.max(1);
-
-        let region = frame.region.map_or([0, 0, size.0, size.1], |region| {
-            [
-                region[0].min(size.0),
-                region[1].min(size.1),
-                region[2].min(size.0),
-                region[3].min(size.1),
-            ]
-        });
+        let frame = self.prepare(device, frame);
         let passes = (frame.running || self.samples_done == 0) && self.samples_done < self.target_samples;
         let count = u32::from(passes);
-        let (zenith, horizon, sun_color, sun_radius) = frame.sky.look();
-        let sun = sun_direction(frame.sun_turn_degrees, frame.sun_height_degrees);
-        let params = Params {
-            inv_view_proj: frame.inv_view_proj,
-            eye: [0.0; 4],
-            sun_dir: [sun.x, sun.y, sun.z, sun_radius],
-            sun_color: [sun_color[0], sun_color[1], sun_color[2], 0.0],
-            sky_zenith: [zenith[0], zenith[1], zenith[2], 0.0],
-            sky_horizon: [horizon[0], horizon[1], horizon[2], 0.0],
-            image: [size.0, size.1, self.samples_done, frame.bounces],
-            region,
-            options: [
-                match frame.ground {
-                    Ground::None => 0,
-                    Ground::Studio => 1,
-                    Ground::Shadow => 2,
-                },
-                u32::from(frame.transparent),
-                count,
-                self.scene.model_count(),
-            ],
-            ground: [0.45, 0.45, 0.44, 0.0],
-        };
-        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
-        let present = PresentParams {
-            frame: frame.frame_rect,
-            image: [
-                size.0 as f32,
-                size.1 as f32,
-                frame.exposure,
-                f32::from(u8::from(frame.transparent)),
-            ],
-            letterbox: [0.006, 0.007, 0.009, 1.0],
-        };
-        queue.write_buffer(&self.present_buffer, 0, bytemuck::bytes_of(&present));
-
+        self.write_params(queue, &frame, count);
+        if passes {
+            self.encode_trace_pass(encoder, frame.size, count);
+        }
+        self.encode_resolve(queue, encoder, &frame, passes);
         let Some(accumulation) = &self.accumulation else {
             return;
         };
-        if passes {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("path tracer pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.compute_pipeline);
-            pass.set_bind_group(0, &accumulation.compute_groups[self.current], &[]);
-            pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), size.1.div_ceil(WORKGROUP), 1);
-            drop(pass);
-            self.current = 1 - self.current;
-            self.samples_done += count;
-        }
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("path tracer present pass"),
@@ -495,17 +512,198 @@ impl PathTracer {
             })
             .forget_lifetime();
         pass.set_pipeline(&self.present_pipeline);
-        pass.set_bind_group(0, &accumulation.present_groups[self.current], &[]);
+        pass.set_bind_group(0, &accumulation.present_group, &[]);
         pass.draw(0..3, 0..1);
     }
 
-    /// Copies the accumulated image to the CPU, blocking until the GPU has finished.
+    /// Renders `frame` to completion without drawing anything, for saved images and video frames. Samples go in
+    /// small batches; `progress` gets the samples done after each one and returns `false` to cancel. The accumulation
+    /// is shared with [`PathTracer::encode`], so use a tracer of its own for this.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Readback`] when the image cannot be copied back from the GPU. A cancelled render is `Ok(None)`.
+    pub fn render_to_image(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &TraceFrame,
+        mut progress: impl FnMut(u32) -> bool,
+    ) -> Result<Option<TraceImage>, Error> {
+        /// Samples traced per submission: a few at a time keeps one GPU job short.
+        const BATCH: u32 = 4;
+        let frame = TraceFrame {
+            running: true,
+            ..self.prepare(device, frame)
+        };
+        self.samples_done = 0;
+        while self.samples_done < self.target_samples {
+            let count = BATCH.min(self.target_samples - self.samples_done);
+            self.write_params(queue, &frame, count);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("path tracer offline encoder"),
+            });
+            self.encode_trace_pass(&mut encoder, frame.size, count);
+            queue.submit(std::iter::once(encoder.finish()));
+            if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
+                warn!(%error, "waiting for the GPU failed");
+                return Err(Error::Readback);
+            }
+            if !progress(self.samples_done) {
+                return Ok(None);
+            }
+        }
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("path tracer resolve encoder"),
+        });
+        self.encode_resolve(queue, &mut encoder, &frame, true);
+        queue.submit(std::iter::once(encoder.finish()));
+        self.read_image(device, queue).map(Some)
+    }
+
+    /// Sizes the accumulation to the frame, restarts it when anything that changes the picture changed and returns the
+    /// frame with its size clamped to what the device can hold.
+    fn prepare(&mut self, device: &wgpu::Device, frame: &TraceFrame) -> TraceFrame {
+        let max_dimension = device.limits().max_texture_dimension_2d;
+        let size = (
+            frame.size.0.clamp(1, max_dimension),
+            frame.size.1.clamp(1, max_dimension),
+        );
+        let frame = TraceFrame { size, ..*frame };
+        if self
+            .accumulation
+            .as_ref()
+            .is_none_or(|accumulation| accumulation.size != size)
+        {
+            self.accumulation = Some(self.create_accumulation(device, size));
+            self.bound_generation = self.scene.generation();
+            self.resolved_for = None;
+            self.restart();
+        } else if self.bound_generation != self.scene.generation() {
+            self.rebuild_groups(device);
+        }
+        let key = frame.key();
+        if self.key != Some(key) {
+            self.key = Some(key);
+            self.samples_done = 0;
+            self.generation += 1;
+        }
+        self.target_samples = frame.samples.max(1);
+        frame
+    }
+
+    /// Uploads the uniforms of the trace pass (`count` samples) and of the present pass.
+    fn write_params(&self, queue: &wgpu::Queue, frame: &TraceFrame, count: u32) {
+        let size = frame.size;
+        let region = frame.region.map_or([0, 0, size.0, size.1], |region| {
+            [
+                region[0].min(size.0),
+                region[1].min(size.1),
+                region[2].min(size.0),
+                region[3].min(size.1),
+            ]
+        });
+        let (zenith, horizon, sun_color, sun_radius) = frame.sky.look();
+        let sun = sun_direction(frame.sun_turn_degrees, frame.sun_height_degrees);
+        let lens = frame.lens.unwrap_or(ThinLens {
+            eye: [0.0; 3],
+            radius: 0.0,
+            focus_distance: 1.0,
+        });
+        let params = Params {
+            inv_view_proj: frame.inv_view_proj,
+            eye: [lens.eye[0], lens.eye[1], lens.eye[2], 0.0],
+            sun_dir: [sun.x, sun.y, sun.z, sun_radius],
+            sun_color: [sun_color[0], sun_color[1], sun_color[2], 0.0],
+            sky_zenith: [zenith[0], zenith[1], zenith[2], 0.0],
+            sky_horizon: [horizon[0], horizon[1], horizon[2], 0.0],
+            image: [size.0, size.1, self.samples_done, frame.bounces],
+            region,
+            options: [
+                match frame.ground {
+                    Ground::None => 0,
+                    Ground::Studio => 1,
+                    Ground::Shadow => 2,
+                },
+                u32::from(frame.transparent),
+                count,
+                self.scene.model_count(),
+            ],
+            ground: [0.45, 0.45, 0.44, 0.0],
+            style: [
+                frame.style.index(),
+                resolve::pixel_block(size.1),
+                u32::from(self.samples_done == 0),
+                0,
+            ],
+            lens: [
+                lens.radius,
+                lens.focus_distance,
+                f32::from(u8::from(frame.lens.is_some_and(|lens| lens.radius > 0.0))),
+                0.0,
+            ],
+        };
+        queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
+        let present = PresentParams {
+            frame: frame.frame_rect,
+            image: [
+                size.0 as f32,
+                size.1 as f32,
+                frame.exposure,
+                f32::from(u8::from(frame.transparent)),
+            ],
+            letterbox: [0.006, 0.007, 0.009, 1.0],
+        };
+        queue.write_buffer(&self.present_buffer, 0, bytemuck::bytes_of(&present));
+    }
+
+    /// Adds `count` samples per pixel to the accumulation.
+    fn encode_trace_pass(&mut self, encoder: &mut wgpu::CommandEncoder, size: (u32, u32), count: u32) {
+        let Some(accumulation) = &self.accumulation else {
+            return;
+        };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("path tracer pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.compute_pipeline);
+        pass.set_bind_group(0, &accumulation.compute_groups[self.current], &[]);
+        pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), size.1.div_ceil(WORKGROUP), 1);
+        drop(pass);
+        self.current = 1 - self.current;
+        self.samples_done += count;
+    }
+
+    /// Refreshes the resolved image when new samples arrived or the style or denoise setting changed.
+    fn encode_resolve(
+        &mut self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &TraceFrame,
+        fresh: bool,
+    ) {
+        let key = ResolveKey {
+            size: frame.size,
+            style: frame.style,
+            denoise: frame.denoise,
+        };
+        if !fresh && self.resolved_for == Some(key) {
+            return;
+        }
+        self.resolved_for = Some(key);
+        self.resolver
+            .encode(queue, encoder, self.current, &frame.resolve_input(self.samples_done));
+    }
+
+    /// Copies the resolved image (denoised and styled as the last frame asked) to the CPU, blocking until the GPU has
+    /// finished.
     ///
     /// # Errors
     ///
     /// [`Error::Readback`] when nothing has been rendered yet or the GPU read fails.
     pub fn read_image(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<TraceImage, Error> {
         let accumulation = self.accumulation.as_ref().ok_or(Error::Readback)?;
+        let resolved = self.resolver.resolved().ok_or(Error::Readback)?;
         if self.samples_done == 0 {
             return Err(Error::Readback);
         }
@@ -522,7 +720,7 @@ impl PathTracer {
             label: Some("path tracer readback encoder"),
         });
         encoder.copy_texture_to_buffer(
-            accumulation.textures[self.current].as_image_copy(),
+            resolved.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -566,7 +764,7 @@ impl PathTracer {
         })
     }
 
-    fn create_accumulation(&self, device: &wgpu::Device, size: (u32, u32)) -> Accumulation {
+    fn create_accumulation(&mut self, device: &wgpu::Device, size: (u32, u32)) -> Accumulation {
         let texture = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -589,35 +787,46 @@ impl PathTracer {
             texture("path tracer accumulation A"),
             texture("path tracer accumulation B"),
         ];
-        let (compute_groups, present_groups) = self.groups_for(device, &textures);
+        let gbuffer = GBuffer {
+            geometry: texture("path tracer G-buffer geometry"),
+            albedo: texture("path tracer G-buffer albedo"),
+        };
+        let resolved = self
+            .resolver
+            .bind(device, size, &textures, &gbuffer.geometry, &gbuffer.albedo);
+        let compute_groups = self.compute_groups_for(device, &textures, &gbuffer);
+        let present_group = self.present_group(device, &resolved);
         Accumulation {
             size,
             textures,
+            gbuffer,
             compute_groups,
-            present_groups,
+            present_group,
         }
     }
 
     fn rebuild_groups(&mut self, device: &wgpu::Device) {
         if let Some(accumulation) = self.accumulation.take() {
-            let (compute_groups, present_groups) = self.groups_for(device, &accumulation.textures);
+            let compute_groups = self.compute_groups_for(device, &accumulation.textures, &accumulation.gbuffer);
             self.accumulation = Some(Accumulation {
                 compute_groups,
-                present_groups,
                 ..accumulation
             });
         }
         self.bound_generation = self.scene.generation();
     }
 
-    fn groups_for(
+    fn compute_groups_for(
         &self,
         device: &wgpu::Device,
         textures: &[wgpu::Texture; 2],
-    ) -> ([wgpu::BindGroup; 2], [wgpu::BindGroup; 2]) {
+        gbuffer: &GBuffer,
+    ) -> [wgpu::BindGroup; 2] {
         let views = textures
             .each_ref()
             .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let geometry_view = gbuffer.geometry.create_view(&wgpu::TextureViewDescriptor::default());
+        let albedo_view = gbuffer.albedo.create_view(&wgpu::TextureViewDescriptor::default());
         let compute = |read: usize| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path tracer bind group"),
@@ -651,26 +860,36 @@ impl PathTracer {
                         binding: 5,
                         resource: wgpu::BindingResource::TextureView(&views[1 - read]),
                     },
-                ],
-            })
-        };
-        let present = |index: usize| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("path tracer present bind group"),
-                layout: &self.present_layout,
-                entries: &[
                     wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.present_buffer.as_entire_binding(),
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(&geometry_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&views[index]),
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&albedo_view),
                     },
                 ],
             })
         };
-        ([compute(0), compute(1)], [present(0), present(1)])
+        [compute(0), compute(1)]
+    }
+
+    /// The bind group that shows the resolved image.
+    fn present_group(&self, device: &wgpu::Device, resolved: &wgpu::TextureView) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path tracer present bind group"),
+            layout: &self.present_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.present_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(resolved),
+                },
+            ],
+        })
     }
 }
 
@@ -708,6 +927,9 @@ mod tests {
             running: true,
             frame_rect: [0.0; 4],
             exposure: 1.0,
+            style: RenderStyle::Traced,
+            denoise: false,
+            lens: None,
         };
         let paused = TraceFrame {
             running: false,
@@ -722,5 +944,12 @@ mod tests {
             ..frame
         };
         assert_ne!(frame.key(), brighter_sun.key());
+        let denoised = TraceFrame { denoise: true, ..frame };
+        assert_eq!(frame.key(), denoised.key(), "denoising only changes the resolve stage");
+        let clay = TraceFrame {
+            style: RenderStyle::Clay,
+            ..frame
+        };
+        assert_ne!(frame.key(), clay.key());
     }
 }

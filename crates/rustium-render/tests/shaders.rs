@@ -47,11 +47,13 @@ fn path_tracer_shaders_are_valid_wgsl() {
     validate(
         "pathtracer",
         &format!(
-            "{}{}",
+            "{}{}{}",
             include_str!("../src/shaders/material.wgsl"),
-            include_str!("../src/shaders/pathtracer.wgsl")
+            include_str!("../src/shaders/pathtracer.wgsl"),
+            include_str!("../src/shaders/trace_style.wgsl")
         ),
     );
+    validate("resolve", include_str!("../src/shaders/resolve.wgsl"));
     validate(
         "present",
         &format!(

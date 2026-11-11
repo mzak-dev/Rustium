@@ -13,7 +13,7 @@ use rustium_core::{
     Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, Scene, SurfaceConstants, Transform,
     VoxelTool, apply,
 };
-use rustium_render::{GpuMaterialTable, Ground, PathTracer, Sky, TraceFrame, TraceImage};
+use rustium_render::{GpuMaterialTable, Ground, PathTracer, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage};
 
 const SIZE: u32 = 96;
 /// The app's default exposure, -1 EV.
@@ -110,6 +110,23 @@ struct Setup {
     ground: Ground,
     sun_height: f32,
     samples: u32,
+    style: RenderStyle,
+    denoise: bool,
+    lens: Option<ThinLens>,
+}
+
+impl Default for Setup {
+    fn default() -> Self {
+        Self {
+            sky: Sky::Clear,
+            ground: Ground::None,
+            sun_height: 45.0,
+            samples: 16,
+            style: RenderStyle::Traced,
+            denoise: false,
+            lens: None,
+        }
+    }
 }
 
 fn render(gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup) -> TraceImage {
@@ -156,6 +173,9 @@ fn render(gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup) -> TraceImag
         running: true,
         frame_rect: [0.0, 0.0, SIZE as f32, SIZE as f32],
         exposure: EXPOSURE,
+        style: setup.style,
+        denoise: setup.denoise,
+        lens: setup.lens,
     };
     for _ in 0..setup.samples {
         let mut encoder = gpu
@@ -247,6 +267,7 @@ fn an_empty_scene_shows_the_sky() {
         ground: Ground::None,
         sun_height: 42.0,
         samples: 4,
+        ..Setup::default()
     };
     let image = render(&gpu, &scene, &camera, &setup);
     dump("sky", &image);
@@ -267,6 +288,7 @@ fn a_cube_in_the_sun_casts_a_shadow_on_the_floor() {
         ground: Ground::Studio,
         sun_height: 40.0,
         samples: 48,
+        ..Setup::default()
     };
     let image = render(&gpu, &scene, &camera, &setup);
     dump("sun-cube", &image);
@@ -310,6 +332,7 @@ fn an_emissive_voxel_lights_its_surroundings() {
         ground: Ground::Studio,
         sun_height: 20.0,
         samples: 64,
+        ..Setup::default()
     };
     let image = render(&gpu, &scene, &camera, &setup);
     dump("emissive", &image);
@@ -354,6 +377,7 @@ fn glass_and_metal_render_without_blowing_up() {
         ground: Ground::Studio,
         sun_height: 45.0,
         samples: 64,
+        ..Setup::default()
     };
     let image = render(&gpu, &scene, &camera, &setup);
     dump("colors", &image);
@@ -431,6 +455,7 @@ fn models_are_placed_by_their_transforms_and_hidden_ones_are_skipped() {
         ground: Ground::None,
         sun_height: 45.0,
         samples: 16,
+        ..Setup::default()
     };
     let image = render(&gpu, &scene, &camera, &setup);
     dump("models", &image);
@@ -447,4 +472,231 @@ fn models_are_placed_by_their_transforms_and_hidden_ones_are_skipped() {
         "nothing sits where an unrotated instance would be"
     );
     assert!(lit(5.5, 1.5, -4.5) < 1.5, "the hidden model is skipped");
+}
+
+/// A two-colour showpiece used by the style tests: a floor and two cubes of different Colors.
+fn showpiece() -> (Scene, Camera) {
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-12, 0, -12), IVec3::new(12, 0, 12), id(3));
+    fill(&mut scene, IVec3::new(-6, 1, -2), IVec3::new(-3, 4, 1), id(37));
+    fill(&mut scene, IVec3::new(2, 1, -2), IVec3::new(5, 4, 1), id(8));
+    let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));
+    (scene, camera)
+}
+
+/// The pixel on the top face of a cube, `x` along its width.
+fn top_of(camera: &Camera, x: f32) -> (u32, u32) {
+    camera.pixel(Vec3::new(x, 5.0, -0.5))
+}
+
+#[test]
+fn clay_makes_every_color_the_same_grey() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 32,
+        ..Setup::default()
+    };
+    let traced = render(&gpu, &scene, &camera, &setup);
+    let clay = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            style: RenderStyle::Clay,
+            ..setup
+        },
+    );
+    dump("style-clay", &clay);
+    let (left, right) = (top_of(&camera, -4.5), top_of(&camera, 3.5));
+    let traced_ratio = area_luminance(&traced, left) / area_luminance(&traced, right);
+    let clay_ratio = area_luminance(&clay, left) / area_luminance(&clay, right);
+    assert!(
+        (traced_ratio - 1.0).abs() > 0.1,
+        "the two Colors differ when traced: {traced_ratio}"
+    );
+    assert!(
+        (clay_ratio - 1.0).abs() < 0.08,
+        "clay lights both tops alike, ratio {clay_ratio}"
+    );
+}
+
+#[test]
+fn toon_has_flat_bands_and_dark_outlines() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let toon = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            samples: 8,
+            style: RenderStyle::Toon,
+            ..Setup::default()
+        },
+    );
+    dump("style-toon", &toon);
+    // Walking along the row through the left cube crosses sky, outline, face and outline again.
+    let (_, row) = camera.pixel(Vec3::new(-4.5, 2.5, -0.5));
+    let sky = luminance(&toon, (2, row));
+    let darkest = (0..SIZE).map(|x| luminance(&toon, (x, row))).fold(f32::MAX, f32::min);
+    assert!(sky > 0.2, "sky is bright, got {sky}");
+    assert!(darkest < 0.03, "an outline is nearly black, darkest pixel {darkest}");
+    // A flat face is one band: neighbouring pixels on the top of the cube agree.
+    let (x, y) = top_of(&camera, -4.5);
+    let (a, b) = (luminance(&toon, (x, y)), luminance(&toon, (x + 1, y)));
+    assert!((a - b).abs() < 1e-3, "flat band, got {a} and {b}");
+}
+
+#[test]
+fn pixel_style_repeats_each_block() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let pixel = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            ground: Ground::Studio,
+            samples: 8,
+            style: RenderStyle::Pixel,
+            ..Setup::default()
+        },
+    );
+    dump("style-pixel", &pixel);
+    // The 96 px test image uses 2 px blocks.
+    for y in (0..SIZE).step_by(2) {
+        for x in (0..SIZE).step_by(2) {
+            assert_eq!(rgb(&pixel, (x, y)), rgb(&pixel, (x + 1, y)), "block at {x},{y}");
+            assert_eq!(rgb(&pixel, (x, y)), rgb(&pixel, (x, y + 1)), "block at {x},{y}");
+        }
+    }
+}
+
+#[test]
+fn wire_draws_light_lines_on_dark() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let wire = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            ground: Ground::Studio,
+            samples: 8,
+            style: RenderStyle::Wire,
+            ..Setup::default()
+        },
+    );
+    dump("style-wire", &wire);
+    let count = |keep: &dyn Fn(f32) -> bool| {
+        (0..SIZE * SIZE)
+            .filter(|index| keep(luminance(&wire, (index % SIZE, index / SIZE))))
+            .count()
+    };
+    let lines = count(&|value| value > 0.8);
+    let dark = count(&|value| value < 0.1);
+    assert!(lines > 40, "edges are drawn, found {lines} bright pixels");
+    assert!(
+        dark > (SIZE * SIZE) as usize / 2,
+        "faces and background stay dark, found {dark}"
+    );
+}
+
+#[test]
+fn denoising_removes_noise_but_keeps_the_mean() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 6,
+        ..Setup::default()
+    };
+    let noisy = render(&gpu, &scene, &camera, &setup);
+    let clean = render(&gpu, &scene, &camera, &Setup { denoise: true, ..setup });
+    dump("denoise-off", &noisy);
+    dump("denoise-on", &clean);
+    // A patch of floor in the open sun.
+    let (cx, cy) = camera.pixel(Vec3::new(8.0, 1.0, 6.0));
+    let spread = |image: &TraceImage| {
+        let mut values = Vec::new();
+        for y in cy - 5..=cy + 5 {
+            for x in cx - 5..=cx + 5 {
+                values.push(luminance(image, (x, y)));
+            }
+        }
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / values.len() as f32;
+        (mean, variance.sqrt())
+    };
+    let ((noisy_mean, noisy_spread), (clean_mean, clean_spread)) = (spread(&noisy), spread(&clean));
+    assert!(
+        clean_spread < noisy_spread * 0.6,
+        "noise {noisy_spread} should drop clearly, got {clean_spread}"
+    );
+    assert!(
+        (clean_mean / noisy_mean - 1.0).abs() < 0.1,
+        "mean stays put: {noisy_mean} against {clean_mean}"
+    );
+    // The silhouette of the cube against the sky stays sharp.
+    let sky_pixel = luminance(&clean, (2, 2));
+    let cube = luminance(&clean, top_of(&camera, -4.5));
+    assert!(
+        (sky_pixel - cube).abs() > 0.1,
+        "cube {cube} still differs from sky {sky_pixel}"
+    );
+}
+
+#[test]
+fn depth_of_field_blurs_what_is_off_the_focal_plane() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    // Two wide slabs, one at the focal distance and one twice as far.
+    fill(&mut scene, IVec3::new(-8, 0, 0), IVec3::new(-3, 19, 0), id(37));
+    fill(&mut scene, IVec3::new(3, 0, -30), IVec3::new(8, 19, -30), id(37));
+    let eye = Vec3::new(0.0, 8.0, 30.0);
+    let camera = Camera::looking_at(eye, Vec3::new(0.0, 8.0, 0.0));
+    let sharp_setup = Setup {
+        samples: 64,
+        ..Setup::default()
+    };
+    let lens = ThinLens {
+        eye: eye.to_array(),
+        radius: 3.0,
+        focus_distance: 30.0,
+    };
+    let sharp = render(&gpu, &scene, &camera, &sharp_setup);
+    let blurred = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            lens: Some(lens),
+            ..sharp_setup
+        },
+    );
+    dump("dof", &blurred);
+    // Steepest brightness change across a slab's vertical edge, relative to the edge's full contrast.
+    let steepness = |image: &TraceImage, edge_x: f32| {
+        let (px, py) = camera.pixel(Vec3::new(edge_x, 8.0, if edge_x < 0.0 { 0.0 } else { -30.0 }));
+        let row: Vec<f32> = (px.saturating_sub(10)..=(px + 10).min(SIZE - 1))
+            .map(|x| luminance(image, (x, py)))
+            .collect();
+        let contrast = row.iter().copied().fold(f32::MIN, f32::max) - row.iter().copied().fold(f32::MAX, f32::min);
+        let step = row.windows(2).map(|pair| (pair[1] - pair[0]).abs()).fold(0.0, f32::max);
+        assert!(contrast > 0.1, "the slab edge is visible, contrast {contrast}");
+        step / contrast
+    };
+    let near_sharp = steepness(&blurred, -8.0);
+    let far_blurred = steepness(&blurred, 9.0);
+    let far_without_lens = steepness(&sharp, 9.0);
+    assert!(
+        near_sharp > far_blurred * 1.8,
+        "the focused edge ({near_sharp}) is steeper than the defocused one ({far_blurred})"
+    );
+    assert!(
+        far_without_lens > far_blurred * 1.5,
+        "the pinhole keeps the far edge sharp ({far_without_lens} against {far_blurred})"
+    );
 }

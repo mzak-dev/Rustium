@@ -107,99 +107,8 @@ fn tabs(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
         .hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER));
 }
 
-fn format_length(metres: f32) -> String {
-    if metres >= 1.0 {
-        format!("{metres:.2} m")
-    } else {
-        format!("{:.2} cm", metres * 100.0).replace(".00", "")
-    }
-}
-
 fn scene_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
-    let voxel_size = hud.editor.scene.voxel_size();
-    egui::Frame::new()
-        .inner_margin(egui::Margin {
-            left: 10,
-            right: 10,
-            top: 10,
-            bottom: 4,
-        })
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(hud.tr("scene-root")).color(theme::MUTED).size(11.0));
-                ui.label(RichText::new("/").color(theme::DISABLED).size(11.0));
-                ui.label(RichText::new(hud.tr("model-name")).font(theme::bold(11.0)));
-            });
-        });
-    egui::Frame::new().inner_margin(4).show(ui, |ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
-        ui.painter().rect_filled(rect, 7, theme::ACTIVE);
-        Icon::Cube.paint(
-            ui.painter(),
-            egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -7.0), vec2(14.0, 14.0)),
-            theme::SOFT,
-        );
-        ui.painter().text(
-            rect.left_center() + vec2(28.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            hud.tr("model-name"),
-            theme::bold(12.0),
-            theme::TEXT,
-        );
-        ui.painter().text(
-            rect.right_center() - vec2(8.0, 0.0),
-            egui::Align2::RIGHT_CENTER,
-            format_length(voxel_size),
-            egui::FontId::monospace(10.0),
-            theme::SOFT,
-        );
-    });
-    let separator = ui.available_rect_before_wrap();
-    ui.painter().hline(
-        separator.x_range(),
-        separator.top() + 6.0,
-        Stroke::new(1.0, theme::BORDER),
-    );
-    ui.add_space(12.0);
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            Grid::new("model-properties")
-                .num_columns(2)
-                .min_col_width(72.0)
-                .spacing(vec2(8.0, 8.0))
-                .show(ui, |ui| {
-                    ui.label(widgets::muted(hud.tr("prop-name")));
-                    ui.label(hud.tr("model-name"));
-                    ui.end_row();
-                    ui.label(widgets::muted(hud.tr("prop-voxel-size")));
-                    ui.label(widgets::mono(format_length(voxel_size), 11.0));
-                    ui.end_row();
-                    let volume = hud.editor.scene.shape().volume();
-                    ui.label(widgets::muted(hud.tr("prop-size")));
-                    match volume {
-                        Some(volume) => {
-                            let size = volume.size();
-                            ui.label(widgets::mono(format!("{} × {} × {}", size.x, size.y, size.z), 11.0));
-                        }
-                        None => {
-                            ui.label(widgets::muted(hud.tr("prop-empty")));
-                        }
-                    }
-                    ui.end_row();
-                    ui.label(widgets::muted(hud.tr("prop-world-size")));
-                    if let Some(volume) = volume {
-                        let world = volume.size().as_vec3() * voxel_size;
-                        ui.label(widgets::mono(
-                            format!("{:.2} × {:.2} × {:.2} m", world.x, world.y, world.z),
-                            11.0,
-                        ));
-                    } else {
-                        ui.label(widgets::muted("—"));
-                    }
-                    ui.end_row();
-                });
-        });
+    super::scene_tree::show(ui, hud);
 }
 
 fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
@@ -207,6 +116,21 @@ fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
         EditKind::Attach => "edit-attach",
         EditKind::Erase => "edit-erase",
         EditKind::Paint => "edit-paint",
+        EditKind::Fill => "edit-fill",
+        EditKind::MoveVoxels => "edit-move-voxels",
+        EditKind::NewModel => "edit-new-model",
+        EditKind::NewGroup => "edit-new-group",
+        EditKind::Duplicate => "edit-duplicate",
+        EditKind::DuplicateAsInstance => "edit-duplicate-instance",
+        EditKind::MakeUnique => "edit-make-unique",
+        EditKind::Delete => "edit-delete",
+        EditKind::Rename => "edit-rename",
+        EditKind::Hide => "edit-hide",
+        EditKind::Lock => "edit-lock",
+        EditKind::Merge => "edit-merge",
+        EditKind::Split => "edit-split",
+        EditKind::MoveNode => "edit-move-node",
+        EditKind::Transform => "edit-transform",
     })
 }
 

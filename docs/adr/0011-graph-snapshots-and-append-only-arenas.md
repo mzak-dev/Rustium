@@ -1,0 +1,5 @@
+# Undo snapshots the node graph; Node and Shape arenas only grow
+
+The Scene keeps its Nodes in an `Arc`-shared arena and every Edit that changes the tree, a name, a flag or a Transform stores the whole arena before and after (an `Arc` clone, so unchanged edits cost nothing and a change copies only when a snapshot is alive). Voxel edits never touch the graph. Node and Shape ids are arena indices that are never reused: deleting a Node only detaches it, and an Edit that creates a Shape leaves it in the arena when undone. This makes undo of Delete, Merge, Split and reparenting a pointer swap and keeps ids in Commands, scripts and MCP replies stable for the whole session. The price is that Shapes and detached Nodes are only freed when the Scene is closed; a compaction pass can be added when saving files (`.ruv`), since a file only needs the attached tree.
+
+Picking and rendering resolve overlapping Models the same way: the Node earlier in tree (drawing) order wins, so a Command's hit is always in the cell space of the Model it names and `pick_scene` reports both that and the Scene-space hit.

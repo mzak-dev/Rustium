@@ -6,7 +6,8 @@ use egui::ViewportId;
 use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_render::{
-    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ViewportFrame, ViewportRenderer,
+    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, ViewportFrame,
+    ViewportRenderer,
 };
 use tracing::{error, info};
 use winit::application::ApplicationHandler;
@@ -306,7 +307,9 @@ impl Running {
         let background = settings
             .background
             .map(|channel| (f32::from(channel) / 255.0).powf(2.2));
+        let models = self.model_draws();
         let frame_input = ViewportFrame {
+            models: &models,
             camera: self.camera_uniform(),
             background,
             show_grid: settings.show_grid,
@@ -378,7 +381,7 @@ impl Running {
                     tracing::warn!(%error, "cannot resize the window");
                 }
             }
-            AppCommand::FrameModel => self.camera.frame(self.editor.scene.shape().volume()),
+            AppCommand::FrameModel => self.camera.frame(self.editor.scene.world_volume(self.editor.focus)),
             AppCommand::HistoryJump(target) => {
                 while self.editor.history.done().count() > target && self.editor.history.can_undo() {
                     self.editor.undo();
@@ -404,14 +407,36 @@ impl Running {
     }
 
     fn upload_dirty_chunks(&mut self) {
-        let (reset, chunks) = self.editor.take_dirty();
+        let placements = self.editor.scene.placements();
+        let (reset, chunks) = self.editor.take_dirty(&placements);
         if reset {
             self.viewport.clear_chunks();
         }
-        for coord in chunks {
-            mesh_chunk(self.editor.scene.shape(), coord, &mut self.mesh);
-            self.viewport.upload_chunk(&self.gpu, coord, &self.mesh);
+        for (shape_id, coord) in chunks {
+            let Some(shape) = self.editor.scene.shape(shape_id) else {
+                continue;
+            };
+            mesh_chunk(shape, coord, &mut self.mesh);
+            self.viewport.upload_chunk(&self.gpu, shape_id, coord, &self.mesh);
         }
+    }
+
+    /// The Models to draw; everything outside the Focus is dimmed.
+    fn model_draws(&self) -> Vec<ModelDraw> {
+        let scene = &self.editor.scene;
+        let focus = self.editor.focus;
+        scene
+            .placements()
+            .into_iter()
+            .map(|placement| ModelDraw {
+                dim: if scene.is_ancestor_or_self(focus, placement.node) {
+                    0.0
+                } else {
+                    1.0
+                },
+                placement,
+            })
+            .collect()
     }
 
     fn camera_uniform(&self) -> CameraUniform {
@@ -430,17 +455,40 @@ impl Running {
     }
 
     fn overlay_lines(&self, settings: &Settings) -> Vec<LineVertex> {
+        let editor = &self.editor;
         let mut lines = Vec::new();
+        let linear = |rgb: [u8; 3]| rgb.map(|channel| (f32::from(channel) / 255.0).powf(2.2));
+        let [r, g, b] = linear(settings.accent.rgb());
         if settings.show_volume_bounds
-            && let Some(volume) = self.editor.scene.shape().volume()
+            && let Some(volume) = editor.scene.world_volume(editor.focus)
         {
             push_box(&mut lines, volume, 0.0, [1.0, 1.0, 1.0, 0.22]);
         }
-        if let Some(bounds) = self.editor.hover_bounds() {
-            let [r, g, b] = settings
-                .accent
-                .rgb()
-                .map(|channel| (f32::from(channel) / 255.0).powf(2.2));
+        for volume in editor.selection_boxes() {
+            push_box(&mut lines, volume, 0.02, [1.0, 1.0, 1.0, 0.9]);
+        }
+        for quad in editor.mirror_planes() {
+            for index in 0..4 {
+                for point in [quad[index], quad[(index + 1) % 4]] {
+                    lines.push(LineVertex {
+                        position: point.to_array(),
+                        color: [r, g, b, 0.55],
+                    });
+                }
+            }
+        }
+        if let Some((start, end, _)) = editor.distance() {
+            let centre = |cell: IVec3| cell.as_vec3() + Vec3::splat(0.5);
+            push_box(&mut lines, Volume::point(start), 0.02, [r, g, b, 1.0]);
+            push_box(&mut lines, Volume::point(end), 0.02, [r, g, b, 1.0]);
+            for point in [centre(start), centre(end)] {
+                lines.push(LineVertex {
+                    position: point.to_array(),
+                    color: [r, g, b, 1.0],
+                });
+            }
+        }
+        if let Some(bounds) = editor.hover_bounds() {
             push_box(&mut lines, bounds, 0.01, [r, g, b, 1.0]);
         }
         lines

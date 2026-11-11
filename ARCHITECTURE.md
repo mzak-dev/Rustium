@@ -5,7 +5,7 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 
 | Crate | Owns | Must not depend on |
 |---|---|---|
-| `rustium-core` | Scene, Shape (copy-on-write 32³ chunks), Palette, Commands → Edits, History, raycast, greedy meshing | GPU, windowing, async |
+| `rustium-core` | Scene graph (Groups, Models, Instances), Shape (copy-on-write 32³ chunks), Palette, Commands → Edits, History, raycast and Scene picking, Brush / Fill / Mirror geometry, greedy meshing | GPU, windowing, async |
 | `rustium-render` | wgpu device and surface, chunk raster with MSAA, ground grid, overlay lines, glass blur and composite | windowing, egui |
 | `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging | — |
 | `rustium-mcp` *(M2)* | MCP server over HTTP and stdio; the only crate with tokio | — |
@@ -15,9 +15,12 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 
 1. egui runs the HUD (`hud::draw`), the start screen and Settings. Viewport input (picking, brush strokes,
    camera, window drag and resize) is handled by a full-window background area behind the islands.
-2. Brush gestures become `rustium_core::Command`s; `apply` returns an `Edit` (before/after `Arc<Chunk>`s).
-   A stroke folds its Edits into one History step.
-3. Chunks touched by Edits (plus neighbours, for culling and AO) are remeshed on the CPU and uploaded.
+2. Brush gestures become `rustium_core::Command`s; `apply` returns an `Edit` (before/after `Arc<Chunk>`s, plus a snapshot of the node graph when the tree
+   changed). A gesture folds its Edits into one History step. Tools act inside the Focus: voxel Tools on the
+   Model in Focus, Select box and Move on the child Nodes of a Group in Focus.
+3. Chunks touched by Edits (plus neighbours, for culling and AO) are remeshed on the CPU and uploaded per Shape.
+   Each visible Model is drawn as one instance of its Shape's chunks with its Transform and a dim factor
+   (everything outside the Focus is dimmed).
 4. `ViewportRenderer` draws the scene into an offscreen MSAA target, blurs it at quarter resolution and
    composites it onto the surface through an sRGB view, showing the blur under every glass island.
 5. egui paints the interface on top through the non-sRGB view of the same surface texture.

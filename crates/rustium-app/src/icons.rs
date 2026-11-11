@@ -36,6 +36,10 @@ pub(crate) enum Icon {
     Folder,
     Search,
     Settings,
+    Eye,
+    EyeOff,
+    Lock,
+    Unlock,
 }
 
 impl Icon {
@@ -70,6 +74,14 @@ impl Icon {
             Self::Folder => "M3 6h6l2 2h10v11H3z",
             Self::Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M16 16l4 4",
             Self::Settings => "M4 7h10 M18 7h2 M4 17h2 M10 17h10 M16 5v4 M8 15v4",
+            Self::Eye => {
+                "M2 12c3-5 6-7 10-7c4 0 7 2 10 7c-3 5-6 7-10 7c-4 0-7-2-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"
+            }
+            Self::EyeOff => {
+                "M2 12c3-5 6-7 10-7c4 0 7 2 10 7c-3 5-6 7-10 7c-4 0-7-2-10-7z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z M4 4l16 16"
+            }
+            Self::Lock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 8 0v3",
+            Self::Unlock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 7.5-2",
         }
     }
 

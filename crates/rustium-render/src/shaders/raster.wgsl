@@ -1,14 +1,15 @@
-// Greedy-meshed voxel chunks. Vertex packing matches rustium_core::MeshVertex.
+// Greedy-meshed voxel chunks. Vertex packing matches rustium_core::MeshVertex. All material data is read by
+// `evaluate_material` (material.wgsl, concatenated before common.wgsl).
 // Every Model is drawn as one instance: three columns (images of the X, Y and Z axes) and an origin place the
 // Shape in the Scene. column_x.w is the dim factor of Models outside the Focus, column_y.w the drawing rank.
-@group(0) @binding(1) var<uniform> palette: array<vec4<f32>, 256>;
 
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
-    @location(0) albedo: vec3<f32>,
+    @location(0) world: vec3<f32>,
     @location(1) @interpolate(flat) normal: vec3<f32>,
     @location(2) ao: f32,
     @location(3) @interpolate(flat) dim: f32,
+    @location(4) @interpolate(flat) color_index: u32,
 };
 
 fn face_normal(face: u32) -> vec3<f32> {
@@ -34,7 +35,8 @@ fn vs_main(
     let local_normal = face_normal(packed & 7u);
     out.normal = column_x.xyz * local_normal.x + column_y.xyz * local_normal.y + column_z.xyz * local_normal.z;
     out.ao = f32((packed >> 3u) & 3u) / 3.0;
-    out.albedo = palette[(packed >> 8u) & 255u].rgb;
+    out.world = world;
+    out.color_index = (packed >> 8u) & 255u;
     out.dim = column_x.w;
     return out;
 }
@@ -42,13 +44,19 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = in.normal;
+    let surface = evaluate_material(in.color_index, in.world, normal);
+    // Glowing voxels show their emission color unlit (not dimmed); the path tracer is the reference for how they
+    // light things. Transmission stays opaque here until the dithered transparency of M4.
+    if (surface.emission_strength > 0.0) {
+        return vec4<f32>(surface.emission_color, 1.0);
+    }
     let sky = vec3<f32>(0.62, 0.68, 0.78);
     let ground = vec3<f32>(0.24, 0.22, 0.21);
     let ambient = mix(ground, sky, normal.y * 0.5 + 0.5);
     let sun = max(dot(normal, camera.sun.xyz), 0.0);
     let occlusion = mix(0.38, 1.0, in.ao);
     let light = ambient * 0.62 + vec3<f32>(1.0, 0.96, 0.9) * sun * 0.7;
-    var color = in.albedo * light * occlusion;
+    var color = surface.base_color * light * occlusion;
     // Models outside the Focus stay readable but recede: desaturate and darken.
     let grey = vec3<f32>(dot(color, vec3<f32>(0.2126, 0.7152, 0.0722)));
     color = mix(color, grey, in.dim * 0.45) * mix(1.0, 0.42, in.dim);

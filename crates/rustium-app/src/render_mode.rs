@@ -3,10 +3,11 @@
 
 use std::time::{Duration, Instant};
 
-use rustium_render::{Ground, Sky, TraceFrame, TraceProgress};
+use rustium_render::{Ground, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceProgress};
 
 use crate::camera::{OrbitCamera, Projection};
 use crate::icons::Icon;
+use crate::render_job::JobHandle;
 
 /// Most Shots a Scene holds.
 pub(crate) const MAX_SHOTS: usize = 5;
@@ -18,6 +19,14 @@ const DEFAULT_EXPOSURE_EV: f32 = -1.0;
 pub(crate) const LENS_RANGE_MM: (f32, f32) = (8.0, 300.0);
 /// Range of an output side in pixels.
 pub(crate) const SIDE_RANGE: (u32, u32) = (16, 8192);
+/// Range of the aperture as an f-number.
+pub(crate) const APERTURE_RANGE: (f32, f32) = (1.0, 32.0);
+/// Range of the exposure compensation in stops.
+pub(crate) const EXPOSURE_RANGE: (f32, f32) = (-6.0, 6.0);
+/// Range of the number of frames of a turntable.
+pub(crate) const TURNTABLE_RANGE: (u32, u32) = (8, 720);
+/// Frame rate of rendered videos.
+pub(crate) const VIDEO_FPS: u32 = 24;
 
 /// Which Render tool the left toolbar has active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,11 +86,6 @@ impl RenderTool {
     pub(crate) fn starts_group(self) -> bool {
         matches!(self, Self::PickFocus | Self::Region)
     }
-
-    /// Focus picking belongs to depth of field, which arrives with the effects milestone.
-    pub(crate) fn is_available(self) -> bool {
-        self != Self::PickFocus
-    }
 }
 
 /// Tabs of the Render-mode inspector.
@@ -105,6 +109,8 @@ pub(crate) enum OrbitAround {
 pub(crate) enum ImageFormat {
     Png,
     Exr,
+    /// A turntable video; needs `ffmpeg`.
+    Mp4,
 }
 
 /// What shows behind the model in the saved image.
@@ -140,6 +146,7 @@ pub(crate) enum RenderStatus {
 
 /// Everything Render mode remembers.
 #[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "independent HUD toggles, not a state machine")]
 pub(crate) struct RenderState {
     pub(crate) tool: RenderTool,
     pub(crate) tab: RenderTab,
@@ -148,6 +155,21 @@ pub(crate) struct RenderState {
     pub(crate) bounces: u32,
     pub(crate) lens_mm: f32,
     pub(crate) projection: ViewProjection,
+    pub(crate) style: RenderStyle,
+    pub(crate) denoise: bool,
+    /// Which layer of the render the frame shows and Save image writes.
+    pub(crate) pass: RenderPass,
+    pub(crate) dof: bool,
+    /// Aperture as an f-number (smaller is a stronger blur).
+    pub(crate) aperture: f32,
+    /// Distance to the focal plane in metres; `None` follows the distance to the orbit target.
+    pub(crate) focus_m: Option<f32>,
+    /// Where the Focus tool last picked, as fractions of the image, for the reticle.
+    pub(crate) focus_marker: Option<[f32; 2]>,
+    /// Frames of a turntable video: one full turn of the camera around the target.
+    pub(crate) turntable_frames: u32,
+    /// The Save video or Queue job running on a worker thread.
+    pub(crate) job: Option<JobHandle>,
     pub(crate) sun_turn_degrees: f32,
     pub(crate) sun_height_degrees: f32,
     pub(crate) sky: Sky,
@@ -188,6 +210,15 @@ impl RenderState {
             bounces: 6,
             lens_mm,
             projection: ViewProjection::Perspective,
+            style: RenderStyle::Traced,
+            denoise: true,
+            pass: RenderPass::Beauty,
+            dof: false,
+            aperture: 2.8,
+            focus_m: None,
+            focus_marker: None,
+            turntable_frames: 72,
+            job: None,
             sun_turn_degrees: 135.0,
             sun_height_degrees: 42.0,
             sky: Sky::Clear,
@@ -311,13 +342,38 @@ impl RenderState {
         (region[2] > region[0] && region[3] > region[1]).then_some(region)
     }
 
-    /// The renderer's input for this frame; `scale` converts HUD points to physical pixels.
-    pub(crate) fn trace_frame(&self, camera: &OrbitCamera, scale: f32) -> Option<TraceFrame> {
+    /// The renderer's input for this frame; `scale` converts HUD points to physical pixels and `voxel_size` is the
+    /// Scene's voxel edge in metres.
+    pub(crate) fn trace_frame(&self, camera: &OrbitCamera, scale: f32, voxel_size: f32) -> Option<TraceFrame> {
         let [x, y, width, height] = self.frame_rect?;
-        let view_proj = self.render_camera(camera).view_proj(self.aspect());
         Some(TraceFrame {
-            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-            size: self.size,
+            region: self.pixel_region(),
+            running: self.running,
+            frame_rect: [x * scale, y * scale, width * scale, height * scale],
+            ..self.frame_for(camera, self.lens_mm, self.size, voxel_size)
+        })
+    }
+
+    /// A frame that renders `camera` through a lens of `lens_mm` into an image of `size`, with every other setting
+    /// from here. Used for the live view, Shots and turntable frames alike.
+    pub(crate) fn frame_for(
+        &self,
+        camera: &OrbitCamera,
+        lens_mm: f32,
+        size: (u32, u32),
+        voxel_size: f32,
+    ) -> TraceFrame {
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let lensed = OrbitCamera {
+            field_of_view_degrees: lens_to_fov_degrees(lens_mm),
+            ..camera.clone()
+        };
+        let focus_voxels = self
+            .focus_m
+            .map_or(camera.distance, |metres| metres / voxel_size.max(1e-6));
+        TraceFrame {
+            inv_view_proj: lensed.view_proj(aspect).inverse().to_cols_array_2d(),
+            size,
             samples: self.samples,
             bounces: self.bounces,
             sun_turn_degrees: self.sun_turn_degrees,
@@ -325,11 +381,46 @@ impl RenderState {
             sky: self.sky,
             ground: self.ground,
             transparent: self.backdrop == Backdrop::Transparent,
-            region: self.pixel_region(),
-            running: self.running,
-            frame_rect: [x * scale, y * scale, width * scale, height * scale],
+            region: None,
+            running: true,
+            frame_rect: [0.0, 0.0, size.0 as f32, size.1 as f32],
             exposure: self.exposure(),
-        })
+            style: self.style,
+            denoise: self.denoise,
+            lens: self.dof.then(|| ThinLens {
+                eye: camera.eye().to_array(),
+                radius: aperture_radius_voxels(lens_mm, self.aperture, focus_voxels),
+                focus_distance: focus_voxels,
+            }),
+            pass: self.pass,
+        }
+    }
+
+    /// The frames of a turntable around `camera`'s target: one full turn in `turntable_frames` steps. The background
+    /// is never transparent because video has no alpha.
+    pub(crate) fn turntable_frames(
+        &self,
+        camera: &OrbitCamera,
+        lens_mm: f32,
+        size: (u32, u32),
+        voxel_size: f32,
+    ) -> Vec<TraceFrame> {
+        let count = self.turntable_frames.clamp(TURNTABLE_RANGE.0, TURNTABLE_RANGE.1);
+        (0..count)
+            .map(|index| {
+                let mut turned = camera.clone();
+                turned.yaw += std::f32::consts::TAU * index as f32 / count as f32;
+                TraceFrame {
+                    transparent: false,
+                    ..self.frame_for(&turned, lens_mm, size, voxel_size)
+                }
+            })
+            .collect()
+    }
+
+    /// Distance from the camera to the focal plane in metres, as the Camera tab shows it.
+    pub(crate) fn focus_metres(&self, camera: &OrbitCamera, voxel_size: f32) -> f32 {
+        self.focus_m.unwrap_or(camera.distance * voxel_size)
     }
 
     /// Records the renderer's progress; a restart resets the clock the ETA runs on.
@@ -369,6 +460,15 @@ impl RenderState {
     pub(crate) fn fraction_done(&self) -> f32 {
         (self.progress.samples as f32 / self.progress.target.max(1) as f32).clamp(0.0, 1.0)
     }
+}
+
+/// Radius of the lens opening in voxels for a focal length, an f-number and a focus distance in voxels.
+///
+/// Real lenses are far too small next to a voxel model to blur anything, so this is a scale-free stand-in: at 35 mm
+/// the opening radius is an eighth of the focus distance divided by the f-number, so f/2.8 blurs a model of about a
+/// third of that distance in depth by a visible amount, and f/16 hardly at all.
+pub(crate) fn aperture_radius_voxels(lens_mm: f32, f_number: f32, focus_voxels: f32) -> f32 {
+    lens_mm / 35.0 * focus_voxels / (8.0 * f_number.clamp(APERTURE_RANGE.0, APERTURE_RANGE.1))
 }
 
 /// A fraction of an image side as a pixel position.
@@ -463,7 +563,7 @@ mod tests {
     fn the_centre_pixel_looks_at_the_camera_target() {
         let (mut render, camera) = state();
         render.frame_rect = Some([10.0, 20.0, 640.0, 360.0]);
-        let frame = render.trace_frame(&camera, 2.0).unwrap();
+        let frame = render.trace_frame(&camera, 2.0, 0.1).unwrap();
         assert_eq!(frame.frame_rect, [20.0, 40.0, 1280.0, 720.0]);
         let inverse = glam::Mat4::from_cols_array_2d(&frame.inv_view_proj);
         let near = inverse.project_point3(glam::Vec3::new(0.0, 0.0, 0.0));
@@ -498,6 +598,46 @@ mod tests {
         assert_eq!(render.status(), RenderStatus::Rendering);
         render.running = false;
         assert_eq!(render.status(), RenderStatus::Paused);
+    }
+
+    #[test]
+    fn a_wider_aperture_blurs_more() {
+        assert!(aperture_radius_voxels(35.0, 1.4, 50.0) > aperture_radius_voxels(35.0, 2.8, 50.0));
+        assert!(aperture_radius_voxels(70.0, 2.8, 50.0) > aperture_radius_voxels(35.0, 2.8, 50.0));
+        assert!(aperture_radius_voxels(35.0, 2.8, 100.0) > aperture_radius_voxels(35.0, 2.8, 50.0));
+    }
+
+    #[test]
+    fn depth_of_field_needs_the_switch_and_converts_the_focus_to_voxels() {
+        let (mut render, camera) = state();
+        assert!(render.frame_for(&camera, 35.0, (64, 64), 0.1).lens.is_none());
+        render.dof = true;
+        render.focus_m = Some(4.2);
+        let lens = render.frame_for(&camera, 35.0, (64, 64), 0.1).lens.unwrap();
+        assert!((lens.focus_distance - 42.0).abs() < 1e-3);
+        assert!((glam::Vec3::from(lens.eye) - camera.eye()).length() < 1e-4);
+        render.focus_m = None;
+        let auto = render.frame_for(&camera, 35.0, (64, 64), 0.1).lens.unwrap();
+        assert!(
+            (auto.focus_distance - camera.distance).abs() < 1e-3,
+            "follows the orbit distance"
+        );
+    }
+
+    #[test]
+    fn a_turntable_makes_one_full_opaque_turn() {
+        let (mut render, camera) = state();
+        render.turntable_frames = 8;
+        render.backdrop = Backdrop::Transparent;
+        let frames = render.turntable_frames(&camera, 35.0, (64, 36), 0.1);
+        assert_eq!(frames.len(), 8);
+        assert!(frames.iter().all(|frame| !frame.transparent && frame.size == (64, 36)));
+        assert_ne!(frames[0].inv_view_proj, frames[1].inv_view_proj);
+        // A turn of 8 steps of 45 degrees: frame 0 and frame 4 look from opposite sides.
+        let eye = |frame: &TraceFrame| {
+            glam::Mat4::from_cols_array_2d(&frame.inv_view_proj).project_point3(glam::Vec3::new(0.0, 0.0, 0.0))
+        };
+        assert!(eye(&frames[0]).distance(eye(&frames[4])) > camera.distance);
     }
 
     #[test]

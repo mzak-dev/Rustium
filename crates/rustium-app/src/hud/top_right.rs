@@ -1,12 +1,22 @@
 //! Top-right island: Undo/Redo, grid and shading, and the window buttons of the frameless window.
 
 use egui::{Align2, Context, vec2};
+use rustium_render::RenderPass;
 
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island};
 use crate::camera::Projection;
 use crate::icons::Icon;
 use crate::theme;
+
+fn pass_key(pass: RenderPass) -> &'static str {
+    match pass {
+        RenderPass::Beauty => "pass-beauty",
+        RenderPass::Albedo => "pass-albedo",
+        RenderPass::Normal => "pass-normal",
+        RenderPass::Depth => "pass-depth",
+    }
+}
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     island(
@@ -46,6 +56,14 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     {
                         hud.ui.render.guides = !hud.ui.render.guides;
                     }
+                    let pass_name = hud.tr(pass_key(hud.ui.render.pass));
+                    let pass_button = widgets::dropdown_button(ui, &pass_name).on_hover_text(hud.tr("view-pass"));
+                    egui::Popup::menu(&pass_button).show(|ui| {
+                        ui.set_min_width(140.0);
+                        for pass in RenderPass::ALL {
+                            ui.selectable_value(&mut hud.ui.render.pass, pass, hud.i18n.tr(pass_key(pass)));
+                        }
+                    });
                 } else {
                     let grid_look = if hud.settings.show_grid { Look::On } else { Look::Plain };
                     if widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true)

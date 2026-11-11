@@ -1,0 +1,471 @@
+use std::collections::HashMap;
+
+use bytemuck::{Pod, Zeroable};
+use rustium_core::{ChunkCoord, ChunkMesh, MeshVertex, Palette};
+use wgpu::util::DeviceExt;
+
+use crate::glass_pass::{GlassPass, GlassRect};
+use crate::gpu_context::GpuContext;
+
+/// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct CameraUniform {
+    /// Column-major view-projection matrix from voxel space to clip space.
+    pub view_proj: [[f32; 4]; 4],
+    /// Camera position in voxel space (w unused).
+    pub eye: [f32; 4],
+    /// Unit vector towards the sun (w unused).
+    pub sun: [f32; 4],
+    /// x: major grid spacing in voxels, y: grid half-extent, zw: grid centre on x and z.
+    pub grid: [f32; 4],
+}
+
+const _: () = assert!(size_of::<CameraUniform>() == 112);
+
+/// One end of an overlay line (Volume bounds, hover box).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct LineVertex {
+    /// Position in voxel space.
+    pub position: [f32; 3],
+    /// Linear RGBA color.
+    pub color: [f32; 4],
+}
+
+const _: () = assert!(size_of::<LineVertex>() == 28);
+
+/// Everything the viewport needs to draw one frame.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewportFrame<'frame> {
+    /// Camera and lighting.
+    pub camera: CameraUniform,
+    /// Background color as linear RGB.
+    pub background: [f32; 3],
+    /// Whether to draw the ground grid.
+    pub show_grid: bool,
+    /// Overlay line list, two vertices per line.
+    pub lines: &'frame [LineVertex],
+    /// Panels that show the viewport blurred behind them.
+    pub glass: &'frame [GlassRect],
+    /// Whether glass panels blur (Settings → Interface → Translucent panels).
+    pub blur: bool,
+}
+
+#[derive(Debug)]
+struct GpuChunk {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+}
+
+#[derive(Debug)]
+struct SceneTargets {
+    size: (u32, u32),
+    multisampled: Option<wgpu::TextureView>,
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+}
+
+#[derive(Debug)]
+struct Pipelines {
+    raster: wgpu::RenderPipeline,
+    grid: wgpu::RenderPipeline,
+    lines: wgpu::RenderPipeline,
+}
+
+const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const PALETTE_ENTRIES: usize = 256;
+
+/// Draws the voxel Scene, grid and overlays, then composites them with glass blur onto the surface.
+#[derive(Debug)]
+pub struct ViewportRenderer {
+    sample_count: u32,
+    camera_buffer: wgpu::Buffer,
+    palette_buffer: wgpu::Buffer,
+    scene_group: wgpu::BindGroup,
+    pipeline_layout: wgpu::PipelineLayout,
+    pipelines: Pipelines,
+    line_buffer: wgpu::Buffer,
+    chunks: HashMap<ChunkCoord, GpuChunk>,
+    targets: Option<SceneTargets>,
+    glass: GlassPass,
+}
+
+impl ViewportRenderer {
+    /// Creates the pipelines for `sample_count` MSAA samples (1 = off).
+    pub fn new(gpu: &GpuContext, sample_count: u32) -> Self {
+        let device = gpu.device();
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera uniform"),
+            size: size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let palette_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("palette uniform"),
+            size: (PALETTE_ENTRIES * 16) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene bind group layout"),
+            entries: &[uniform_entry(0), uniform_entry(1)],
+        });
+        let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene bind group"),
+            layout: &scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: palette_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene pipeline layout"),
+            bind_group_layouts: &[Some(&scene_layout)],
+            immediate_size: 0,
+        });
+        let pipelines = create_pipelines(device, &pipeline_layout, sample_count);
+        let line_buffer = create_line_buffer(device, 256);
+        let glass = GlassPass::new(device, gpu.surface_srgb_format());
+        Self {
+            sample_count,
+            camera_buffer,
+            palette_buffer,
+            scene_group,
+            pipeline_layout,
+            pipelines,
+            line_buffer,
+            chunks: HashMap::new(),
+            targets: None,
+            glass,
+        }
+    }
+
+    /// Current MSAA sample count.
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// Switches MSAA; the count must be one the adapter supports (see [`GpuContext::supported_sample_counts`]).
+    pub fn set_sample_count(&mut self, gpu: &GpuContext, sample_count: u32) {
+        if sample_count == self.sample_count {
+            return;
+        }
+        self.sample_count = sample_count;
+        self.pipelines = create_pipelines(gpu.device(), &self.pipeline_layout, sample_count);
+        self.targets = None;
+    }
+
+    /// Uploads Palette colors (converted from sRGB to linear).
+    pub fn set_palette(&self, gpu: &GpuContext, palette: &Palette) {
+        let mut colors = [[0.0_f32; 4]; PALETTE_ENTRIES];
+        for (id, material) in palette.iter() {
+            let [r, g, b] = material.color.map(srgb_to_linear);
+            if let Some(slot) = colors.get_mut(usize::from(id.get())) {
+                *slot = [r, g, b, 1.0];
+            }
+        }
+        gpu.queue()
+            .write_buffer(&self.palette_buffer, 0, bytemuck::cast_slice(&colors));
+    }
+
+    /// Replaces the GPU mesh of one chunk; an empty mesh removes it.
+    // ponytail: new buffers per upload; switch to a pooled allocator if strokes show allocation stalls.
+    pub fn upload_chunk(&mut self, gpu: &GpuContext, coord: ChunkCoord, mesh: &ChunkMesh) {
+        let Ok(index_count) = u32::try_from(mesh.indices.len()) else {
+            return;
+        };
+        if index_count == 0 {
+            self.chunks.remove(&coord);
+            return;
+        }
+        let device = gpu.device();
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk vertices"),
+            contents: bytemuck::cast_slice::<MeshVertex, u8>(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("chunk indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.chunks.insert(
+            coord,
+            GpuChunk {
+                vertices,
+                indices,
+                index_count,
+            },
+        );
+    }
+
+    /// Drops every chunk mesh.
+    pub fn clear_chunks(&mut self) {
+        self.chunks.clear();
+    }
+
+    /// Draws `frame` and composites it onto `surface`; the interface is drawn afterwards with `LoadOp::Load`.
+    pub fn render(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        surface: &wgpu::TextureView,
+        frame: &ViewportFrame<'_>,
+    ) {
+        let size = gpu.size();
+        if self.targets.as_ref().is_none_or(|targets| targets.size != size) {
+            let targets = create_targets(gpu.device(), size, self.sample_count);
+            self.glass.resize(gpu.device(), gpu.queue(), &targets.color, size);
+            self.targets = Some(targets);
+        }
+        let Some(targets) = &self.targets else {
+            return;
+        };
+        let queue = gpu.queue();
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&frame.camera));
+        let line_bytes = bytemuck::cast_slice::<LineVertex, u8>(frame.lines);
+        if line_bytes.len() as u64 > self.line_buffer.size() {
+            self.line_buffer = create_line_buffer(gpu.device(), frame.lines.len().next_power_of_two());
+        }
+        queue.write_buffer(&self.line_buffer, 0, line_bytes);
+
+        let (view, resolve_target) = match &targets.multisampled {
+            Some(multisampled) => (multisampled, Some(&targets.color)),
+            None => (&targets.color, None),
+        };
+        let [r, g, b] = frame.background.map(f64::from);
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.scene_group, &[]);
+            pass.set_pipeline(&self.pipelines.raster);
+            for chunk in self.chunks.values() {
+                pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                pass.set_index_buffer(chunk.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..chunk.index_count, 0, 0..1);
+            }
+            if frame.show_grid {
+                pass.set_pipeline(&self.pipelines.grid);
+                pass.draw(0..6, 0..1);
+            }
+            if let Ok(line_count) = u32::try_from(frame.lines.len())
+                && line_count > 0
+            {
+                pass.set_pipeline(&self.pipelines.lines);
+                pass.set_vertex_buffer(0, self.line_buffer.slice(..));
+                pass.draw(0..line_count, 0..1);
+            }
+        }
+        self.glass.encode(queue, encoder, surface, frame.glass, frame.blur);
+    }
+}
+
+fn srgb_to_linear(channel: u8) -> f32 {
+    let value = f32::from(channel) / 255.0;
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn create_line_buffer(device: &wgpu::Device, vertices: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("overlay lines"),
+        size: (vertices.max(2) * size_of::<LineVertex>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_targets(device: &wgpu::Device, size: (u32, u32), sample_count: u32) -> SceneTargets {
+    let extent = wgpu::Extent3d {
+        width: size.0.max(1),
+        height: size.1.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = |label, format, samples, usage| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    };
+    let color = texture(
+        "scene color",
+        SCENE_FORMAT,
+        1,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let multisampled = (sample_count > 1).then(|| {
+        texture(
+            "scene color msaa",
+            SCENE_FORMAT,
+            sample_count,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        )
+    });
+    let depth = texture(
+        "scene depth",
+        DEPTH_FORMAT,
+        sample_count,
+        wgpu::TextureUsages::RENDER_ATTACHMENT,
+    );
+    SceneTargets {
+        size,
+        multisampled,
+        color,
+        depth,
+    }
+}
+
+struct PipelineSpec<'spec> {
+    label: &'spec str,
+    module: &'spec wgpu::ShaderModule,
+    buffers: &'spec [Option<wgpu::VertexBufferLayout<'spec>>],
+    topology: wgpu::PrimitiveTopology,
+    cull_mode: Option<wgpu::Face>,
+    depth_write: bool,
+    blend: Option<wgpu::BlendState>,
+}
+
+fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample_count: u32) -> Pipelines {
+    let module = |label, source: &str| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{source}", include_str!("shaders/common.wgsl")).into()),
+        })
+    };
+    let raster_module = module("raster shader", include_str!("shaders/raster.wgsl"));
+    let grid_module = module("grid shader", include_str!("shaders/grid.wgsl"));
+    let lines_module = module("lines shader", include_str!("shaders/lines.wgsl"));
+
+    let build = |spec: PipelineSpec<'_>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(spec.label),
+            layout: Some(layout),
+            vertex: wgpu::VertexState {
+                module: spec.module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: spec.buffers,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: spec.topology,
+                cull_mode: spec.cull_mode,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(spec.depth_write),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: spec.module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: SCENE_FORMAT,
+                    blend: spec.blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    };
+
+    let mesh_layout = wgpu::VertexBufferLayout {
+        array_stride: size_of::<MeshVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32],
+    };
+    let line_layout = wgpu::VertexBufferLayout {
+        array_stride: size_of::<LineVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+    };
+    Pipelines {
+        raster: build(PipelineSpec {
+            label: "raster pipeline",
+            module: &raster_module,
+            buffers: &[Some(mesh_layout)],
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: Some(wgpu::Face::Back),
+            depth_write: true,
+            blend: None,
+        }),
+        grid: build(PipelineSpec {
+            label: "grid pipeline",
+            module: &grid_module,
+            buffers: &[],
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            depth_write: false,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        }),
+        lines: build(PipelineSpec {
+            label: "lines pipeline",
+            module: &lines_module,
+            buffers: &[Some(line_layout)],
+            topology: wgpu::PrimitiveTopology::LineList,
+            cull_mode: None,
+            depth_write: false,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        }),
+    }
+}

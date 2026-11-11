@@ -1,0 +1,3 @@
+# One Command API; MCP server runs inside the editor process
+
+Every change to the Scene is a `Command` applied on the UI thread and recorded as an Edit, whether it comes from the interface, a Luau script or an MCP client. The MCP server (HTTP on 127.0.0.1:7420 and stdio, both from the first MCP milestone) lives in `rustium-mcp`, the only crate that depends on tokio; it sends Commands over a crossbeam channel, wakes the event loop with `EventLoopProxy` and waits for the reply. Running MCP in-process (instead of a separate service editing files) means AI edits show up live, can be undone, and respect the per-tool permissions shown in the MCP tab.

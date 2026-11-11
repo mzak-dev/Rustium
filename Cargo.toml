@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = ["crates/rustium-core", "crates/rustium-render", "crates/rustium-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+rustium-core = { path = "crates/rustium-core" }
+rustium-render = { path = "crates/rustium-render" }
+
+bytemuck = { version = "1.25", features = ["derive"] }
+color-eyre = "0.6"
+crossbeam-channel = "0.5"
+directories = "6"
+divan = "0.1"
+egui = "0.37"
+egui-wgpu = { version = "0.37", features = ["winit"] }
+egui-winit = "0.37"
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+glam = { version = "0.34", features = ["bytemuck"] }
+png = "0.18"
+pollster = "0.4"
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.9"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-error = "0.2"
+tracing-subscriber = "0.3"
+unic-langid = "0.9"
+wgpu = "30"
+winit = "0.30"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "unwind"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Groups (lower priority so individual lints below override them)
+pedantic = { level = "warn", priority = -1 }
+
+# --- Pedantic lints that are too noisy for this style ---
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "warn"     # keep (explicit)
+missing_panics_doc = "warn"     # keep (explicit)
+similar_names = "allow"
+too_many_lines = "allow"
+# Rendering/layout code casts floats a lot; keep int casts strict:
+cast_precision_loss = "allow"
+
+# --- Restriction lints we opt into ---
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "warn"
+unwrap_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+mem_forget = "warn"
+mod_module_files = "warn"
+allow_attributes = "warn"                  # use #[expect] instead
+allow_attributes_without_reason = "warn"
+print_stdout = "warn"                      # `#[expect]` it in CLI output code
+print_stderr = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+rc_buffer = "warn"
+clone_on_ref_ptr = "warn"
+infinite_loop = "warn"
+
+# --- Explicitly kept at warn (some are pedantic, listed for visibility) ---
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+cast_lossless = "warn"
+wildcard_imports = "warn"
+needless_for_each = "warn"
+float_cmp = "warn"

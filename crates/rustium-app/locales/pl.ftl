@@ -1,0 +1,190 @@
+## Shell
+app-name = Rustium
+start-screen = Ekran startowy
+main-menu = Menu główne
+mode = Tryb
+mode-model = Model
+mode-effects = Efekty
+mode-render = Render
+planned = Planowane
+later-milestone = Pojawi się w kolejnym etapie
+
+## Main menu
+menu-new = Nowy model
+menu-open = Otwórz plik…
+menu-save = Zapisz
+menu-settings = Ustawienia…
+menu-start-screen = Ekran startowy
+menu-quit = Zakończ
+
+## Tool options
+brush = Pędzel
+brush-voxel = Woksel
+brush-line = Linia
+brush-box = Prostopadłościan
+brush-face = Ściana
+size = Rozmiar
+mirror = Lustro
+mirror-axes = Osie lustra
+
+## Top right
+undo = Cofnij
+redo = Ponów
+grid = Siatka
+shading-shaded = Cieniowanie
+projection-perspective = Perspektywa
+projection-orthographic = Ortogonalny
+window-minimize = Minimalizuj
+window-maximize = Maksymalizuj
+window-close = Zamknij
+
+## Tools
+tools = Narzędzia
+tool-select-box = Zaznacz prostokątem
+tool-select-color = Zaznacz kolorem
+tool-attach = Dołóż
+tool-erase = Usuń
+tool-paint = Maluj
+tool-fill = Wypełnij
+tool-pick = Pobierz kolor
+tool-move = Przesuń
+tool-measure = Zmierz
+
+## Inspector
+inspector = Inspektor
+tab-scene = Scena
+tab-history = Historia
+tab-mcp = MCP
+inspector-collapse = Zwiń
+inspector-open = Otwórz inspektor
+scene-root = Scena
+model-name = Model
+prop-name = Nazwa
+prop-voxel-size = Rozmiar woksela
+prop-size = Rozmiar
+prop-world-size = Rozmiar w świecie
+prop-empty = Pusty
+
+## History
+history-new-scene = Nowa scena
+edit-attach = Dołożenie wokseli
+edit-erase = Usunięcie
+edit-paint = Malowanie
+history-now = teraz
+
+## MCP
+mcp-server = Serwer MCP
+mcp-off = Wyłączony
+mcp-coming = Serwer MCP pojawi się w następnym etapie.
+mcp-transport = Transport
+mcp-address = Adres
+mcp-allowed-tools = Dozwolone narzędzia
+mcp-read-model = Odczyt modelu
+mcp-edit-voxels = Edycja wokseli
+mcp-edit-palette = Edycja palety
+mcp-run-scripts = Uruchamianie skryptów
+mcp-start-renders = Uruchamianie renderów
+mcp-configure = Konfiguruj
+mcp-copy-config = Kopiuj konfigurację klienta
+
+## Hotbar and palette
+color-hotbar = Pasek kolorów
+palette = Paleta
+palette-hint = Kliknij kolor, aby wstawić go do slotu { $slot }
+color-slot = Kolor { $slot }, { $hex }
+
+## Corners
+hint-place = Postaw
+hint-tool-wheel = Koło narzędzi
+hint-orbit = Obrót
+hint-pan = Przesunięcie
+per-voxel = { $size } / woksel
+
+## View cube
+cube-top = GÓRA
+cube-front = PRZÓD
+cube-right = PRAWO
+cube-bottom = DÓŁ
+cube-back = TYŁ
+cube-left = LEWO
+view-cube = Kostka widoku. Przeciągnij, aby obrócić, kliknij ścianę, aby przyciągnąć widok.
+
+## Splash
+splash-subtitle = Edytor modeli wokselowych
+splash-new = Nowy model
+splash-open = Otwórz plik
+splash-recent = Ostatnie
+splash-no-recent = Brak ostatnich plików
+splash-step-gpu = Uruchamianie GPU
+splash-step-palettes = Wczytywanie palet
+splash-step-workspace = Przywracanie obszaru roboczego
+splash-step-ready = Gotowe
+splash-show-at-startup = Pokazuj przy starcie
+splash-close = Zamknij ekran startowy
+
+## Settings
+settings = Ustawienia
+settings-search = Szukaj ustawień
+settings-done = Gotowe
+settings-reset-section = Przywróć tę sekcję
+settings-apply-now = Zmiany działają od razu
+settings-restart = Zadziała po ponownym uruchomieniu.
+section-general = Ogólne
+section-general-description = Start, zapisywanie i domyślne wartości nowych modeli.
+section-interface = Interfejs
+section-interface-description = Wygląd i ruch paneli.
+section-viewport = Widok
+section-viewport-description = Nawigacja i to, co rysujemy wokół modelu.
+section-input = Sterowanie
+section-input-description = Skróty klawiatury i myszy.
+section-performance = Wydajność
+section-performance-description = Karta graficzna, tempo klatek i pamięć.
+setting-language = Język
+language-english = English
+language-polish = Polski
+setting-start-screen = Pokazuj ekran startowy przy uruchomieniu
+setting-default-voxel-size = Domyślny rozmiar woksela
+setting-default-voxel-size-hint = Używany dla nowych modeli.
+setting-autosave = Autozapis
+setting-autosave-hint = Trzyma kopię odzyskiwania obok pliku.
+setting-autosave-interval = Częstotliwość autozapisu
+setting-undo-steps = Kroki cofania
+setting-accent = Kolor akcentu
+setting-accent-hint = Aktywne narzędzie, zaznaczenie i główne przyciski.
+accent-rust-orange = Rdzawy pomarańcz
+accent-cyan = Cyjan
+accent-blue = Niebieski
+accent-lime = Limonkowy
+setting-ui-scale = Skala interfejsu
+setting-translucent = Półprzezroczyste panele
+setting-translucent-hint = Rozmywa widok za pływającymi panelami. Wyłącz na słabszych GPU.
+setting-motion = Animacje
+motion-full = Pełne
+motion-reduced = Ograniczone
+motion-off = Wyłączone
+setting-shortcut-letters = Litery skrótów na narzędziach
+setting-tooltip-delay = Opóźnienie podpowiedzi
+setting-orbit-style = Styl obrotu
+setting-orbit-style-hint = Obrotnica utrzymuje model w pionie.
+orbit-turntable = Obrotnica
+orbit-free = Swobodny
+setting-background = Tło
+setting-ground-grid = Siatka podłoża
+setting-volume-bounds = Granice wolumenu
+setting-fov = Pole widzenia
+setting-antialiasing = Wygładzanie krawędzi
+antialiasing-off = Wył.
+setting-keymap = Zestaw skrótów
+keymap-default = Domyślny Rustium
+binding-color-slots = Sloty kolorów
+binding-search = Szukaj poleceń
+setting-invert-zoom = Odwróć kierunek przybliżania
+setting-rebind = Kliknij klawisz, aby go zmienić
+setting-rebind-hint = Zmiana skrótów pojawi się w kolejnym etapie.
+setting-device = Karta graficzna
+setting-backend = Interfejs graficzny
+backend-automatic = Automatycznie
+setting-vsync = Synchronizacja pionowa
+setting-frame-limit = Limit klatek
+frame-limit-display = Jak ekran
+frame-limit-unlimited = Bez limitu

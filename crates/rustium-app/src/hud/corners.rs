@@ -1,0 +1,93 @@
+//! Bottom corners: mouse hints on the left, cursor position and model size on the right.
+
+use egui::{Align2, Context, RichText, vec2};
+use fluent_bundle::FluentValue;
+use rustium_core::HitTarget;
+
+use super::{Hud, Intro, Place, corner, island, widgets};
+use crate::theme;
+
+pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
+    let hints = theme::island()
+        .corner_radius(corner(0, 12, 0, 0))
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 14,
+            top: 0,
+            bottom: 0,
+        });
+    island(
+        ctx,
+        hud,
+        "hints",
+        Place::Anchor(Align2::LEFT_BOTTOM, vec2(0.0, 0.0)),
+        Intro {
+            delay: 0.36,
+            from: vec2(0.0, 16.0),
+        },
+        hints,
+        |ui, hud| {
+            ui.set_height(34.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                for (button, key) in [
+                    ("LMB", "hint-place"),
+                    ("RMB", "hint-tool-wheel"),
+                    ("MMB", "hint-orbit"),
+                    ("Shift MMB", "hint-pan"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.label(widgets::mono(button, 11.0).color(theme::TEXT));
+                        ui.label(RichText::new(hud.tr(key)).color(theme::MUTED).size(11.0));
+                    });
+                }
+            });
+        },
+    );
+
+    let readout = theme::island()
+        .corner_radius(corner(12, 0, 0, 0))
+        .inner_margin(egui::Margin {
+            left: 14,
+            right: 12,
+            top: 0,
+            bottom: 0,
+        });
+    island(
+        ctx,
+        hud,
+        "readout",
+        Place::Anchor(Align2::RIGHT_BOTTOM, vec2(0.0, 0.0)),
+        Intro {
+            delay: 0.42,
+            from: vec2(0.0, 16.0),
+        },
+        readout,
+        |ui, hud| {
+            ui.set_height(34.0);
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                let position = hud.editor.hover.map(|hit| match hit.target {
+                    HitTarget::Voxel => hit.voxel,
+                    HitTarget::Ground => hit.voxel + glam::IVec3::Y,
+                });
+                let position = position.map_or_else(
+                    || "X –  Y –  Z –".to_owned(),
+                    |p| format!("X {}  Y {}  Z {}", p.x, p.y, p.z),
+                );
+                ui.label(widgets::mono(position, 11.0));
+                if let Some(volume) = hud.editor.scene.shape().volume() {
+                    let size = volume.size();
+                    ui.label(widgets::mono(format!("{} × {} × {}", size.x, size.y, size.z), 11.0));
+                }
+                let centimetres = hud.editor.scene.voxel_size() * 100.0;
+                let size = format!("{} cm", (centimetres * 100.0).round() / 100.0);
+                ui.label(widgets::mono(
+                    hud.i18n.tr_args("per-voxel", &[("size", FluentValue::from(size))]),
+                    11.0,
+                ));
+            });
+        },
+    );
+}

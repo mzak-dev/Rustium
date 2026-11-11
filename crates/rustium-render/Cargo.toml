@@ -1,0 +1,19 @@
+[package]
+name = "rustium-render"
+description = "wgpu viewport renderer for the Rustium voxel editor: chunk raster, grid, overlays and glass blur."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytemuck.workspace = true
+glam.workspace = true
+rustium-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

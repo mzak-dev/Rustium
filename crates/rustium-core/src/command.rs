@@ -3,6 +3,7 @@ use glam::IVec3;
 use crate::edit::{Edit, EditKind, Recorder};
 use crate::error::Error;
 use crate::ids::{NodeId, ShapeId};
+use crate::material_graph::{MaterialGraph, SurfaceConstants};
 use crate::palette::MaterialId;
 use crate::raycast::RayHit;
 use crate::scene::Scene;
@@ -153,6 +154,27 @@ pub enum Command {
         /// Its new Transform.
         transform: Transform,
     },
+    /// Creates a material graph with the given Surface constants (clamped); it gets the next free index.
+    CreateGraph {
+        /// Name shown in the interface.
+        name: String,
+        /// The Surface output's constants.
+        surface: SurfaceConstants,
+    },
+    /// Replaces the Surface constants of a material graph (clamped). The Default material (0) is locked.
+    EditGraph {
+        /// Index of the graph.
+        index: u32,
+        /// Its new constants.
+        surface: SurfaceConstants,
+    },
+    /// Points a Palette entry at a material graph.
+    AssignGraph {
+        /// The Palette entry.
+        id: MaterialId,
+        /// Index of the graph; 0 is the Default material.
+        graph: u32,
+    },
 }
 
 /// Applies `command` to `scene` and returns the resulting Edit, or `None` when nothing changed.
@@ -162,7 +184,9 @@ pub enum Command {
 /// [`Error::UnknownMaterial`] when the Material is not in the Palette, [`Error::BrushSize`] when the brush is
 /// empty or larger than [`Brush::MAX_SIZE`], [`Error::FillTooLarge`] for an oversized 3D Fill, and the Node errors
 /// ([`Error::UnknownNode`], [`Error::NotAModel`], [`Error::NotAGroup`], [`Error::ModelUnavailable`],
-/// [`Error::RootProtected`], [`Error::MoveIntoSelf`]) when a Command names a Node it cannot be applied to.
+/// [`Error::RootProtected`], [`Error::MoveIntoSelf`]) when a Command names a Node it cannot be applied to, and
+/// [`Error::TooManyGraphs`], [`Error::UnknownGraph`] and [`Error::DefaultMaterialLocked`] for the material graph
+/// Commands.
 pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error> {
     match command {
         Command::ApplyBrush {
@@ -207,7 +231,56 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::Split { model, selection, name } => scene_ops::split(scene, *model, selection, name),
         Command::MoveNode { node, parent, index } => scene_ops::move_node(scene, *node, *parent, *index),
         Command::SetTransform { node, transform } => scene_ops::set_transform(scene, *node, *transform),
+        Command::CreateGraph { name, surface } => create_graph(scene, name, *surface),
+        Command::EditGraph { index, surface } => edit_graph(scene, *index, *surface),
+        Command::AssignGraph { id, graph } => assign_graph(scene, *id, *graph),
     }
+}
+
+fn snapshot(scene: &Scene) -> (crate::Palette, Vec<MaterialGraph>) {
+    (scene.palette.clone(), scene.material_graphs.clone())
+}
+
+fn create_graph(scene: &mut Scene, name: &str, surface: SurfaceConstants) -> Result<Option<Edit>, Error> {
+    if scene.material_graphs.len() >= MaterialGraph::MAX_PER_SCENE {
+        return Err(Error::TooManyGraphs(scene.material_graphs.len()));
+    }
+    let before = snapshot(scene);
+    scene.material_graphs.push(MaterialGraph {
+        name: name.to_owned(),
+        surface: surface.sanitized(),
+    });
+    Ok(Some(Edit::materials_change(EditKind::CreateGraph, scene, before)))
+}
+
+fn edit_graph(scene: &mut Scene, index: u32, surface: SurfaceConstants) -> Result<Option<Edit>, Error> {
+    if index == 0 {
+        return Err(Error::DefaultMaterialLocked);
+    }
+    let before = snapshot(scene);
+    let surface = surface.sanitized();
+    let graph = usize::try_from(index)
+        .ok()
+        .and_then(|slot| scene.material_graphs.get_mut(slot))
+        .ok_or(Error::UnknownGraph(index))?;
+    if graph.surface == surface {
+        return Ok(None);
+    }
+    graph.surface = surface;
+    Ok(Some(Edit::materials_change(EditKind::EditGraph, scene, before)))
+}
+
+fn assign_graph(scene: &mut Scene, id: MaterialId, graph: u32) -> Result<Option<Edit>, Error> {
+    if usize::try_from(graph).map_or(true, |slot| slot >= scene.material_graphs.len()) {
+        return Err(Error::UnknownGraph(graph));
+    }
+    let before = snapshot(scene);
+    let color = scene.palette.get_mut(id).ok_or(Error::UnknownMaterial(id.get()))?;
+    if color.graph == graph {
+        return Ok(None);
+    }
+    color.graph = graph;
+    Ok(Some(Edit::materials_change(EditKind::AssignGraph, scene, before)))
 }
 
 /// What to do with each cell a gesture reaches.
@@ -581,5 +654,160 @@ mod tests {
         let shape = shape_of(&scene, model);
         assert!(shape.get(IVec3::ZERO).is_some());
         assert_eq!(shape.volume().unwrap().max.x, 1);
+    }
+}
+
+#[cfg(test)]
+mod material_graph_tests {
+    use super::*;
+    use crate::edit::History;
+
+    fn material(number: u8) -> MaterialId {
+        MaterialId::new(number).unwrap()
+    }
+
+    fn glow() -> SurfaceConstants {
+        SurfaceConstants {
+            emission_strength: 6.0,
+            roughness: 2.0,
+            ..SurfaceConstants::MATTE
+        }
+    }
+
+    #[test]
+    fn new_scenes_start_with_the_default_material_and_colors_use_it() {
+        let scene = Scene::new();
+        assert_eq!(scene.material_graphs().len(), 1);
+        assert_eq!(scene.material_graphs()[0], MaterialGraph::default_material());
+        assert!(scene.palette().iter().all(|(_, color)| color.graph == 0));
+    }
+
+    #[test]
+    fn create_edit_and_assign_undo_in_order() {
+        let mut scene = Scene::new();
+        let mut history = History::new(10);
+        let create = Command::CreateGraph {
+            name: "Lamp".to_owned(),
+            surface: SurfaceConstants::MATTE,
+        };
+        history.push(apply(&mut scene, &create).unwrap().unwrap());
+        history.push(
+            apply(
+                &mut scene,
+                &Command::EditGraph {
+                    index: 1,
+                    surface: glow(),
+                },
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let assign = Command::AssignGraph {
+            id: material(5),
+            graph: 1,
+        };
+        let edit = apply(&mut scene, &assign).unwrap().unwrap();
+        assert!(edit.touches_materials());
+        history.push(edit);
+        assert_eq!(scene.palette().get(material(5)).unwrap().graph, 1);
+        assert!(
+            (scene.material_graphs()[1].surface.roughness - 1.0).abs() < f32::EPSILON,
+            "constants are clamped"
+        );
+
+        history.undo(&mut scene);
+        assert_eq!(scene.palette().get(material(5)).unwrap().graph, 0);
+        history.undo(&mut scene);
+        assert!(scene.material_graphs()[1].surface.emission_strength.abs() < f32::EPSILON);
+        history.undo(&mut scene);
+        assert_eq!(scene.material_graphs().len(), 1);
+        history.redo(&mut scene);
+        assert_eq!(scene.material_graphs()[1].name, "Lamp");
+    }
+
+    #[test]
+    fn a_slider_drag_of_merged_edits_undoes_in_one_step() {
+        let mut scene = Scene::new();
+        let mut history = History::new(10);
+        let create = Command::CreateGraph {
+            name: "Slate".to_owned(),
+            surface: SurfaceConstants::MATTE,
+        };
+        apply(&mut scene, &create).unwrap();
+        let mut merged: Option<Edit> = None;
+        for step in 1..=3_u8 {
+            let surface = SurfaceConstants {
+                metallic: f32::from(step) / 4.0,
+                ..SurfaceConstants::MATTE
+            };
+            let edit = apply(&mut scene, &Command::EditGraph { index: 1, surface })
+                .unwrap()
+                .unwrap();
+            merged = Some(match merged {
+                Some(first) => first.merge(edit),
+                None => edit,
+            });
+        }
+        history.push(merged.unwrap());
+        history.undo(&mut scene);
+        assert!(scene.material_graphs()[1].surface.metallic.abs() < f32::EPSILON);
+        assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn graph_commands_reject_bad_targets() {
+        let mut scene = Scene::new();
+        let edit_default = Command::EditGraph {
+            index: 0,
+            surface: glow(),
+        };
+        assert!(matches!(
+            apply(&mut scene, &edit_default),
+            Err(Error::DefaultMaterialLocked)
+        ));
+        let edit_missing = Command::EditGraph {
+            index: 9,
+            surface: glow(),
+        };
+        assert!(matches!(apply(&mut scene, &edit_missing), Err(Error::UnknownGraph(9))));
+        let assign_missing = Command::AssignGraph {
+            id: material(1),
+            graph: 3,
+        };
+        assert!(matches!(
+            apply(&mut scene, &assign_missing),
+            Err(Error::UnknownGraph(3))
+        ));
+        let assign_unknown_color = Command::AssignGraph {
+            id: material(200),
+            graph: 0,
+        };
+        assert!(matches!(
+            apply(&mut scene, &assign_unknown_color),
+            Err(Error::UnknownMaterial(200))
+        ));
+    }
+
+    #[test]
+    fn assigning_the_same_graph_records_nothing() {
+        let mut scene = Scene::new();
+        let assign = Command::AssignGraph {
+            id: material(1),
+            graph: 0,
+        };
+        assert!(apply(&mut scene, &assign).unwrap().is_none());
+    }
+
+    #[test]
+    fn graph_creation_stops_at_the_limit() {
+        let mut scene = Scene::new();
+        let create = Command::CreateGraph {
+            name: "Filler".to_owned(),
+            surface: SurfaceConstants::MATTE,
+        };
+        for _ in 1..MaterialGraph::MAX_PER_SCENE {
+            apply(&mut scene, &create).unwrap();
+        }
+        assert!(matches!(apply(&mut scene, &create), Err(Error::TooManyGraphs(_))));
     }
 }

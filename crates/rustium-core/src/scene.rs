@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::ids::{NodeId, ShapeId};
+use crate::material_graph::MaterialGraph;
 use crate::node::{Graph, Node};
 use crate::palette::Palette;
 use crate::shape::{Shape, Volume};
@@ -25,7 +26,8 @@ pub struct Placement {
 pub struct Scene {
     pub(crate) graph: Arc<Graph>,
     pub(crate) shapes: Vec<Shape>,
-    palette: Palette,
+    pub(crate) palette: Palette,
+    pub(crate) material_graphs: Vec<MaterialGraph>,
     voxel_size: f32,
 }
 
@@ -49,6 +51,7 @@ impl Scene {
             graph: Arc::new(Graph::new("Scene")),
             shapes: Vec::new(),
             palette: Palette::default(),
+            material_graphs: vec![MaterialGraph::default_material()],
             voxel_size,
         };
         let shape = scene.add_shape(Shape::new());
@@ -71,6 +74,11 @@ impl Scene {
     /// Materials voxels can use.
     pub fn palette(&self) -> &Palette {
         &self.palette
+    }
+
+    /// Material graphs, shared by every Model; index 0 is the Default material.
+    pub fn material_graphs(&self) -> &[MaterialGraph] {
+        &self.material_graphs
     }
 
     /// Edge length of one voxel in metres.

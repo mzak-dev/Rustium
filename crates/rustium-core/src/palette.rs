@@ -29,11 +29,22 @@ impl MaterialId {
     }
 }
 
-/// How voxels using this Palette entry look.
+/// A Palette entry: a base color plus the index of the [`MaterialGraph`](crate::MaterialGraph) shading it.
+///
+/// ponytail: a later milestone renames this to `Color` and `MaterialId` to `ColorId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Material {
     /// Base color as 8-bit sRGB.
     pub color: [u8; 3],
+    /// Index into the Scene's material graphs; 0 is the Default material.
+    pub graph: u32,
+}
+
+impl Material {
+    /// A Color of `color` shaded by the Default material.
+    pub fn new(color: [u8; 3]) -> Self {
+        Self { color, graph: 0 }
+    }
 }
 
 /// The ordered list of up to [`Palette::MAX_LEN`] Materials a Scene can use.
@@ -49,6 +60,11 @@ impl Palette {
     /// Material for `id`, if the Palette has that many entries.
     pub fn get(&self, id: MaterialId) -> Option<&Material> {
         self.materials.get(id.slot())
+    }
+
+    /// Mutable access to the Material for `id`; only Commands change the Palette.
+    pub(crate) fn get_mut(&mut self, id: MaterialId) -> Option<&mut Material> {
+        self.materials.get_mut(id.slot())
     }
 
     /// Number of Materials.
@@ -99,15 +115,11 @@ impl Default for Palette {
         ];
         let mut materials = Vec::with_capacity(96);
         for value in GREYS {
-            materials.push(Material {
-                color: hsv_to_rgb(0.0, 0.0, value),
-            });
+            materials.push(Material::new(hsv_to_rgb(0.0, 0.0, value)));
         }
         for hue in HUES {
             for (saturation, value) in SHADES {
-                materials.push(Material {
-                    color: hsv_to_rgb(hue, saturation, value),
-                });
+                materials.push(Material::new(hsv_to_rgb(hue, saturation, value)));
             }
         }
         Self { materials }

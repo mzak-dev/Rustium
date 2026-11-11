@@ -13,4 +13,7 @@ pub enum Error {
     /// The surface reported a validation error while acquiring a frame.
     #[error("the window surface failed validation")]
     SurfaceValidation,
+    /// The traced image could not be copied back from the GPU, or nothing has been traced yet.
+    #[error("cannot read the rendered image back from the GPU")]
+    Readback,
 }

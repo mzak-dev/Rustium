@@ -15,7 +15,11 @@ fn validate(name: &str, source: &str) {
 
 #[test]
 fn scene_shaders_are_valid_wgsl() {
-    let common = include_str!("../src/shaders/common.wgsl");
+    let common = format!(
+        "{}{}",
+        include_str!("../src/shaders/material.wgsl"),
+        include_str!("../src/shaders/common.wgsl")
+    );
     for (name, source) in [
         ("raster", include_str!("../src/shaders/raster.wgsl")),
         ("grid", include_str!("../src/shaders/grid.wgsl")),
@@ -35,5 +39,25 @@ fn post_shaders_are_valid_wgsl() {
     validate(
         "composite",
         &format!("{fullscreen}{}", include_str!("../src/shaders/composite.wgsl")),
+    );
+}
+
+#[test]
+fn path_tracer_shaders_are_valid_wgsl() {
+    validate(
+        "pathtracer",
+        &format!(
+            "{}{}",
+            include_str!("../src/shaders/material.wgsl"),
+            include_str!("../src/shaders/pathtracer.wgsl")
+        ),
+    );
+    validate(
+        "present",
+        &format!(
+            "{}{}",
+            include_str!("../src/shaders/fullscreen.wgsl"),
+            include_str!("../src/shaders/present.wgsl")
+        ),
     );
 }

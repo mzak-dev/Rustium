@@ -15,5 +15,9 @@ thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 
+[dev-dependencies]
+png.workspace = true
+pollster.workspace = true
+
 [lints]
 workspace = true

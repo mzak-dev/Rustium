@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use rustium_core::{ChunkCoord, ChunkMesh, MeshVertex, Palette, Placement, ShapeId};
+use rustium_core::{ChunkCoord, ChunkMesh, MaterialGraph, MeshVertex, Palette, Placement, Scene, ShapeId};
 use wgpu::util::DeviceExt;
 
+use crate::error::Error;
 use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
+use crate::materials::GpuMaterialTable;
+use crate::path_tracer::{PathTracer, TraceFrame, TraceImage, TraceProgress};
 
 /// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
 #[repr(C)]
@@ -96,6 +99,8 @@ pub struct ViewportFrame<'frame> {
     pub glass: &'frame [GlassRect],
     /// Whether glass panels blur (Settings → Interface → Translucent panels).
     pub blur: bool,
+    /// When set, the path tracer draws the viewport instead of the raster pass.
+    pub trace: Option<TraceFrame>,
 }
 
 #[derive(Debug)]
@@ -123,14 +128,13 @@ struct Pipelines {
 
 const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const PALETTE_ENTRIES: usize = 256;
 
 /// Draws the voxel Scene, grid and overlays, then composites them with glass blur onto the surface.
 #[derive(Debug)]
 pub struct ViewportRenderer {
     sample_count: u32,
     camera_buffer: wgpu::Buffer,
-    palette_buffer: wgpu::Buffer,
+    materials_buffer: wgpu::Buffer,
     scene_group: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: Pipelines,
@@ -139,6 +143,7 @@ pub struct ViewportRenderer {
     chunks: HashMap<ShapeId, HashMap<ChunkCoord, GpuChunk>>,
     targets: Option<SceneTargets>,
     glass: GlassPass,
+    tracer: PathTracer,
 }
 
 impl ViewportRenderer {
@@ -151,9 +156,9 @@ impl ViewportRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let palette_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("palette uniform"),
-            size: (PALETTE_ENTRIES * 16) as u64,
+        let materials_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("materials uniform"),
+            size: size_of::<GpuMaterialTable>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -181,7 +186,7 @@ impl ViewportRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: palette_buffer.as_entire_binding(),
+                    resource: materials_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -194,10 +199,11 @@ impl ViewportRenderer {
         let line_buffer = create_line_buffer(device, 256);
         let instance_buffer = create_instance_buffer(device, 64);
         let glass = GlassPass::new(device, gpu.surface_srgb_format());
+        let tracer = PathTracer::new(device, &materials_buffer, SCENE_FORMAT);
         Self {
             sample_count,
             camera_buffer,
-            palette_buffer,
+            materials_buffer,
             scene_group,
             pipeline_layout,
             pipelines,
@@ -206,6 +212,7 @@ impl ViewportRenderer {
             chunks: HashMap::new(),
             targets: None,
             glass,
+            tracer,
         }
     }
 
@@ -224,17 +231,37 @@ impl ViewportRenderer {
         self.targets = None;
     }
 
-    /// Uploads Palette colors (converted from sRGB to linear).
-    pub fn set_palette(&self, gpu: &GpuContext, palette: &Palette) {
-        let mut colors = [[0.0_f32; 4]; PALETTE_ENTRIES];
-        for (id, material) in palette.iter() {
-            let [r, g, b] = material.color.map(srgb_to_linear);
-            if let Some(slot) = colors.get_mut(usize::from(id.get())) {
-                *slot = [r, g, b, 1.0];
-            }
-        }
+    /// Uploads the Colors and material graphs (sRGB converted to linear) for the raster pass and the path tracer,
+    /// and restarts path tracing.
+    pub fn set_materials(&mut self, gpu: &GpuContext, palette: &Palette, graphs: &[MaterialGraph]) {
+        let table = GpuMaterialTable::new(palette, graphs);
         gpu.queue()
-            .write_buffer(&self.palette_buffer, 0, bytemuck::cast_slice(&colors));
+            .write_buffer(&self.materials_buffer, 0, bytemuck::bytes_of(&table));
+        self.tracer.restart();
+    }
+
+    /// Uploads every visible Model's Shape for the path tracer and restarts it. Cheap for unchanged chunks.
+    pub fn upload_trace_scene(&mut self, gpu: &GpuContext, scene: &Scene) {
+        self.tracer.upload_scene(gpu.device(), gpu.queue(), scene);
+    }
+
+    /// Throws away the accumulated path-traced samples and starts over.
+    pub fn restart_trace(&mut self) {
+        self.tracer.restart();
+    }
+
+    /// How many samples per pixel the path tracer has accumulated.
+    pub fn trace_progress(&self) -> TraceProgress {
+        self.tracer.progress()
+    }
+
+    /// Copies the accumulated path-traced image to the CPU.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Readback`] when nothing has been traced yet or the GPU read fails.
+    pub fn read_trace_image(&self, gpu: &GpuContext) -> Result<TraceImage, Error> {
+        self.tracer.read_image(gpu.device(), gpu.queue())
     }
 
     /// Replaces the GPU mesh of one chunk of `shape`; an empty mesh removes it.
@@ -305,6 +332,11 @@ impl ViewportRenderer {
         }
         queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
 
+        if let Some(trace) = &frame.trace {
+            self.tracer.encode(gpu.device(), queue, encoder, &targets.color, trace);
+            self.glass.encode(queue, encoder, surface, frame.glass, frame.blur);
+            return;
+        }
         let (view, resolve_target) = match &targets.multisampled {
             Some(multisampled) => (multisampled, Some(&targets.color)),
             None => (&targets.color, None),
@@ -366,15 +398,6 @@ impl ViewportRenderer {
             }
         }
         self.glass.encode(queue, encoder, surface, frame.glass, frame.blur);
-    }
-}
-
-fn srgb_to_linear(channel: u8) -> f32 {
-    let value = f32::from(channel) / 255.0;
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -459,7 +482,14 @@ fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample
     let module = |label, source: &str| {
         device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(format!("{}{source}", include_str!("shaders/common.wgsl")).into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}{}{source}",
+                    include_str!("shaders/material.wgsl"),
+                    include_str!("shaders/common.wgsl")
+                )
+                .into(),
+            ),
         })
     };
     let raster_module = module("raster shader", include_str!("shaders/raster.wgsl"));

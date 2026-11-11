@@ -1,13 +1,15 @@
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use egui::ViewportId;
+use fluent_bundle::FluentValue;
 use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_render::{
-    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, ViewportFrame,
-    ViewportRenderer,
+    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, TraceFrame,
+    ViewportFrame, ViewportRenderer,
 };
 use tracing::{error, info};
 use winit::application::ApplicationHandler;
@@ -18,8 +20,10 @@ use winit::window::{Icon, Window, WindowId};
 
 use crate::camera::OrbitCamera;
 use crate::editor::Editor;
-use crate::hud::{self, AppCommand, Hud, UiState};
+use crate::hud::{self, AppCommand, Hud, Mode, UiState};
 use crate::i18n::I18n;
+use crate::render_mode::Backdrop;
+use crate::render_output::{self, SaveOutcome};
 use crate::settings::{Backend, FrameLimit, Settings};
 use crate::{settings_window, splash, theme};
 
@@ -78,6 +82,11 @@ struct Running {
     sample_counts: Vec<u32>,
     adapter_name: String,
     next_frame: Option<Instant>,
+    /// Mode and Editor revision the path tracer's scene upload matches.
+    last_mode: Mode,
+    trace_revision: Option<u64>,
+    save_results: Receiver<SaveOutcome>,
+    save_sender: mpsc::Sender<SaveOutcome>,
 }
 
 impl ApplicationHandler for App {
@@ -196,7 +205,7 @@ impl Running {
         let logo = egui_ctx.load_texture("logo", logo_image, egui::TextureOptions::LINEAR);
 
         let editor = Editor::new(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
-        viewport.set_palette(&gpu, editor.scene.palette());
+        let (save_sender, save_results) = mpsc::channel();
         let camera = OrbitCamera {
             field_of_view_degrees: settings.field_of_view_degrees,
             ..OrbitCamera::default()
@@ -217,6 +226,10 @@ impl Running {
             sample_counts,
             adapter_name,
             next_frame: None,
+            last_mode: Mode::Model,
+            trace_revision: None,
+            save_results,
+            save_sender,
         })
     }
 
@@ -256,11 +269,17 @@ impl Running {
             }
         }
         self.upload_dirty_chunks();
+        self.sync_render();
 
         let repaint_delay = output
             .viewport_output
             .get(&ViewportId::ROOT)
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
+        let repaint_delay = if self.ui.mode == Mode::Render && self.ui.render.is_accumulating() {
+            Duration::ZERO
+        } else {
+            repaint_delay
+        };
         self.next_frame = Instant::now().checked_add(repaint_delay.max(frame_interval(settings)));
 
         let pixels_per_point = output.pixels_per_point;
@@ -316,8 +335,14 @@ impl Running {
             lines: &lines,
             glass: &glass_rects,
             blur: settings.translucent_panels,
+            trace: self.trace_frame(pixels_per_point),
         };
         self.viewport.render(&self.gpu, &mut encoder, &srgb_view, &frame_input);
+        if frame_input.trace.is_some() {
+            self.ui
+                .render
+                .update_progress(self.viewport.trace_progress(), Instant::now());
+        }
 
         let (width, height) = self.gpu.size();
         let screen = egui_wgpu::ScreenDescriptor {
@@ -366,7 +391,7 @@ impl Running {
                 self.editor
                     .new_scene(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
                 self.viewport.clear_chunks();
-                self.viewport.set_palette(&self.gpu, self.editor.scene.palette());
+                self.trace_revision = None;
                 self.camera.frame(None);
             }
             AppCommand::Minimize => self.window.set_minimized(true),
@@ -391,6 +416,8 @@ impl Running {
                 }
             }
             AppCommand::SettingsChanged => self.apply_settings(settings),
+            AppCommand::SaveImage => self.save_image(),
+            AppCommand::RestartRender => self.viewport.restart_trace(),
         }
         false
     }
@@ -418,6 +445,72 @@ impl Running {
             };
             mesh_chunk(shape, coord, &mut self.mesh);
             self.viewport.upload_chunk(&self.gpu, shape_id, coord, &self.mesh);
+        }
+    }
+
+    /// Keeps the GPU copies the renderers read in step with the Editor and the mode.
+    fn sync_render(&mut self) {
+        if self.editor.take_palette_dirty() {
+            self.viewport.set_materials(
+                &self.gpu,
+                self.editor.scene.palette(),
+                self.editor.scene.material_graphs(),
+            );
+        }
+        let mode = self.ui.mode;
+        if mode == Mode::Render {
+            if self.last_mode != Mode::Render || self.trace_revision != Some(self.editor.revision) {
+                self.viewport.upload_trace_scene(&self.gpu, &self.editor.scene);
+                self.trace_revision = Some(self.editor.revision);
+            }
+            self.ui.render.sync_active_shot(&self.camera);
+            self.poll_saves();
+        }
+        self.last_mode = mode;
+    }
+
+    /// The path tracer's input for this frame, or `None` outside Render mode.
+    fn trace_frame(&self, pixels_per_point: f32) -> Option<TraceFrame> {
+        if self.ui.mode == Mode::Render {
+            self.ui.render.trace_frame(&self.camera, pixels_per_point)
+        } else {
+            None
+        }
+    }
+
+    /// Reads the traced image back and hands it to the save dialog thread.
+    fn save_image(&mut self) {
+        match self.viewport.read_trace_image(&self.gpu) {
+            Ok(image) => {
+                let render = &self.ui.render;
+                render_output::save_with_dialog(
+                    image,
+                    render.format,
+                    render.backdrop == Backdrop::Transparent,
+                    render.exposure(),
+                    self.save_sender.clone(),
+                );
+            }
+            Err(error) => {
+                error!(%error, "cannot read the image back");
+                self.ui.render.message = Some(self.i18n.tr("save-failed-readback"));
+            }
+        }
+    }
+
+    fn poll_saves(&mut self) {
+        while let Ok(outcome) = self.save_results.try_recv() {
+            self.ui.render.message = match outcome {
+                SaveOutcome::Saved(path) => Some(
+                    self.i18n
+                        .tr_args("save-done", &[("path", FluentValue::from(path.display().to_string()))]),
+                ),
+                SaveOutcome::Cancelled => None,
+                SaveOutcome::Failed(reason) => Some(
+                    self.i18n
+                        .tr_args("save-failed", &[("reason", FluentValue::from(reason))]),
+                ),
+            };
         }
     }
 

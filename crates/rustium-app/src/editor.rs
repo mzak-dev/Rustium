@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use glam::{IVec3, Vec3};
 use rustium_core::{
     Brush, BrushKind, ChunkCoord, Command, Edit, Face, FillMode, History, HitTarget, MaterialId, Mirror, NodeId,
-    Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, Volume, VoxelTool, apply, brush_bounds, pick_scene,
-    select_box, select_by_material,
+    Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, SurfaceConstants, Volume, VoxelTool, apply,
+    brush_bounds, pick_scene, select_box, select_by_material,
 };
 use tracing::warn;
 
@@ -200,6 +200,11 @@ pub(crate) struct Editor {
     dirty: HashSet<(ShapeId, ChunkCoord)>,
     meshed: HashSet<ShapeId>,
     remesh_all: bool,
+    /// Material graph edits of the current slider drag, folded into one History step when the drag ends.
+    material_edit: Option<Edit>,
+    palette_dirty: bool,
+    /// Increases with every change to the Scene; the path tracer re-uploads when it moves.
+    pub(crate) revision: u64,
 }
 
 /// Default hotbar: two greys and eight hues from the default Palette (8 greys, then 11 hues × 8 shades).
@@ -242,6 +247,9 @@ impl Editor {
             dirty: HashSet::new(),
             meshed: HashSet::new(),
             remesh_all: true,
+            material_edit: None,
+            palette_dirty: true,
+            revision: 0,
         }
     }
 
@@ -519,6 +527,7 @@ impl Editor {
 
     /// Primary button released: the gesture becomes one History step.
     pub(crate) fn release(&mut self) {
+        self.finish_material_edit();
         let Some(gesture) = self.gesture.take() else {
             return;
         };
@@ -786,6 +795,8 @@ impl Editor {
             Ok(Some(edit)) => {
                 let changed: Vec<(ShapeId, ChunkCoord)> = edit.changed_chunks().collect();
                 self.mark_dirty(changed);
+                self.revision += 1;
+                self.palette_dirty |= edit.touches_materials();
                 Some(edit)
             }
             Ok(None) => None,
@@ -810,11 +821,13 @@ impl Editor {
 
     pub(crate) fn undo(&mut self) {
         self.release();
-        let changed: Vec<(ShapeId, ChunkCoord)> = self
+        let (changed, materials) = self
             .history
             .undo(&mut self.scene)
-            .map(|edit| edit.changed_chunks().collect())
+            .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
             .unwrap_or_default();
+        self.revision += 1;
+        self.palette_dirty |= materials;
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
@@ -822,14 +835,66 @@ impl Editor {
 
     pub(crate) fn redo(&mut self) {
         self.release();
-        let changed: Vec<(ShapeId, ChunkCoord)> = self
+        let (changed, materials) = self
             .history
             .redo(&mut self.scene)
-            .map(|edit| edit.changed_chunks().collect())
+            .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
             .unwrap_or_default();
+        self.revision += 1;
+        self.palette_dirty |= materials;
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
+    }
+
+    /// Ends a material slider drag: its Edits become one History step.
+    pub(crate) fn finish_material_edit(&mut self) {
+        if let Some(edit) = self.material_edit.take() {
+            self.history.push(edit);
+        }
+    }
+
+    /// Changes the Surface constants of material graph `index`; consecutive calls (a slider drag) merge into one
+    /// History step until [`Editor::finish_material_edit`].
+    pub(crate) fn edit_graph(&mut self, index: u32, surface: SurfaceConstants) {
+        self.apply_material_command(&Command::EditGraph { index, surface });
+    }
+
+    /// Creates a matte material graph and returns its index.
+    pub(crate) fn create_graph(&mut self) -> u32 {
+        self.finish_material_edit();
+        let index = u32::try_from(self.scene.material_graphs().len()).unwrap_or(u32::MAX);
+        let command = Command::CreateGraph {
+            name: format!("Material {index}"),
+            surface: SurfaceConstants::MATTE,
+        };
+        self.apply_material_command(&command);
+        self.finish_material_edit();
+        index
+    }
+
+    /// Points the active Color slot's Palette entry at material graph `graph`.
+    pub(crate) fn assign_graph(&mut self, graph: u32) {
+        self.finish_material_edit();
+        self.apply_material_command(&Command::AssignGraph {
+            id: self.material(),
+            graph,
+        });
+        self.finish_material_edit();
+    }
+
+    fn apply_material_command(&mut self, command: &Command) {
+        if let Some(edit) = self.apply_command(command) {
+            self.material_edit = Some(match self.material_edit.take() {
+                Some(pending) => pending.merge(edit),
+                None => edit,
+            });
+        }
+    }
+
+    /// Whether Colors or material graphs changed since the last call, so the GPU copy needs uploading.
+    pub(crate) fn take_palette_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.palette_dirty)
     }
 
     /// Marks chunks and their 26 neighbours (borders affect culling and AO) for remeshing.
@@ -1075,5 +1140,63 @@ mod tests {
         assert_eq!(distance.delta, IVec3::new(3, 0, 4));
         assert!((distance.voxels - 5.0).abs() < 1e-4);
         assert!((distance.metres - 2.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_slider_drag_is_one_history_step_and_flags_the_materials() {
+        let mut editor = Editor::new(0.25, 50);
+        assert!(editor.take_palette_dirty(), "a new editor uploads its materials once");
+        assert!(!editor.take_palette_dirty());
+        let index = editor.create_graph();
+        assert_eq!(index, 1);
+        assert_eq!(editor.history.done().count(), 1);
+        for step in 1..=4_u8 {
+            let surface = SurfaceConstants {
+                roughness: f32::from(step) / 8.0,
+                ..SurfaceConstants::MATTE
+            };
+            editor.edit_graph(index, surface);
+        }
+        assert!(editor.take_palette_dirty());
+        editor.finish_material_edit();
+        assert_eq!(editor.history.done().count(), 2);
+        editor.undo();
+        assert_eq!(editor.scene.material_graphs()[1].surface, SurfaceConstants::MATTE);
+        assert!(editor.take_palette_dirty(), "undo changes the materials too");
+    }
+
+    #[test]
+    fn assigning_a_graph_changes_the_active_color_only() {
+        let mut editor = Editor::new(0.25, 50);
+        let index = editor.create_graph();
+        let active = editor.material();
+        editor.assign_graph(index);
+        assert_eq!(editor.scene.palette().get(active).unwrap().graph, index);
+        let users = editor
+            .scene
+            .palette()
+            .iter()
+            .filter(|(_, color)| color.graph == index)
+            .count();
+        assert_eq!(users, 1);
+        assert_eq!(editor.history.done().count(), 2);
+    }
+
+    #[test]
+    fn every_scene_change_moves_the_revision() {
+        let mut editor = Editor::new(0.25, 50);
+        let before = editor.revision;
+        let model = editor.focus;
+        editor.execute(&Command::SetHidden {
+            node: model,
+            hidden: true,
+        });
+        assert!(
+            editor.revision > before,
+            "hiding a Model changes what the tracer must upload"
+        );
+        let hidden = editor.revision;
+        editor.undo();
+        assert!(editor.revision > hidden);
     }
 }

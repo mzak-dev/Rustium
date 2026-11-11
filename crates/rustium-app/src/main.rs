@@ -11,6 +11,8 @@ mod hud;
 mod i18n;
 mod icons;
 mod logging;
+mod render_mode;
+mod render_output;
 mod settings;
 mod settings_window;
 mod splash;

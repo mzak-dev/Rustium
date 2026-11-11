@@ -120,6 +120,27 @@ impl OrbitCamera {
         self.distance = new_distance;
     }
 
+    /// Makes `point` the orbit centre without moving the eye.
+    pub(crate) fn retarget(&mut self, point: Vec3) {
+        let offset = self.eye() - point;
+        let distance = offset.length();
+        if distance < f32::EPSILON {
+            return;
+        }
+        let direction = offset / distance;
+        self.target = point;
+        self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.pitch = direction.y.clamp(-1.0, 1.0).asin();
+        self.yaw = direction.x.atan2(direction.z).rem_euclid(TAU);
+    }
+
+    /// Orthographic view from the classic isometric angle (45° turn, 35.264° down).
+    pub(crate) fn isometric(&mut self) {
+        self.projection = Projection::Orthographic;
+        self.yaw = std::f32::consts::FRAC_PI_4;
+        self.pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
+    }
+
     /// Looks straight at `face` of the model (TOP, FRONT, RIGHT, …).
     pub(crate) fn snap(&mut self, face: Face) {
         let (yaw, pitch) = match face {
@@ -162,6 +183,23 @@ mod tests {
         let ray = camera.ray(Vec2::ZERO, 16.0 / 9.0);
         let to_target = (camera.target - ray.origin).normalize();
         assert!(ray.direction.normalize().dot(to_target) > 0.9999);
+    }
+
+    #[test]
+    fn retarget_keeps_the_eye_where_it_was() {
+        let mut camera = OrbitCamera::default();
+        let eye = camera.eye();
+        camera.retarget(Vec3::new(10.0, 2.0, -6.0));
+        assert!((camera.eye() - eye).length() < 1e-3);
+        assert!((camera.target - Vec3::new(10.0, 2.0, -6.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn isometric_looks_down_a_cube_diagonal() {
+        let mut camera = OrbitCamera::default();
+        camera.isometric();
+        let direction = (camera.eye() - camera.target).normalize();
+        assert!((direction.x - direction.z).abs() < 1e-5 && (direction.x - direction.y).abs() < 1e-5);
     }
 
     #[test]

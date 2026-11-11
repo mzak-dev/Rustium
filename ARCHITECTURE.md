@@ -53,15 +53,30 @@ Scene upload and traversal are separate so a ray-query backend can reuse the upl
   Effects milestone replaces its body with WGSL generated from the node graphs. Raster shows emission unlit and
   treats transmission as opaque until M4.
 - **Accumulation**: one pass per frame writes `prev + (sample - prev) / n` into an `Rgba32Float` texture,
-  ping-ponging two textures; `present.wgsl` tonemaps (ACES) into the viewport target at the HUD's frame rect.
-  Any change to camera, scene, Palette, light, size, bounces or region restarts accumulation (`TraceKey`).
-- **Output**: `read_image` copies the accumulation back; the app encodes tonemapped PNG or linear EXR on a worker
-  thread after a native save dialog (`rfd`).
+  ping-ponging two textures. Any change to camera, scene, Palette, light, size, bounces, region, style or lens
+  restarts accumulation (`TraceKey`). The same pass writes a G-buffer on its first sample (normal and distance,
+  albedo) from a pixel-centre ray.
+- **Styles** (`shaders/trace_style.wgsl`, hooks in `radiance`): Clay swaps every Surface for one grey; Toon and Wire
+  shade the first hit only (three light bands, or dark faces with light lines on the edges between voxel faces that
+  are not coplanar); Pixel traces one pixel per block and the resolve stage repeats it. A thin lens
+  (`TraceFrame::lens`) moves the ray start over the aperture and keeps the focal-plane point.
+- **Resolve** (`resolve.rs`, `shaders/resolve.wgsl`): after the trace pass, compute passes turn the accumulation into
+  the picture: an edge-aware a-trous denoiser on albedo-demodulated light (weights from normal, plane distance,
+  albedo and luminance; skipped for Wire), the Pixel upscale, Toon outlines from the G-buffer, and AOV passes
+  (albedo, normals, depth). It runs only when samples arrived or style, denoise or pass changed. `present.wgsl`
+  tonemaps (ACES) the resolved texture into the viewport target at the HUD's frame rect; AOV passes bypass the
+  tonemap.
+- **Output**: `read_image` copies the resolved image back, so saved files match the screen. The app encodes
+  tonemapped PNG or linear EXR on a worker thread after a native save dialog (`rfd`). Turntable videos and the Shot
+  queue (`render_job.rs`) run on a worker thread with an `OfflineRenderer` of their own (a second `PathTracer` on the
+  same device, so the viewport keeps accumulating) and report progress and accept a cancel; frames are piped as raw
+  RGB into the `ffmpeg` found on `PATH`, or written as a PNG sequence when there is none.
 - `tests/pathtracer.rs` renders tiny scenes headless on a real GPU (skipped without an adapter);
   `RUSTIUM_DUMP_DIR=<dir>` also writes them as PNGs.
 
 Known limits: no light sampling for emissive voxels (small emitters are noisy), a dense chunk grid capped at 4M
-cells, no denoiser, one sample per pixel per frame.
+cells, one sample per pixel per frame. The denoiser is spatial only (no temporal reuse) and a lens
+of real size would not blur a voxel model, so the aperture is a scale-free stand-in (`aperture_radius_voxels`).
 
 ## Threading and MCP
 

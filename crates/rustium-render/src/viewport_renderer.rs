@@ -8,6 +8,7 @@ use crate::error::Error;
 use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
 use crate::materials::GpuMaterialTable;
+use crate::offline::OfflineRenderer;
 use crate::path_tracer::{PathTracer, TraceFrame, TraceImage, TraceProgress};
 
 /// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
@@ -243,6 +244,13 @@ impl ViewportRenderer {
     /// Uploads every visible Model's Shape for the path tracer and restarts it. Cheap for unchanged chunks.
     pub fn upload_trace_scene(&mut self, gpu: &GpuContext, scene: &Scene) {
         self.tracer.upload_scene(gpu.device(), gpu.queue(), scene);
+    }
+
+    /// A path tracer of its own for saving images and video frames on a worker thread. It shares the Color table
+    /// with the viewport and holds no Scene until [`OfflineRenderer::upload_scene`] is called.
+    pub fn offline_renderer(&self, gpu: &GpuContext) -> OfflineRenderer {
+        let tracer = PathTracer::new(gpu.device(), &self.materials_buffer, SCENE_FORMAT);
+        OfflineRenderer::new(gpu.device().clone(), gpu.queue().clone(), tracer)
     }
 
     /// Throws away the accumulated path-traced samples and starts over.

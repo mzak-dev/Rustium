@@ -13,7 +13,9 @@ use rustium_core::{
     Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, Scene, SurfaceConstants, Transform,
     VoxelTool, apply,
 };
-use rustium_render::{GpuMaterialTable, Ground, PathTracer, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage};
+use rustium_render::{
+    GpuMaterialTable, Ground, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage,
+};
 
 const SIZE: u32 = 96;
 /// The app's default exposure, -1 EV.
@@ -113,6 +115,7 @@ struct Setup {
     style: RenderStyle,
     denoise: bool,
     lens: Option<ThinLens>,
+    pass: RenderPass,
 }
 
 impl Default for Setup {
@@ -125,6 +128,7 @@ impl Default for Setup {
             style: RenderStyle::Traced,
             denoise: false,
             lens: None,
+            pass: RenderPass::Beauty,
         }
     }
 }
@@ -176,6 +180,7 @@ fn render(gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup) -> TraceImag
         style: setup.style,
         denoise: setup.denoise,
         lens: setup.lens,
+        pass: setup.pass,
     };
     for _ in 0..setup.samples {
         let mut encoder = gpu
@@ -699,4 +704,91 @@ fn depth_of_field_blurs_what_is_off_the_focal_plane() {
         far_without_lens > far_blurred * 1.5,
         "the pinhole keeps the far edge sharp ({far_without_lens} against {far_blurred})"
     );
+}
+
+#[test]
+fn aov_passes_show_albedo_normals_and_depth() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let pass = |pass| {
+        render(
+            &gpu,
+            &scene,
+            &camera,
+            &Setup {
+                samples: 4,
+                pass,
+                ..Setup::default()
+            },
+        )
+    };
+    let albedo = pass(RenderPass::Albedo);
+    let normal = pass(RenderPass::Normal);
+    let depth = pass(RenderPass::Depth);
+    dump("pass-albedo", &albedo);
+    assert!(albedo.display_ready);
+    // The left cube is yellow (id 37): red and green well above blue, with no lighting in it.
+    let [r, g, b] = rgb(&albedo, top_of(&camera, -4.5));
+    assert!(r > b * 2.0 && g > b * 2.0, "albedo of the yellow cube: {r} {g} {b}");
+    // Its top face points up, so the green channel (y) is 1.0 and x and z sit at 0.5.
+    let [nx, ny, nz] = rgb(&normal, top_of(&camera, -4.5));
+    assert!(
+        ny > 0.99 && (nx - 0.5).abs() < 0.01 && (nz - 0.5).abs() < 0.01,
+        "normal {nx} {ny} {nz}"
+    );
+    // The cube is nearer than the floor behind it, and the sky has no depth at all.
+    let near = luminance(&depth, top_of(&camera, -4.5));
+    let sky = luminance(&depth, (2, 2));
+    assert!(near > sky + 0.1, "cube depth {near} against sky {sky}");
+}
+
+#[test]
+fn offline_rendering_reaches_the_target_and_can_be_cancelled() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let table = GpuMaterialTable::new(scene.palette(), scene.material_graphs());
+    let materials = wgpu::util::DeviceExt::create_buffer_init(
+        &gpu.device,
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("test materials"),
+            contents: bytemuck::bytes_of(&table),
+            usage: wgpu::BufferUsages::UNIFORM,
+        },
+    );
+    let mut tracer = PathTracer::new(&gpu.device, &materials, wgpu::TextureFormat::Rgba8UnormSrgb);
+    tracer.upload_scene(&gpu.device, &gpu.queue, &scene);
+    let frame = TraceFrame {
+        inv_view_proj: camera.view_proj.inverse().to_cols_array_2d(),
+        size: (SIZE, SIZE),
+        samples: 10,
+        bounces: 4,
+        sun_turn_degrees: 135.0,
+        sun_height_degrees: 45.0,
+        sky: Sky::Clear,
+        ground: Ground::Studio,
+        transparent: false,
+        region: None,
+        running: true,
+        frame_rect: [0.0, 0.0, SIZE as f32, SIZE as f32],
+        exposure: EXPOSURE,
+        style: RenderStyle::Traced,
+        denoise: true,
+        lens: None,
+        pass: RenderPass::Beauty,
+    };
+    let mut reported = Vec::new();
+    let image = tracer
+        .render_to_image(&gpu.device, &gpu.queue, &frame, |done| {
+            reported.push(done);
+            true
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(image.samples, 10);
+    assert_eq!(reported.last(), Some(&10));
+    assert!(luminance(&image, (SIZE / 2, SIZE / 2)) > 0.0);
+    let cancelled = tracer
+        .render_to_image(&gpu.device, &gpu.queue, &frame, |done| done < 4)
+        .unwrap();
+    assert!(cancelled.is_none(), "returning false from progress cancels the render");
 }

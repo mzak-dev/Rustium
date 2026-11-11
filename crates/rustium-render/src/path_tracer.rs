@@ -84,6 +84,33 @@ impl RenderStyle {
     }
 }
 
+/// Which layer of the render is shown and saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderPass {
+    /// The finished picture.
+    Beauty,
+    /// The Color of the first surface each pixel sees, without lighting.
+    Albedo,
+    /// Surface normals as colours (`xyz * 0.5 + 0.5`).
+    Normal,
+    /// Distance from the camera, near is bright.
+    Depth,
+}
+
+impl RenderPass {
+    /// Every pass, in menu order.
+    pub const ALL: [Self; 4] = [Self::Beauty, Self::Albedo, Self::Normal, Self::Depth];
+
+    pub(crate) fn index(self) -> u32 {
+        match self {
+            Self::Beauty => 0,
+            Self::Albedo => 1,
+            Self::Normal => 2,
+            Self::Depth => 3,
+        }
+    }
+}
+
 /// A thin lens for depth of field. Lengths are in voxels, the unit of the Scene.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThinLens {
@@ -130,6 +157,9 @@ pub struct TraceFrame {
     pub denoise: bool,
     /// Depth of field; `None` renders with a pinhole.
     pub lens: Option<ThinLens>,
+    /// Which layer is shown. Passes other than [`RenderPass::Beauty`] are already display-ready colours: they are
+    /// shown without exposure and tonemapping, and [`TraceImage::display_ready`] says so for saving.
+    pub pass: RenderPass,
 }
 
 /// The part of a [`TraceFrame`] that changes what is rendered; any difference restarts accumulation.
@@ -169,6 +199,7 @@ impl TraceFrame {
             size: self.size,
             style: self.style,
             denoise: self.denoise,
+            pass: self.pass,
             samples,
         }
     }
@@ -196,6 +227,8 @@ pub struct TraceImage {
     pub samples: u32,
     /// Linear RGBA, premultiplied alpha, row-major from the top-left, `width * height * 4` floats.
     pub rgba: Vec<f32>,
+    /// Whether the colours are an AOV pass that must be saved as they are, without exposure and tonemapping.
+    pub display_ready: bool,
 }
 
 /// Uniform block of `shaders/pathtracer.wgsl`.
@@ -225,9 +258,11 @@ struct PresentParams {
     frame: [f32; 4],
     image: [f32; 4],
     letterbox: [f32; 4],
+    /// x: 1 when the image is display-ready and skips exposure and tonemapping.
+    options: [f32; 4],
 }
 
-const _: () = assert!(size_of::<PresentParams>() == 48);
+const _: () = assert!(size_of::<PresentParams>() == 64);
 
 /// First-hit data the trace pass writes for the resolve stage.
 #[derive(Debug)]
@@ -252,6 +287,7 @@ struct ResolveKey {
     size: (u32, u32),
     style: RenderStyle,
     denoise: bool,
+    pass: RenderPass,
 }
 
 /// The compute pipeline, its accumulation textures and the GPU scene it walks.
@@ -653,6 +689,7 @@ impl PathTracer {
                 f32::from(u8::from(frame.transparent)),
             ],
             letterbox: [0.006, 0.007, 0.009, 1.0],
+            options: [f32::from(u8::from(frame.pass != RenderPass::Beauty)), 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.present_buffer, 0, bytemuck::bytes_of(&present));
     }
@@ -686,6 +723,7 @@ impl PathTracer {
             size: frame.size,
             style: frame.style,
             denoise: frame.denoise,
+            pass: frame.pass,
         };
         if !fresh && self.resolved_for == Some(key) {
             return;
@@ -761,6 +799,7 @@ impl PathTracer {
             height,
             samples: self.samples_done,
             rgba,
+            display_ready: self.resolved_for.is_some_and(|key| key.pass != RenderPass::Beauty),
         })
     }
 
@@ -930,6 +969,7 @@ mod tests {
             style: RenderStyle::Traced,
             denoise: false,
             lens: None,
+            pass: RenderPass::Beauty,
         };
         let paused = TraceFrame {
             running: false,

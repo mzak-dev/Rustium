@@ -10,6 +10,7 @@ mod error;
 mod glass_pass;
 mod gpu_context;
 mod materials;
+mod offline;
 mod path_tracer;
 mod resolve;
 mod trace_scene;
@@ -19,5 +20,8 @@ pub use error::Error;
 pub use glass_pass::GlassRect;
 pub use gpu_context::{GpuContext, GpuPreferences, GraphicsBackend};
 pub use materials::{GpuColor, GpuMaterialTable, GpuSurface};
-pub use path_tracer::{Ground, PathTracer, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage, TraceProgress};
+pub use offline::OfflineRenderer;
+pub use path_tracer::{
+    Ground, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage, TraceProgress,
+};
 pub use viewport_renderer::{CameraUniform, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};

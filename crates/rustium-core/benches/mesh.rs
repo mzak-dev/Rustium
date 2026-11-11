@@ -1,10 +1,20 @@
 //! Chunk meshing benchmarks.
 
 use glam::IVec3;
-use rustium_core::{Brush, ChunkCoord, ChunkMesh, Command, Face, HitTarget, MaterialId, RayHit, Scene, VoxelTool};
+use rustium_core::{
+    Brush, ChunkCoord, ChunkMesh, Command, Face, HitTarget, MaterialId, Mirror, NodeId, RayHit, Scene, Shape, VoxelTool,
+};
 
 fn main() {
     divan::main();
+}
+
+fn model_of(scene: &Scene) -> NodeId {
+    scene.node(NodeId::ROOT).expect("the root exists").children()[0]
+}
+
+fn shape_of(scene: &Scene) -> &Shape {
+    scene.model_shape(model_of(scene)).expect("the model has a shape").1
 }
 
 fn filled_scene(size: u32) -> Scene {
@@ -16,10 +26,16 @@ fn filled_scene(size: u32) -> Scene {
     };
     let material = MaterialId::new(20).expect("20 is a valid material index");
     let command = Command::ApplyBrush {
+        model: model_of(&scene),
         tool: VoxelTool::Attach,
-        brush: Brush { size },
+        brush: Brush {
+            size,
+            ..Brush::default()
+        },
         hit,
+        end: None,
         material,
+        mirror: Mirror::default(),
     };
     rustium_core::apply(&mut scene, &command).expect("default palette has material 20");
     scene
@@ -29,7 +45,7 @@ fn filled_scene(size: u32) -> Scene {
 fn solid_cube_32(bencher: divan::Bencher<'_, '_>) {
     let scene = filled_scene(32);
     let mut mesh = ChunkMesh::default();
-    bencher.bench_local(|| rustium_core::mesh_chunk(scene.shape(), ChunkCoord(IVec3::ZERO), &mut mesh));
+    bencher.bench_local(|| rustium_core::mesh_chunk(shape_of(&scene), ChunkCoord(IVec3::ZERO), &mut mesh));
 }
 
 #[divan::bench]
@@ -44,14 +60,17 @@ fn checkerboard_cubes(bencher: divan::Bencher<'_, '_>) {
             };
             let material = MaterialId::new(u8::try_from(1 + (x + z) % 90).unwrap_or(1)).expect("non-zero");
             let command = Command::ApplyBrush {
+                model: model_of(&scene),
                 tool: VoxelTool::Attach,
-                brush: Brush { size: 1 },
+                brush: Brush::default(),
                 hit,
+                end: None,
                 material,
+                mirror: Mirror::default(),
             };
             rustium_core::apply(&mut scene, &command).expect("valid command");
         }
     }
     let mut mesh = ChunkMesh::default();
-    bencher.bench_local(|| rustium_core::mesh_chunk(scene.shape(), ChunkCoord(IVec3::ZERO), &mut mesh));
+    bencher.bench_local(|| rustium_core::mesh_chunk(shape_of(&scene), ChunkCoord(IVec3::ZERO), &mut mesh));
 }

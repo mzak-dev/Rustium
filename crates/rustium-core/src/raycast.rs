@@ -57,7 +57,7 @@ pub fn pick(shape: &Shape, ray: Ray, max_distance: f32) -> Option<RayHit> {
     }
 }
 
-fn raycast_ground(ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
+pub(crate) fn raycast_ground(ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
     if ray.direction.y >= 0.0 || ray.origin.y <= 0.0 {
         return None;
     }
@@ -80,7 +80,7 @@ fn raycast_ground(ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
 
 /// Amanatides–Woo voxel traversal, clipped to the Volume so empty space costs nothing.
 // HOT PATH: runs on every pointer move.
-fn raycast_voxels(shape: &Shape, ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
+pub(crate) fn raycast_voxels(shape: &Shape, ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
     let volume = shape.volume()?;
     let low = volume.min.as_vec3();
     let high = (volume.max + IVec3::ONE).as_vec3();
@@ -158,39 +158,25 @@ fn sign(value: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{Brush, Command, VoxelTool, apply};
+    use crate::CHUNK_SIZE;
     use crate::palette::MaterialId;
-    use crate::scene::Scene;
-    use crate::{CHUNK_SIZE, HitTarget};
 
-    fn scene_with(positions: &[IVec3]) -> Scene {
-        let mut scene = Scene::new();
+    fn shape_with(positions: &[IVec3]) -> Shape {
+        let mut shape = Shape::new();
         for position in positions {
-            let hit = RayHit {
-                voxel: *position - IVec3::Y,
-                face: Face::PosY,
-                target: HitTarget::Ground,
-            };
-            let material = MaterialId::new(1).unwrap();
-            let command = Command::ApplyBrush {
-                tool: VoxelTool::Attach,
-                brush: Brush::default(),
-                hit,
-                material,
-            };
-            apply(&mut scene, &command).unwrap();
+            shape.set(*position, MaterialId::new(1));
         }
-        scene
+        shape
     }
 
     #[test]
     fn ray_from_above_hits_the_top_face() {
-        let scene = scene_with(&[IVec3::new(3, 0, 3)]);
+        let shape = shape_with(&[IVec3::new(3, 0, 3)]);
         let ray = Ray {
             origin: Vec3::new(3.5, 20.0, 3.5),
             direction: Vec3::NEG_Y,
         };
-        let hit = pick(scene.shape(), ray, 100.0).unwrap();
+        let hit = pick(&shape, ray, 100.0).unwrap();
         assert_eq!(
             (hit.voxel, hit.face, hit.target),
             (IVec3::new(3, 0, 3), Face::PosY, HitTarget::Voxel)
@@ -200,33 +186,33 @@ mod tests {
     #[test]
     fn ray_crossing_a_chunk_border_hits_the_far_voxel() {
         let far = IVec3::new(CHUNK_SIZE + 5, 0, 0);
-        let scene = scene_with(&[IVec3::ZERO, far]);
+        let shape = shape_with(&[IVec3::ZERO, far]);
         let ray = Ray {
             origin: Vec3::new(1.5, 0.5, 0.5),
             direction: Vec3::X,
         };
-        let hit = pick(scene.shape(), ray, 100.0).unwrap();
+        let hit = pick(&shape, ray, 100.0).unwrap();
         assert_eq!((hit.voxel, hit.face), (far, Face::NegX));
     }
 
     #[test]
-    fn empty_scene_falls_back_to_the_ground() {
-        let scene = Scene::new();
+    fn empty_shape_falls_back_to_the_ground() {
+        let shape = Shape::new();
         let ray = Ray {
             origin: Vec3::new(2.5, 5.0, -1.5),
             direction: Vec3::NEG_Y,
         };
-        let hit = pick(scene.shape(), ray, 100.0).unwrap();
+        let hit = pick(&shape, ray, 100.0).unwrap();
         assert_eq!((hit.voxel, hit.target), (IVec3::new(2, -1, -2), HitTarget::Ground));
     }
 
     #[test]
     fn ray_pointing_away_hits_nothing() {
-        let scene = scene_with(&[IVec3::ZERO]);
+        let shape = shape_with(&[IVec3::ZERO]);
         let ray = Ray {
             origin: Vec3::new(0.5, 5.0, 0.5),
             direction: Vec3::Y,
         };
-        assert_eq!(pick(scene.shape(), ray, 100.0), None);
+        assert_eq!(pick(&shape, ray, 100.0), None);
     }
 }

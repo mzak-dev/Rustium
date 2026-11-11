@@ -77,6 +77,20 @@ impl Shape {
         self.chunks.iter().map(|(coord, chunk)| (*coord, chunk))
     }
 
+    /// Every filled voxel with its position and Material, in no particular order.
+    pub fn voxels(&self) -> impl Iterator<Item = (IVec3, MaterialId)> + '_ {
+        self.chunks().flat_map(|(coord, chunk)| {
+            chunk
+                .iter()
+                .map(move |(local, material)| (coord.origin() + local, material))
+        })
+    }
+
+    /// Number of filled voxels.
+    pub fn used_count(&self) -> u64 {
+        self.chunks.values().map(|chunk| u64::from(chunk.filled())).sum()
+    }
+
     /// The Volume shown in the editor; `None` until the first voxel is attached.
     pub fn volume(&self) -> Option<Volume> {
         self.volume

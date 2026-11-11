@@ -7,7 +7,7 @@ struct Resolve {
     // x: image width, y: image height, z: style (STYLE_*), w: pixel size of the Pixel style.
     image: vec4<u32>,
     // x: 1 when the source holds demodulated light that must get its albedo back, y: outline width in pixels,
-    // z: samples per pixel accumulated so far.
+    // z: samples per pixel accumulated so far, w: pass (0 beauty, 1 albedo, 2 normal, 3 depth).
     options: vec4<u32>,
 };
 
@@ -183,5 +183,20 @@ fn finish(@builtin(global_invocation_id) id: vec3<u32>) {
     if (resolve.image.z == STYLE_TOON && on_outline(pixel)) {
         color = vec4<f32>(0.004, 0.005, 0.007, 1.0);
     }
+    if (resolve.options.w != 0u) {
+        color = pass_color(source_pixel, color.a);
+    }
     textureStore(destination, pixel, color);
+}
+
+// An AOV pass as a display-ready colour, with the beauty pass's coverage as alpha.
+fn pass_color(pixel: vec2<i32>, alpha: f32) -> vec4<f32> {
+    if (resolve.options.w == 1u) {
+        return vec4<f32>(textureLoad(albedo_texture, pixel, 0).rgb * alpha, alpha);
+    }
+    let geometry_texel = textureLoad(geometry, pixel, 0);
+    if (resolve.options.w == 2u) {
+        return vec4<f32>((geometry_texel.xyz * 0.5 + vec3<f32>(0.5)) * alpha, alpha);
+    }
+    return vec4<f32>(vec3<f32>(1.0 / (1.0 + geometry_texel.w / 32.0)) * alpha, alpha);
 }

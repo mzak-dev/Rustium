@@ -7,6 +7,8 @@ struct Present {
     image: vec4<f32>,
     // rgb: linear color around the frame.
     letterbox: vec4<f32>,
+    // x: 1 when the image is display-ready and skips exposure and tonemapping.
+    options: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> present: Present;
@@ -36,7 +38,7 @@ fn fs_present(in: FullscreenOutput) -> @location(0) vec4<f32> {
     let top = mix(load_clamped(corner), load_clamped(corner + vec2<i32>(1, 0)), blend.x);
     let bottom = mix(load_clamped(corner + vec2<i32>(0, 1)), load_clamped(corner + vec2<i32>(1, 1)), blend.x);
     let texel = mix(top, bottom, blend.y);
-    var color = aces(texel.rgb * present.image.z);
+    var color = select(aces(texel.rgb * present.image.z), texel.rgb, present.options.x > 0.5);
     if (present.image.w > 0.5) {
         // Premultiplied radiance over a checkerboard.
         let cell = vec2<i32>(floor(in.clip.xy / 12.0));

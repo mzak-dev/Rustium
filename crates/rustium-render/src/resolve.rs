@@ -4,7 +4,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::path_tracer::RenderStyle;
+use crate::path_tracer::{RenderPass, RenderStyle};
 
 pub(crate) const IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 const WORKGROUP: u32 = 8;
@@ -27,6 +27,7 @@ pub(crate) struct ResolveInput {
     pub(crate) size: (u32, u32),
     pub(crate) style: RenderStyle,
     pub(crate) denoise: bool,
+    pub(crate) pass: RenderPass,
     pub(crate) samples: u32,
 }
 
@@ -252,7 +253,12 @@ impl Resolver {
                 input.style.index(),
                 pixel_block(input.size.1),
             ],
-            options: [u32::from(denoise), outline_width(input.size.1), input.samples, 0],
+            options: [
+                u32::from(denoise),
+                outline_width(input.size.1),
+                input.samples,
+                input.pass.index(),
+            ],
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let groups = (input.size.0.div_ceil(WORKGROUP), input.size.1.div_ceil(WORKGROUP));
@@ -299,6 +305,7 @@ mod tests {
             size: (8, 8),
             style: RenderStyle::Wire,
             denoise: true,
+            pass: RenderPass::Beauty,
             samples: 1,
         };
         assert!(!input.denoises());

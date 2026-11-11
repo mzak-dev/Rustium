@@ -9,6 +9,7 @@ mod render_inspector;
 mod render_tools;
 mod render_viewport;
 mod scene_tree;
+mod toast;
 mod tool_options;
 mod toolbar;
 mod top_left;
@@ -21,11 +22,13 @@ use std::collections::HashSet;
 
 use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Key, Modifiers, Order, Pos2, Rect, Ui, Vec2};
 use rustium_core::{Face, NodeId};
+pub(crate) use toast::Toast;
 use winit::window::ResizeDirection;
 
 use crate::camera::OrbitCamera;
 use crate::editor::{Editor, Tool};
 use crate::i18n::I18n;
+use crate::mcp::McpStatus;
 use crate::render_mode::RenderState;
 use crate::settings::{Motion, Settings};
 use crate::settings_window::Section;
@@ -68,6 +71,8 @@ pub(crate) struct UiState {
     pub(crate) collapsed: HashSet<NodeId>,
     /// The Node being renamed in the Scene tree and the text typed so far.
     pub(crate) renaming: Option<(NodeId, String)>,
+    /// A short message under the top bar, e.g. the result of a script run.
+    pub(crate) toast: Option<Toast>,
 }
 
 impl UiState {
@@ -87,6 +92,7 @@ impl UiState {
             marquee: None,
             collapsed: HashSet::new(),
             renaming: None,
+            toast: None,
         }
     }
 
@@ -112,6 +118,8 @@ pub(crate) enum AppCommand {
     SaveImage,
     /// Throw away accumulated samples and trace again.
     RestartRender,
+    /// Run a Luau script chosen in a file dialog.
+    RunScript,
 }
 
 /// One glass panel: the rect in points and its corner radius.
@@ -132,6 +140,7 @@ pub(crate) struct Hud<'frame> {
     pub(crate) maximized: bool,
     pub(crate) adapter_name: &'frame str,
     pub(crate) sample_counts: &'frame [u32],
+    pub(crate) mcp_status: &'frame McpStatus,
     pub(crate) glass: Vec<Glass>,
     pub(crate) commands: Vec<AppCommand>,
 }
@@ -251,6 +260,7 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     top_left::show(ctx, hud);
     top_right::show(ctx, hud);
     inspector::show(ctx, hud);
+    toast::show(ctx, hud);
     match hud.ui.mode {
         Mode::Model => {
             tool_options::show(ctx, hud);
@@ -269,6 +279,12 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     if !hud.ui.modal_open() {
         shortcuts(ctx, hud);
     }
+}
+
+/// Puts the MCP client configuration snippet on the clipboard and says so.
+pub(crate) fn copy_client_config(ctx: &Context, hud: &mut Hud<'_>) {
+    ctx.copy_text(hud.settings.mcp.client_config());
+    hud.ui.toast = Some(Toast::new(hud.tr("mcp-copied"), false));
 }
 
 /// Width of the band along the window border that resizes the frameless window.

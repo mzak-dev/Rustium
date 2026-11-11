@@ -3,6 +3,7 @@
 
 use egui::{Context, Grid, Id, RichText, ScrollArea, Sense, Stroke, vec2};
 use rustium_core::EditKind;
+use rustium_mcp::Permission;
 
 use super::widgets::{self, Look};
 use super::{
@@ -10,7 +11,9 @@ use super::{
     render_inspector,
 };
 use crate::icons::Icon;
+use crate::mcp::{McpStatus, McpTransport, permission_key};
 use crate::settings::Motion;
+use crate::settings_window::Section;
 use crate::theme;
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
@@ -175,6 +178,9 @@ fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
         EditKind::EditGraph => "edit-graph",
         EditKind::CreateGraph => "create-graph",
         EditKind::AssignGraph => "assign-graph",
+        EditKind::SetVoxels => "edit-set-voxels",
+        EditKind::SetColor => "edit-set-color",
+        EditKind::Script => "edit-script",
     })
 }
 
@@ -236,7 +242,10 @@ fn history_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
     });
 }
 
+/// The MCP tab: live switch, status, transport, address, permissions, Configure and Copy client config.
 fn mcp_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
+    let before = hud.settings.mcp;
+    let status = hud.mcp_status.clone();
     egui::Frame::new()
         .inner_margin(egui::Margin {
             left: 12,
@@ -247,18 +256,24 @@ fn mcp_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(dot.center(), 4.0, theme::DISABLED);
+                let dot_color = match status {
+                    McpStatus::Off => theme::DISABLED,
+                    McpStatus::Listening(_) => hud.accent(),
+                    McpStatus::Failed(_) => egui::Color32::from_rgb(0xf0, 0x8a, 0x72),
+                };
+                ui.painter().circle_filled(dot.center(), 4.0, dot_color);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(hud.tr("mcp-server")).font(theme::bold(12.0)));
-                    ui.label(RichText::new(hud.tr("mcp-off")).color(theme::MUTED).size(11.0));
+                    ui.label(RichText::new(status.text(hud.i18n)).color(theme::MUTED).size(11.0));
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let mut on = false;
-                    widgets::switch(ui, &mut on, false);
+                    widgets::switch(ui, &mut hud.settings.mcp.enabled, true);
                 });
             });
-            ui.add_space(6.0);
-            ui.label(RichText::new(hud.tr("mcp-coming")).color(theme::SUBTLE).size(11.0));
+            if let McpStatus::Failed(message) = &status {
+                ui.add_space(6.0);
+                ui.label(RichText::new(message).color(theme::SUBTLE).size(11.0));
+            }
             ui.add_space(8.0);
             Grid::new("mcp-connection")
                 .num_columns(2)
@@ -266,16 +281,22 @@ fn mcp_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
                 .spacing(vec2(8.0, 6.0))
                 .show(ui, |ui| {
                     ui.label(widgets::muted(hud.tr("mcp-transport")));
-                    let mut transport = 1;
                     widgets::segmented(
                         ui,
-                        &mut transport,
-                        &[(0, "stdio".to_owned()), (1, "HTTP".to_owned())],
-                        false,
+                        &mut hud.settings.mcp.transport,
+                        &[
+                            (McpTransport::Stdio, "stdio".to_owned()),
+                            (McpTransport::Http, "HTTP".to_owned()),
+                        ],
+                        true,
                     );
                     ui.end_row();
                     ui.label(widgets::muted(hud.tr("mcp-address")));
-                    ui.add_enabled(false, egui::Label::new(widgets::mono("127.0.0.1:7420", 11.0)));
+                    let address = match hud.settings.mcp.transport {
+                        McpTransport::Http => format!("127.0.0.1:{}", hud.settings.mcp.port),
+                        McpTransport::Stdio => "rustium --mcp-stdio".to_owned(),
+                    };
+                    ui.label(widgets::mono(address, 11.0));
                     ui.end_row();
                 });
             ui.add_space(10.0);
@@ -284,26 +305,26 @@ fn mcp_tab(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
                     .color(theme::SUBTLE)
                     .size(10.0),
             );
-            for (key, default) in [
-                ("mcp-read-model", true),
-                ("mcp-edit-voxels", true),
-                ("mcp-edit-palette", true),
-                ("mcp-run-scripts", false),
-                ("mcp-start-renders", false),
-            ] {
+            for permission in Permission::ALL {
                 ui.horizontal(|ui| {
                     ui.set_height(30.0);
-                    ui.label(RichText::new(hud.tr(key)).color(theme::SOFT));
+                    ui.label(RichText::new(hud.tr(permission_key(permission))).color(theme::SOFT));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut on = default;
-                        widgets::switch(ui, &mut on, false);
+                        widgets::switch(ui, hud.settings.mcp.permissions.flag_mut(permission), true);
                     });
                 });
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                widgets::text_button(ui, &hud.tr("mcp-configure"), 32.0, Look::On, false);
-                widgets::text_button(ui, &hud.tr("mcp-copy-config"), 32.0, Look::On, false);
+                if widgets::text_button(ui, &hud.tr("mcp-configure"), 32.0, Look::On, true).clicked() {
+                    hud.ui.settings_section = Some(Section::Mcp);
+                }
+                if widgets::text_button(ui, &hud.tr("mcp-copy-config"), 32.0, Look::On, true).clicked() {
+                    super::copy_client_config(ui.ctx(), hud);
+                }
             });
         });
+    if hud.settings.mcp != before {
+        hud.send(AppCommand::SettingsChanged);
+    }
 }

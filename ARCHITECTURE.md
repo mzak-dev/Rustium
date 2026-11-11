@@ -1,6 +1,7 @@
 # Architecture
 
-Rustium is a Cargo workspace. Dependencies point down: `rustium-app → rustium-render → rustium-core`.
+Rustium is a Cargo workspace. Dependencies point down: `rustium-app → rustium-render → rustium-core`; `rustium-app` also uses
+`rustium-mcp` and `rustium-script` (`rustium-script → rustium-core`).
 Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons are in [docs/adr](docs/adr).
 
 | Crate | Owns | Must not depend on |
@@ -8,8 +9,8 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 | `rustium-core` | Scene graph (Groups, Models, Instances), Shape (copy-on-write 32³ chunks), Palette, material graphs, Commands → Edits, History, raycast and Scene picking, Brush / Fill / Mirror geometry, greedy meshing | GPU, windowing, async |
 | `rustium-render` | wgpu device and surface, chunk raster with MSAA, ground grid, overlay lines, glass blur and composite, the Render-mode path tracer | windowing, egui |
 | `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging | — |
-| `rustium-mcp` *(M2)* | MCP server over HTTP and stdio; the only crate with tokio | — |
-| `rustium-script` *(M2)* | Luau scripting through mlua | — |
+| `rustium-mcp` | in-process MCP server (streamable HTTP on `127.0.0.1:7420`) and the `--mcp-stdio` bridge; the only crate with tokio | the Scene (it depends on no other Rustium crate) |
+| `rustium-script` | sandboxed Luau scripting through mlua; a run is one `Edit` | GPU, windowing, async |
 
 ## Data flow of one frame
 
@@ -61,6 +62,40 @@ Scene upload and traversal are separate so a ray-query backend can reuse the upl
 
 Known limits: no light sampling for emissive voxels (small emitters are noisy), a dense chunk grid capped at 4M
 cells, no denoiser, one sample per pixel per frame.
+
+## Threading and MCP
+
+The Scene is only ever touched by the UI thread (the winit event loop). Everything else talks to it by message:
+
+```
+MCP client ──HTTP──▶ rustium-mcp thread ("rustium-mcp", tokio, current-thread runtime)
+                         │  Tools::call → Bridge::call(Request)
+                         │  1. permission check (SharedPermissions, atomic bitmask)
+                         │  2. crossbeam bounded channel ── Envelope{request, reply} ──▶ UI thread
+                         │  3. Waker → EventLoopProxy::send_event(UserEvent::Automation)
+                         │  4. spawn_blocking(reply.recv_timeout(30 s))     ◀── Reply (JSON or error)
+UI thread: user_event → McpHost::drain → automation::handle → Editor::execute_checked → Command → apply → Edit → History
+```
+
+- **One sync/async boundary**, `Bridge::call`. Past it the server never sees Scene state; the UI thread builds the
+  JSON answer. tokio is used only in `rustium-mcp`, on one named thread; every connection task lives in a
+  `JoinSet` owned by the accept loop, and dropping or stopping the `Server` cancels and joins everything.
+- **Every change is a Command.** MCP edits (`SetVoxels`, `ApplyBrush`, `SetMaterialColor`) and script runs go
+  through `rustium_core::apply` and land in `History` as one step each, so they show up live and undo with Ctrl+Z.
+  Voxel Commands name a Model by `NodeId` and use that Model's cell space; MCP tools and scripts default to the
+  Focus Model and refuse a Group, a hidden Model or a locked Model with a clear error. A script buffers its writes
+  and applies one `SetVoxels` at the end, so a failing script changes nothing.
+- **Permissions** (Read model, Edit voxels, Edit palette, Run scripts, Start renders) are checked on the server
+  side before anything is queued, from atomics the UI updates when Settings change; a refused call returns a tool
+  error naming the switch. The queue is bounded (64): a flood gets a "busy" error instead of blocking. Requests
+  that carry an `Origin` header (web pages) or a non-loopback `Host` are refused by the HTTP layer.
+- **Transports.** The editor serves stateless streamable HTTP with plain JSON responses. `rustium --mcp-stdio` runs
+  no window and no logging: it forwards each stdin line to that endpoint (`rustium_mcp::run_stdio_bridge`) and
+  answers with a JSON-RPC error if the editor is not running. Both can be used at the same time.
+- **Scripts** run on the UI thread inside `rustium-script`: Luau sandbox, no `io`/`os`/`require`, memory limit,
+  interrupt budget and wall-clock limit (`Limits`), so a runaway script cannot hang the editor.
+- **Tests without a window**: `rustium-mcp/tests/round_trip.rs` drives the server with a fake UI thread;
+  `rustium-app/src/mcp.rs` drives a real `Editor` through the stdio bridge, HTTP, the channel and `McpHost::drain`.
 
 ## Coordinates
 

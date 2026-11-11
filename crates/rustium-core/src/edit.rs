@@ -56,6 +56,12 @@ pub enum EditKind {
     CreateGraph,
     /// A Color was assigned to a material graph.
     AssignGraph,
+    /// A batch of voxels was set or erased at explicit positions.
+    SetVoxels,
+    /// The base color of a Palette entry changed.
+    SetColor,
+    /// A script ran.
+    Script,
 }
 
 /// One named, undoable change: the chunks it touched before and after, the Volumes, and a snapshot of the node
@@ -117,6 +123,13 @@ impl Edit {
     /// Whether the Edit changed Colors or material graphs, so the GPU copy must be uploaded again.
     pub fn touches_materials(&self) -> bool {
         self.materials.is_some()
+    }
+
+    /// Replaces the kind, e.g. to label the Edits of a whole script run.
+    #[must_use]
+    pub fn with_kind(mut self, kind: EditKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// What the Edit did.

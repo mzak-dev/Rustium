@@ -5,6 +5,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::mcp::McpSettings;
+
 /// Interface language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum Language {
@@ -113,6 +115,7 @@ pub(crate) struct Settings {
     pub(crate) backend: Backend,
     pub(crate) vsync: bool,
     pub(crate) frame_limit: FrameLimit,
+    pub(crate) mcp: McpSettings,
 }
 
 impl Default for Settings {
@@ -140,6 +143,7 @@ impl Default for Settings {
             backend: Backend::Automatic,
             vsync: true,
             frame_limit: FrameLimit::MatchDisplay,
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -208,6 +212,7 @@ impl Settings {
                 self.vsync = defaults.vsync;
                 self.frame_limit = defaults.frame_limit;
             }
+            Section::Mcp => self.mcp = defaults.mcp,
         }
     }
 }

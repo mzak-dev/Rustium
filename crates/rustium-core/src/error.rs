@@ -50,4 +50,20 @@ pub enum Error {
     /// The Scene ran out of Node or Shape ids.
     #[error("the scene has too many nodes")]
     TooManyNodes,
+    /// A voxel position lies too far from the origin.
+    #[error("voxel position {position} is outside ±{limit}")]
+    OutOfRange {
+        /// The offending position.
+        position: glam::IVec3,
+        /// Largest allowed distance from the origin along each axis.
+        limit: i32,
+    },
+    /// A batch holds more voxels than one Command accepts.
+    #[error("{len} voxels in one command exceed the limit of {max}")]
+    TooManyVoxels {
+        /// Number of voxels in the batch.
+        len: usize,
+        /// Largest allowed batch.
+        max: usize,
+    },
 }

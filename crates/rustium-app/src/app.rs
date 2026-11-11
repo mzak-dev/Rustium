@@ -11,17 +11,18 @@ use rustium_render::{
     CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, TraceFrame,
     ViewportFrame, ViewportRenderer,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::{Icon, Window, WindowId};
 
 use crate::camera::OrbitCamera;
 use crate::editor::Editor;
-use crate::hud::{self, AppCommand, Hud, Mode, UiState};
+use crate::hud::{self, AppCommand, Hud, Mode, Toast, UiState};
 use crate::i18n::I18n;
+use crate::mcp::McpHost;
 use crate::render_mode::Backdrop;
 use crate::render_output::{self, SaveOutcome};
 use crate::settings::{Backend, FrameLimit, Settings};
@@ -29,17 +30,26 @@ use crate::{settings_window, splash, theme};
 
 const LOGO_PNG: &[u8] = include_bytes!("../assets/logo.png");
 
+/// Events other threads send to the event loop through its `EventLoopProxy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UserEvent {
+    /// The MCP server queued requests for the UI thread.
+    Automation,
+}
+
 /// The winit application: owns the settings and, once resumed, the running editor.
 pub(crate) struct App {
     settings: Settings,
+    proxy: EventLoopProxy<UserEvent>,
     running: Option<Running>,
     error: Option<color_eyre::Report>,
 }
 
 impl App {
-    pub(crate) fn new(settings: Settings) -> Self {
+    pub(crate) fn new(settings: Settings, proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             settings,
+            proxy,
             running: None,
             error: None,
         }
@@ -87,14 +97,15 @@ struct Running {
     trace_revision: Option<u64>,
     save_results: Receiver<SaveOutcome>,
     save_sender: mpsc::Sender<SaveOutcome>,
+    mcp: McpHost,
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.running.is_some() {
             return;
         }
-        match Running::new(event_loop, &self.settings) {
+        match Running::new(event_loop, &self.settings, &self.proxy) {
             Ok(running) => self.running = Some(running),
             Err(report) => self.fail(event_loop, report),
         }
@@ -125,6 +136,18 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        let Some(running) = &mut self.running else {
+            return;
+        };
+        match event {
+            UserEvent::Automation => {
+                running.mcp.drain(&mut running.editor);
+                running.window.request_redraw();
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(running) = &self.running else {
             return;
@@ -141,7 +164,7 @@ impl ApplicationHandler for App {
 }
 
 impl Running {
-    fn new(event_loop: &ActiveEventLoop, settings: &Settings) -> Result<Self> {
+    fn new(event_loop: &ActiveEventLoop, settings: &Settings, proxy: &EventLoopProxy<UserEvent>) -> Result<Self> {
         let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
         let mut attributes = Window::default_attributes()
             .with_title("Rustium")
@@ -206,6 +229,14 @@ impl Running {
 
         let editor = Editor::new(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
         let (save_sender, save_results) = mpsc::channel();
+        let waker_proxy = proxy.clone();
+        let mcp = McpHost::new(
+            &settings.mcp,
+            Arc::new(move || {
+                // A closed event loop means the editor is exiting; the request will be refused anyway.
+                let _ = waker_proxy.send_event(UserEvent::Automation);
+            }),
+        );
         let camera = OrbitCamera {
             field_of_view_degrees: settings.field_of_view_degrees,
             ..OrbitCamera::default()
@@ -230,6 +261,7 @@ impl Running {
             trace_revision: None,
             save_results,
             save_sender,
+            mcp,
         })
     }
 
@@ -251,6 +283,7 @@ impl Running {
                 maximized,
                 adapter_name: &self.adapter_name,
                 sample_counts: &self.sample_counts,
+                mcp_status: self.mcp.status(),
                 glass: Vec::new(),
                 commands: Vec::new(),
             };
@@ -418,6 +451,7 @@ impl Running {
             AppCommand::SettingsChanged => self.apply_settings(settings),
             AppCommand::SaveImage => self.save_image(),
             AppCommand::RestartRender => self.viewport.restart_trace(),
+            AppCommand::RunScript => self.run_script_file(),
         }
         false
     }
@@ -430,7 +464,48 @@ impl Running {
         self.viewport.set_sample_count(&self.gpu, samples);
         self.camera.field_of_view_degrees = settings.field_of_view_degrees;
         self.editor.history.set_limit(settings.undo_steps as usize);
+        self.mcp.apply(&settings.mcp);
         settings.save();
+    }
+
+    /// Main menu → Run script: pick a `.luau` file, run it on the Focus Model as one History step and report.
+    fn run_script_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title(self.i18n.tr("menu-run-script"))
+            .add_filter("Luau", &["luau", "lua"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|source| {
+                let model = self.editor.focus;
+                self.editor
+                    .run_script(model, &source, &rustium_script::Limits::default())
+                    .map_err(|error| error.to_string())
+            });
+        let toast = match result {
+            Ok(run) => {
+                info!(path = %path.display(), changed = run.changed, "script finished");
+                let mut text = self
+                    .i18n
+                    .tr(if run.changed { "script-done" } else { "script-no-change" });
+                for line in run.log.iter().take(6) {
+                    text.push('\n');
+                    text.push_str(line);
+                }
+                Toast::new(text, false)
+            }
+            Err(error) => {
+                warn!(path = %path.display(), %error, "script failed");
+                let text = self
+                    .i18n
+                    .tr_args("script-failed", &[("error", FluentValue::from(error))]);
+                Toast::new(text, true)
+            }
+        };
+        self.ui.toast = Some(toast);
     }
 
     fn upload_dirty_chunks(&mut self) {

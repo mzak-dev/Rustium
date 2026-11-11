@@ -9,6 +9,7 @@ use crate::raycast::RayHit;
 use crate::scene::Scene;
 use crate::scene_ops;
 use crate::selection::Selection;
+use crate::shape::Voxel;
 use crate::tools::{self, Brush, FillMode, Mirror};
 use crate::transform::Transform;
 
@@ -22,6 +23,12 @@ pub enum VoxelTool {
     /// Changes the Material of existing voxels around the hit voxel.
     Paint,
 }
+
+/// Farthest a voxel may lie from the origin along any axis.
+pub const COORD_LIMIT: i32 = 1 << 24;
+
+/// Most voxels one [`Command::SetVoxels`] may change.
+pub const MAX_BATCH: usize = 4_000_000;
 
 /// A request to change the Scene, from the interface, a script or an MCP client.
 ///
@@ -175,6 +182,21 @@ pub enum Command {
         /// Index of the graph; 0 is the Default material.
         graph: u32,
     },
+    /// Sets or erases voxels of a Model at explicit cell positions (`None` erases). The batch is
+    /// all-or-nothing: an invalid entry rejects the whole Command.
+    SetVoxels {
+        /// The Model whose Shape changes.
+        model: NodeId,
+        /// Position (in the Model's cells) and new content of every voxel to change, applied in order.
+        voxels: Vec<(IVec3, Voxel)>,
+    },
+    /// Changes the base color of one Palette entry.
+    SetMaterialColor {
+        /// Palette entry to change.
+        material: MaterialId,
+        /// New base color as 8-bit sRGB.
+        color: [u8; 3],
+    },
 }
 
 /// Applies `command` to `scene` and returns the resulting Edit, or `None` when nothing changed.
@@ -234,7 +256,49 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::CreateGraph { name, surface } => create_graph(scene, name, *surface),
         Command::EditGraph { index, surface } => edit_graph(scene, *index, *surface),
         Command::AssignGraph { id, graph } => assign_graph(scene, *id, *graph),
+        Command::SetVoxels { model, voxels } => apply_set_voxels(scene, *model, voxels),
+        Command::SetMaterialColor { material, color } => apply_set_color(scene, *material, *color),
     }
+}
+
+fn check_position(position: IVec3) -> Result<(), Error> {
+    if position.abs().max_element() > COORD_LIMIT {
+        return Err(Error::OutOfRange {
+            position,
+            limit: COORD_LIMIT,
+        });
+    }
+    Ok(())
+}
+
+fn apply_set_voxels(scene: &mut Scene, model: NodeId, voxels: &[(IVec3, Voxel)]) -> Result<Option<Edit>, Error> {
+    let shape = scene_ops::editable_shape(scene, model)?;
+    if voxels.len() > MAX_BATCH {
+        return Err(Error::TooManyVoxels {
+            len: voxels.len(),
+            max: MAX_BATCH,
+        });
+    }
+    for (position, voxel) in voxels {
+        check_position(*position)?;
+        if let Some(material) = voxel {
+            check_material(scene, *material)?;
+        }
+    }
+    let mut rec = Recorder::new(scene);
+    for (position, voxel) in voxels {
+        rec.set(shape, *position, *voxel);
+    }
+    Ok(rec.finish(EditKind::SetVoxels))
+}
+
+fn apply_set_color(scene: &mut Scene, material: MaterialId, color: [u8; 3]) -> Result<Option<Edit>, Error> {
+    check_material(scene, material)?;
+    let before = snapshot(scene);
+    if !scene.palette.set_color(material, color) {
+        return Ok(None);
+    }
+    Ok(Some(Edit::materials_change(EditKind::SetColor, scene, before)))
 }
 
 fn snapshot(scene: &Scene) -> (crate::Palette, Vec<MaterialGraph>) {
@@ -326,6 +390,8 @@ fn apply_brush(
 ) -> Result<Option<Edit>, Error> {
     let shape = scene_ops::editable_shape(scene, model)?;
     check_material(scene, material)?;
+    check_position(from.voxel)?;
+    check_position(to.voxel)?;
     if brush.size == 0 || brush.size > Brush::MAX_SIZE {
         return Err(Error::BrushSize {
             size: brush.size,
@@ -488,6 +554,111 @@ mod tests {
         let mut scene = Scene::new();
         attach(&mut scene, IVec3::ZERO, 1);
         assert!(attach(&mut scene, IVec3::ZERO, 1).is_none());
+    }
+
+    #[test]
+    fn set_voxels_is_one_undoable_edit_across_chunks() {
+        let mut scene = Scene::new();
+        let model = first_model(&scene);
+        let mut history = History::new(10);
+        let far = IVec3::new(100, -50, 7);
+        let command = Command::SetVoxels {
+            model,
+            voxels: vec![
+                (IVec3::ZERO, Some(material(3))),
+                (far, Some(material(4))),
+                (IVec3::new(1, 0, 0), None),
+            ],
+        };
+        history.push(apply(&mut scene, &command).unwrap().unwrap());
+        let shape = |scene: &Scene| scene.model_shape(model).unwrap().1.clone();
+        assert_eq!(shape(&scene).get(far), Some(material(4)));
+        assert_eq!(history.done().count(), 1);
+        history.undo(&mut scene);
+        assert!(shape(&scene).get(far).is_none());
+        assert!(shape(&scene).get(IVec3::ZERO).is_none());
+        assert_eq!(shape(&scene).volume(), None);
+        history.redo(&mut scene);
+        assert_eq!(shape(&scene).get(IVec3::ZERO), Some(material(3)));
+    }
+
+    #[test]
+    fn set_voxels_with_one_bad_entry_changes_nothing() {
+        let mut scene = Scene::new();
+        let model = first_model(&scene);
+        let command = Command::SetVoxels {
+            model,
+            voxels: vec![(IVec3::ZERO, Some(material(1))), (IVec3::ONE, Some(material(200)))],
+        };
+        assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownMaterial(200))));
+        assert!(scene.model_shape(model).unwrap().1.get(IVec3::ZERO).is_none());
+        let far = Command::SetVoxels {
+            model,
+            voxels: vec![(IVec3::new(COORD_LIMIT + 1, 0, 0), Some(material(1)))],
+        };
+        assert!(matches!(apply(&mut scene, &far), Err(Error::OutOfRange { .. })));
+    }
+
+    #[test]
+    fn set_voxels_needs_a_visible_unlocked_model() {
+        let mut scene = Scene::new();
+        let command = Command::SetVoxels {
+            model: NodeId::ROOT,
+            voxels: vec![(IVec3::ZERO, Some(material(1)))],
+        };
+        assert!(matches!(apply(&mut scene, &command), Err(Error::NotAModel(_))));
+    }
+
+    #[test]
+    fn setting_what_is_already_there_records_nothing() {
+        let mut scene = Scene::new();
+        let command = Command::SetVoxels {
+            model: first_model(&scene),
+            voxels: vec![(IVec3::ZERO, None)],
+        };
+        assert!(apply(&mut scene, &command).unwrap().is_none());
+    }
+
+    #[test]
+    fn palette_color_change_undoes_and_redoes() {
+        let mut scene = Scene::new();
+        let mut history = History::new(10);
+        let id = material(2);
+        let original = scene.palette().get(id).unwrap().color;
+        let command = Command::SetMaterialColor {
+            material: id,
+            color: [1, 2, 3],
+        };
+        let edit = apply(&mut scene, &command).unwrap().unwrap();
+        assert!(edit.touches_materials());
+        history.push(edit);
+        assert_eq!(scene.palette().get(id).unwrap().color, [1, 2, 3]);
+        history.undo(&mut scene);
+        assert_eq!(scene.palette().get(id).unwrap().color, original);
+        history.redo(&mut scene);
+        assert_eq!(scene.palette().get(id).unwrap().color, [1, 2, 3]);
+        assert!(apply(&mut scene, &command).unwrap().is_none());
+    }
+
+    #[test]
+    fn merged_edits_undo_voxels_and_palette_together() {
+        let mut scene = Scene::new();
+        let model = first_model(&scene);
+        let mut history = History::new(10);
+        let voxels = Command::SetVoxels {
+            model,
+            voxels: vec![(IVec3::ZERO, Some(material(1)))],
+        };
+        let color = Command::SetMaterialColor {
+            material: material(1),
+            color: [9, 9, 9],
+        };
+        let first = apply(&mut scene, &voxels).unwrap().unwrap();
+        let second = apply(&mut scene, &color).unwrap().unwrap();
+        history.push(first.merge(second));
+        history.undo(&mut scene);
+        assert!(scene.model_shape(model).unwrap().1.get(IVec3::ZERO).is_none());
+        assert_ne!(scene.palette().get(material(1)).unwrap().color, [9, 9, 9]);
     }
 
     #[test]

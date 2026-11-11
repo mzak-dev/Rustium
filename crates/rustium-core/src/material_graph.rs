@@ -5,8 +5,10 @@
 //! the base color comes from the voxel's Color. The Effects milestone replaces the constants with a node graph
 //! compiled to WGSL, behind the same `evaluate_material` entry point.
 
+use serde::{Deserialize, Serialize};
+
 /// The constant parameters of a graph's Surface output.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceConstants {
     /// Surface roughness, `0.0` (mirror) to `1.0` (matte).
     pub roughness: f32,
@@ -60,7 +62,7 @@ impl SurfaceConstants {
 }
 
 /// A named Material: what a Color looks like beyond its base color.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MaterialGraph {
     /// Name shown in the interface, for example "Roof slate".
     pub name: String,

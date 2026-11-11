@@ -34,8 +34,10 @@ fluent-syntax = "0.12"
 glam = { version = "0.34", features = ["bytemuck"] }
 hyper = { version = "1", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 mlua = { version = "0.12", features = ["luau", "vendored"] }
 png = "0.18"
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 pollster = "0.4"
 proptest = "1"
 rfd = "0.18"

@@ -67,6 +67,21 @@ impl Chunk {
         changed
     }
 
+    /// The voxels as one byte each in storage order (0 = empty, otherwise the Color number).
+    pub(crate) fn to_raw(&self) -> Vec<u8> {
+        self.voxels.iter().map(|voxel| voxel.map_or(0, ColorId::get)).collect()
+    }
+
+    /// Rebuilds a chunk from [`Chunk::to_raw`] bytes; `None` when the length is wrong.
+    pub(crate) fn from_raw(raw: &[u8]) -> Option<Self> {
+        if raw.len() != CHUNK_VOLUME {
+            return None;
+        }
+        let voxels: Box<[Voxel]> = raw.iter().map(|byte| ColorId::new(*byte)).collect();
+        let filled = u32::try_from(voxels.iter().filter(|voxel| voxel.is_some()).count()).ok()?;
+        Some(Self { voxels, filled })
+    }
+
     /// Whether every voxel is empty.
     pub fn is_empty(&self) -> bool {
         self.filled == 0

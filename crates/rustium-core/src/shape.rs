@@ -55,6 +55,20 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// A Shape made of the given chunks; empty chunks are dropped and the Volume is measured from the voxels.
+    pub(crate) fn from_chunks(chunks: impl IntoIterator<Item = (ChunkCoord, Arc<Chunk>)>) -> Self {
+        let mut shape = Self {
+            chunks: chunks.into_iter().filter(|(_, chunk)| !chunk.is_empty()).collect(),
+            volume: None,
+        };
+        let mut volume: Option<Volume> = None;
+        for (position, _) in shape.voxels() {
+            volume = Some(volume.map_or(Volume::point(position), |total| total.including(position)));
+        }
+        shape.volume = volume;
+        shape
+    }
+
     /// An empty Shape.
     pub fn new() -> Self {
         Self::default()

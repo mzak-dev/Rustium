@@ -55,6 +55,11 @@ impl Palette {
     /// Most Colors one Palette can hold.
     pub const MAX_LEN: usize = 255;
 
+    /// A Palette of the given entries; `None` when there are none or more than [`Palette::MAX_LEN`].
+    pub(crate) fn from_colors(colors: Vec<Color>) -> Option<Self> {
+        (!colors.is_empty() && colors.len() <= Self::MAX_LEN).then_some(Self { colors })
+    }
+
     /// Changes the color of `id`; returns whether anything changed.
     pub(crate) fn set_color(&mut self, id: ColorId, color: [u8; 3]) -> bool {
         match self.colors.get_mut(id.slot()) {

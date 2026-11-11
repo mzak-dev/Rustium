@@ -23,6 +23,10 @@ struct Params {
     options: vec4<u32>,
     // rgb: studio ground albedo, w: ground height.
     ground: vec4<f32>,
+    // x: render style (STYLE_*), y: pixel size of the Pixel style, z: 1 = also write the G-buffer this pass.
+    style: vec4<u32>,
+    // x: lens radius in voxels, y: focus distance in voxels, z: 1 = depth of field is on.
+    lens: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -33,6 +37,10 @@ struct Params {
 @group(0) @binding(3) var<storage, read> chunk_grid: array<u32>;
 @group(0) @binding(4) var history: texture_2d<f32>;
 @group(0) @binding(5) var output: texture_storage_2d<rgba32float, write>;
+// First-hit data of every pixel for the denoiser and the toon outlines (see trace_style.wgsl): xyz normal, w distance;
+// and rgb albedo.
+@group(0) @binding(7) var gbuffer_geometry: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(8) var gbuffer_albedo: texture_storage_2d<rgba32float, write>;
 
 // A visible Model: scene = (column_x, column_y, column_z) * local + offset, plus where its Shape's chunk grid is.
 struct ModelRecord {
@@ -257,7 +265,7 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> H
             }
         }
     }
-    if (inside == 0u && params.options.x != 0u && dir.y < -1.0e-5 && origin.y > params.ground.w) {
+    if (inside == 0u && params.options.x != 0u && params.style.x != STYLE_WIRE && dir.y < -1.0e-5 && origin.y > params.ground.w) {
         let t_ground = (params.ground.w - origin.y) / dir.y;
         if (t_ground < result.t) {
             result = Hit(true, t_ground, vec3<f32>(0.0, 1.0, 0.0), GROUND_ID, 0u);
@@ -329,6 +337,8 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
         if (!hit.hit) {
             if (bounces == 0u && params.options.y == 1u) {
                 alpha = 0.0;
+            } else if (bounces == 0u && params.style.x == STYLE_WIRE) {
+                color = wire_background();
             } else {
                 color += throughput * (sky(dir) + select(vec3<f32>(0.0), sun_disc(dir), specular));
             }
@@ -365,9 +375,19 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             surface.ior = 1.5;
         } else {
             surface = evaluate_material(hit.color_index, point, hit.normal);
+            if (params.style.x == STYLE_CLAY) {
+                surface = clay_surface(surface);
+            }
             color += throughput * surface.emission_color * surface.emission_strength;
         }
         let normal = surface.normal;
+
+        if (bounces == 0u && (params.style.x == STYLE_TOON || params.style.x == STYLE_WIRE)
+            && !(hit.color_index == GROUND_ID && params.options.x == 2u)) {
+            // Non-photographic styles shade the first hit only.
+            color = select(toon_shade(point, hit, surface), wire_shade(point, hit, surface), params.style.x == STYLE_WIRE);
+            break;
+        }
 
         if (hit.color_index == GROUND_ID && bounces == 0u && params.options.x == 2u) {
             // Shadow catcher: show only how much light the ground loses to the model.
@@ -457,22 +477,27 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     var result = vec4<f32>(0.0);
     let in_region = id.x >= params.region.x && id.y >= params.region.y && id.x < params.region.z && id.y < params.region.w;
-    if (in_region) {
+    let block = max(params.style.y, 1u);
+    let pixelated = params.style.x == STYLE_PIXEL;
+    // The Pixel style traces one pixel per block; the resolve pass copies it over the rest of the block.
+    let traced = in_region && (!pixelated || (id.x % block == 0u && id.y % block == 0u));
+    if (traced) {
         let done = params.image.z;
         let count = params.options.z;
+        let spread = select(1.0, f32(block), pixelated);
         var sum = vec4<f32>(0.0);
         for (var s = 0u; s < count; s += 1u) {
             rng_state = pcg(id.x + id.y * width + pcg(done + s + 1u) * 2654435761u);
-            let uv = (vec2<f32>(id.xy) + vec2<f32>(rand(), rand())) / vec2<f32>(f32(width), f32(height));
-            let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-            let near = params.inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
-            let far = params.inv_view_proj * vec4<f32>(ndc, 1.0, 1.0);
-            let origin = near.xyz / near.w;
-            let dir = normalize(far.xyz / far.w - origin);
-            sum += radiance(origin, dir);
+            let position = vec2<f32>(id.xy) + vec2<f32>(rand(), rand()) * spread;
+            var ray = primary_ray(position);
+            ray = thin_lens(ray);
+            sum += radiance(ray.origin, ray.dir);
         }
         let previous = textureLoad(history, vec2<i32>(id.xy), 0);
         result = mix(previous, sum / f32(count), f32(count) / f32(done + count));
+        if (params.style.z == 1u) {
+            write_gbuffer(id.xy, pixel_centre(id.xy));
+        }
     }
     textureStore(output, vec2<i32>(id.xy), result);
 }

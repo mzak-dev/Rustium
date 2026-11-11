@@ -71,7 +71,7 @@ impl Scene {
         scene
     }
 
-    /// Materials voxels can use.
+    /// Colors voxels can use.
     pub fn palette(&self) -> &Palette {
         &self.palette
     }

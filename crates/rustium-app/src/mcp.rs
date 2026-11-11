@@ -284,7 +284,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                 "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}}}),
             json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                "name": "set_voxels", "arguments": {"voxels": [{"x": 2, "y": 0, "z": 0, "material": 9}]}}}),
+                "name": "set_voxels", "arguments": {"voxels": [{"x": 2, "y": 0, "z": 0, "color": 9}]}}}),
             json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                 "name": "scene_info", "arguments": {}}}),
         ]
@@ -306,7 +306,7 @@ mod tests {
         let info = answers[2]["result"]["content"][0]["text"].as_str().unwrap();
         assert!(info.contains("\"can_undo\":true"), "{info}");
 
-        assert_eq!(focus_voxel(&editor).map(rustium_core::MaterialId::get), Some(9));
+        assert_eq!(focus_voxel(&editor).map(rustium_core::ColorId::get), Some(9));
         editor.undo();
         assert!(focus_voxel(&editor).is_none());
     }
@@ -319,7 +319,7 @@ mod tests {
         let address = listening(&host);
         let url = format!("http://{address}/mcp");
         let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-            "name": "set_voxels", "arguments": {"voxels": [{"x": 0, "y": 0, "z": 0, "material": 1}]}}})
+            "name": "set_voxels", "arguments": {"voxels": [{"x": 0, "y": 0, "z": 0, "color": 1}]}}})
         .to_string();
         let client = thread::spawn(move || {
             let mut output = Vec::new();

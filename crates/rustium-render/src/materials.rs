@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn a_color_pointing_at_a_missing_graph_falls_back_to_the_default() {
         let mut scene = Scene::new();
-        let id = rustium_core::MaterialId::new(3).unwrap();
+        let id = rustium_core::ColorId::new(3).unwrap();
         let create = rustium_core::Command::CreateGraph {
             name: "Glass".to_owned(),
             surface: SurfaceConstants::MATTE,

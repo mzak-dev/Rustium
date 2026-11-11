@@ -4,10 +4,10 @@ use std::sync::Arc;
 use glam::IVec3;
 
 use crate::chunk::{self, Chunk, ChunkCoord};
-use crate::palette::MaterialId;
+use crate::palette::ColorId;
 
-/// One voxel: empty (`None`) or showing a Material.
-pub type Voxel = Option<MaterialId>;
+/// One voxel: empty (`None`) or showing a Color.
+pub type Voxel = Option<ColorId>;
 
 /// The box around the voxels of a Shape, with inclusive `min` and `max` corners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,13 +77,10 @@ impl Shape {
         self.chunks.iter().map(|(coord, chunk)| (*coord, chunk))
     }
 
-    /// Every filled voxel with its position and Material, in no particular order.
-    pub fn voxels(&self) -> impl Iterator<Item = (IVec3, MaterialId)> + '_ {
-        self.chunks().flat_map(|(coord, chunk)| {
-            chunk
-                .iter()
-                .map(move |(local, material)| (coord.origin() + local, material))
-        })
+    /// Every filled voxel with its position and Color, in no particular order.
+    pub fn voxels(&self) -> impl Iterator<Item = (IVec3, ColorId)> + '_ {
+        self.chunks()
+            .flat_map(|(coord, chunk)| chunk.iter().map(move |(local, color)| (coord.origin() + local, color)))
     }
 
     /// Number of filled voxels.

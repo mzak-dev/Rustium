@@ -2,7 +2,7 @@
 
 use glam::IVec3;
 use rustium_core::{
-    Brush, ChunkCoord, ChunkMesh, Command, Face, HitTarget, MaterialId, Mirror, NodeId, RayHit, Scene, Shape, VoxelTool,
+    Brush, ChunkCoord, ChunkMesh, ColorId, Command, Face, HitTarget, Mirror, NodeId, RayHit, Scene, Shape, VoxelTool,
 };
 
 fn main() {
@@ -24,7 +24,7 @@ fn filled_scene(size: u32) -> Scene {
         face: Face::PosY,
         target: HitTarget::Ground,
     };
-    let material = MaterialId::new(20).expect("20 is a valid material index");
+    let color = ColorId::new(20).expect("20 is a valid color index");
     let command = Command::ApplyBrush {
         model: model_of(&scene),
         tool: VoxelTool::Attach,
@@ -34,10 +34,10 @@ fn filled_scene(size: u32) -> Scene {
         },
         hit,
         end: None,
-        material,
+        color,
         mirror: Mirror::default(),
     };
-    rustium_core::apply(&mut scene, &command).expect("default palette has material 20");
+    rustium_core::apply(&mut scene, &command).expect("default palette has color 20");
     scene
 }
 
@@ -58,14 +58,14 @@ fn checkerboard_cubes(bencher: divan::Bencher<'_, '_>) {
                 face: Face::PosY,
                 target: HitTarget::Ground,
             };
-            let material = MaterialId::new(u8::try_from(1 + (x + z) % 90).unwrap_or(1)).expect("non-zero");
+            let color = ColorId::new(u8::try_from(1 + (x + z) % 90).unwrap_or(1)).expect("non-zero");
             let command = Command::ApplyBrush {
                 model: model_of(&scene),
                 tool: VoxelTool::Attach,
                 brush: Brush::default(),
                 hit,
                 end: None,
-                material,
+                color,
                 mirror: Mirror::default(),
             };
             rustium_core::apply(&mut scene, &command).expect("valid command");

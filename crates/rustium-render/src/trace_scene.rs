@@ -281,10 +281,10 @@ fn pack_chunk(chunk: &Chunk, out: &mut [u32]) {
     for y in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
-                if let Some(material) = chunk.get(IVec3::new(x, y, z))
+                if let Some(color) = chunk.get(IVec3::new(x, y, z))
                     && let Some(word) = out.get_mut(index / 4)
                 {
-                    *word |= u32::from(material.get()) << ((index % 4) * 8);
+                    *word |= u32::from(color.get()) << ((index % 4) * 8);
                 }
                 index += 1;
             }
@@ -321,11 +321,11 @@ fn create_models(device: &wgpu::Device, models: usize) -> wgpu::Buffer {
 
 #[cfg(test)]
 mod tests {
-    use rustium_core::{Brush, Command, Face, HitTarget, MaterialId, Mirror, NodeId, RayHit, VoxelTool, apply};
+    use rustium_core::{Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, RayHit, VoxelTool, apply};
 
     use super::*;
 
-    fn place(scene: &mut Scene, at: IVec3, material: MaterialId) {
+    fn place(scene: &mut Scene, at: IVec3, color: ColorId) {
         let model = scene.node(NodeId::ROOT).unwrap().children()[0];
         let command = Command::ApplyBrush {
             model,
@@ -337,18 +337,18 @@ mod tests {
                 target: HitTarget::Ground,
             },
             end: None,
-            material,
+            color,
             mirror: Mirror::default(),
         };
         let _ = apply(scene, &command);
     }
 
     #[test]
-    fn packing_puts_the_material_in_the_byte_the_shader_reads() {
+    fn packing_puts_the_color_in_the_byte_the_shader_reads() {
         let mut scene = Scene::new();
-        let material = MaterialId::new(7).unwrap();
-        place(&mut scene, IVec3::new(1, 0, 0), material);
-        place(&mut scene, IVec3::new(0, 2, 3), material);
+        let color = ColorId::new(7).unwrap();
+        place(&mut scene, IVec3::new(1, 0, 0), color);
+        place(&mut scene, IVec3::new(0, 2, 3), color);
         let model = scene.node(NodeId::ROOT).unwrap().children()[0];
         let (_, shape) = scene.model_shape(model).unwrap();
         let chunk = shape.chunk(ChunkCoord(IVec3::ZERO)).unwrap();

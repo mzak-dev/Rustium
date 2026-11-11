@@ -196,8 +196,8 @@ pub struct PathTracer {
 }
 
 impl PathTracer {
-    /// Builds the pipelines; `materials` is the shared Palette uniform and `target_format` the format of the
-    /// view [`PathTracer::encode`] draws into.
+    /// Builds the pipelines; `materials` is the shared Palette and Material uniform and `target_format` the format of
+    /// the view [`PathTracer::encode`] draws into.
     pub fn new(device: &wgpu::Device, materials: &wgpu::Buffer, target_format: wgpu::TextureFormat) -> Self {
         let compute_source = format!(
             "{}{}",

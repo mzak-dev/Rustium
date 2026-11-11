@@ -10,8 +10,8 @@
 
 use glam::{IVec3, Mat4, Vec3};
 use rustium_core::{
-    Brush, Command, Face, HitTarget, MaterialId, Mirror, NodeId, Orientation, RayHit, Scene, SurfaceConstants,
-    Transform, VoxelTool, apply,
+    Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, Scene, SurfaceConstants, Transform,
+    VoxelTool, apply,
 };
 use rustium_render::{GpuMaterialTable, Ground, PathTracer, Sky, TraceFrame, TraceImage};
 
@@ -31,8 +31,8 @@ fn gpu() -> Option<Gpu> {
     Some(Gpu { device, queue })
 }
 
-fn id(number: u8) -> MaterialId {
-    MaterialId::new(number).unwrap()
+fn id(number: u8) -> ColorId {
+    ColorId::new(number).unwrap()
 }
 
 fn first_model(scene: &Scene) -> NodeId {
@@ -40,12 +40,12 @@ fn first_model(scene: &Scene) -> NodeId {
 }
 
 /// Fills a box of the first Model.
-fn fill(scene: &mut Scene, min: IVec3, max: IVec3, material: MaterialId) {
+fn fill(scene: &mut Scene, min: IVec3, max: IVec3, color: ColorId) {
     let model = first_model(scene);
-    fill_model(scene, model, min, max, material);
+    fill_model(scene, model, min, max, color);
 }
 
-fn fill_model(scene: &mut Scene, model: NodeId, min: IVec3, max: IVec3, material: MaterialId) {
+fn fill_model(scene: &mut Scene, model: NodeId, min: IVec3, max: IVec3, color: ColorId) {
     for y in min.y..=max.y {
         for z in min.z..=max.z {
             for x in min.x..=max.x {
@@ -59,7 +59,7 @@ fn fill_model(scene: &mut Scene, model: NodeId, min: IVec3, max: IVec3, material
                         target: HitTarget::Ground,
                     },
                     end: None,
-                    material,
+                    color,
                     mirror: Mirror::default(),
                 };
                 apply(scene, &command).unwrap();
@@ -356,7 +356,7 @@ fn glass_and_metal_render_without_blowing_up() {
         samples: 64,
     };
     let image = render(&gpu, &scene, &camera, &setup);
-    dump("materials", &image);
+    dump("colors", &image);
     assert!(
         image.rgba.iter().all(|value| value.is_finite()),
         "no NaN or infinity in the image"

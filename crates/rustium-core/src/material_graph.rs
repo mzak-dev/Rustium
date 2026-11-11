@@ -1,6 +1,6 @@
 //! Material graphs: how a Scene's Colors are shaded.
 //!
-//! A Color (today's [`Material`](crate::Material) palette entry) points at exactly one [`MaterialGraph`]; index 0
+//! A Color (a [`Color`](crate::Color) palette entry) points at exactly one [`MaterialGraph`]; index 0
 //! of the Scene's list is the built-in Default material. For now a graph is just constant Surface parameters;
 //! the base color comes from the voxel's Color. The Effects milestone replaces the constants with a node graph
 //! compiled to WGSL, behind the same `evaluate_material` entry point.

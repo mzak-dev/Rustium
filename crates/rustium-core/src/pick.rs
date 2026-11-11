@@ -88,11 +88,11 @@ mod tests {
     use super::*;
     use crate::command::{Command, VoxelTool, apply};
     use crate::face::Face;
-    use crate::palette::MaterialId;
+    use crate::palette::ColorId;
     use crate::tools::{Brush, Mirror};
     use crate::transform::{Orientation, Transform};
 
-    fn put(scene: &mut Scene, model: NodeId, at: IVec3, material: u8) {
+    fn put(scene: &mut Scene, model: NodeId, at: IVec3, color: u8) {
         let command = Command::ApplyBrush {
             model,
             tool: VoxelTool::Attach,
@@ -103,7 +103,7 @@ mod tests {
                 target: HitTarget::Ground,
             },
             end: None,
-            material: MaterialId::new(material).unwrap(),
+            color: ColorId::new(color).unwrap(),
             mirror: Mirror::default(),
         };
         apply(scene, &command).unwrap();

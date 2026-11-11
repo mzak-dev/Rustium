@@ -18,7 +18,7 @@ pub enum EditKind {
     Attach,
     /// Voxels were removed.
     Erase,
-    /// Voxels changed Material.
+    /// Voxels changed Color.
     Paint,
     /// A Fill changed voxels.
     Fill,

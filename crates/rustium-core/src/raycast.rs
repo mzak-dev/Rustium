@@ -159,12 +159,12 @@ fn sign(value: f32) -> i32 {
 mod tests {
     use super::*;
     use crate::CHUNK_SIZE;
-    use crate::palette::MaterialId;
+    use crate::palette::ColorId;
 
     fn shape_with(positions: &[IVec3]) -> Shape {
         let mut shape = Shape::new();
         for position in positions {
-            shape.set(*position, MaterialId::new(1));
+            shape.set(*position, ColorId::new(1));
         }
         shape
     }

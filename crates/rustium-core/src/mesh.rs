@@ -10,13 +10,13 @@ use crate::shape::Shape;
 /// One vertex of a chunk mesh, laid out for the GPU.
 ///
 /// `packed` holds the face index (bits 0–2), ambient occlusion 0..=3 (bits 3–4, 3 = fully lit) and the
-/// Material number (bits 8–15).
+/// Color number (bits 8–15).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct MeshVertex {
     /// Corner position in voxel space.
     pub position: [f32; 3],
-    /// Face, ambient occlusion and Material, see the type docs.
+    /// Face, ambient occlusion and Color, see the type docs.
     pub packed: u32,
 }
 
@@ -61,15 +61,15 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
         let v_dir = unit(v_axis);
 
         for depth in 0..CHUNK_SIZE {
-            // Build the mask of visible faces in this slice; each entry encodes Material + 4 AO values.
+            // Build the mask of visible faces in this slice; each entry encodes Color + 4 AO values.
             for v in 0..CHUNK_SIZE {
                 for u in 0..CHUNK_SIZE {
                     let mut position = IVec3::ZERO;
                     position[axis] = depth;
                     position[u_axis] = u;
                     position[v_axis] = v;
-                    let material = padded.get(position);
-                    let key = if material != 0 && padded.get(position + normal) == 0 {
+                    let color = padded.get(position);
+                    let key = if color != 0 && padded.get(position + normal) == 0 {
                         let ao = |su: i32, sv: i32| -> u32 {
                             let outside = position + normal;
                             let side_u = padded.get(outside + u_dir * su) != 0;
@@ -82,7 +82,7 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
                             }
                         };
                         let ao = ao(-1, -1) | ao(1, -1) << 2 | ao(1, 1) << 4 | ao(-1, 1) << 6;
-                        u32::from(material) | ao << 8 | 1 << 16
+                        u32::from(color) | ao << 8 | 1 << 16
                     } else {
                         0
                     };
@@ -141,7 +141,7 @@ fn push_quad(mesh: &mut ChunkMesh, corner: Vec3, u_span: IVec3, v_span: IVec3, f
         debug_assert!(false, "chunk mesh exceeds u32 vertex indices");
         return;
     };
-    let material = key & 0xff;
+    let color = key & 0xff;
     let ao = [(key >> 8) & 3, (key >> 10) & 3, (key >> 12) & 3, (key >> 14) & 3];
     let u_span = u_span.as_vec3();
     let v_span = v_span.as_vec3();
@@ -149,7 +149,7 @@ fn push_quad(mesh: &mut ChunkMesh, corner: Vec3, u_span: IVec3, v_span: IVec3, f
     for (position, ao) in corners.iter().zip(ao) {
         mesh.vertices.push(MeshVertex {
             position: position.to_array(),
-            packed: face.index() | ao << 3 | material << 8,
+            packed: face.index() | ao << 3 | color << 8,
         });
     }
     // Corners run counter-clockwise seen from the positive side; flip for negative faces. Split along the
@@ -174,7 +174,7 @@ fn slot(u: i32, v: i32) -> usize {
     usize::try_from(u + v * CHUNK_SIZE).unwrap_or(0)
 }
 
-/// The chunk plus a one-voxel border from its 26 neighbours, as raw Material numbers (0 = empty).
+/// The chunk plus a one-voxel border from its 26 neighbours, as raw Color numbers (0 = empty).
 struct PaddedChunk {
     voxels: Box<[u8]>,
 }
@@ -201,10 +201,10 @@ impl PaddedChunk {
                     let neighbour = neighbour_slot(chunk_offset).and_then(|slot| neighbours[slot]);
                     let Some(chunk) = neighbour else { continue };
                     let voxel = chunk.get(local.rem_euclid(IVec3::splat(CHUNK_SIZE)));
-                    if let (Some(material), Some(slot)) =
+                    if let (Some(color), Some(slot)) =
                         (voxel, padded_index(local).and_then(|index| voxels.get_mut(index)))
                     {
-                        *slot = material.get();
+                        *slot = color.get();
                     }
                 }
             }
@@ -237,7 +237,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::palette::MaterialId;
+    use crate::palette::ColorId;
 
     fn exposed_faces(shape: &Shape, coord: ChunkCoord) -> u32 {
         let mut count = 0;
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn single_voxel_has_six_quads() {
         let mut shape = Shape::new();
-        shape.set(IVec3::new(4, 4, 4), MaterialId::new(1));
+        shape.set(IVec3::new(4, 4, 4), ColorId::new(1));
         let mut mesh = ChunkMesh::default();
         mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &mut mesh);
         assert_eq!(mesh.vertices.len(), 24);
@@ -284,7 +284,7 @@ mod tests {
         let mut shape = Shape::new();
         for x in 0..8 {
             for z in 0..8 {
-                shape.set(IVec3::new(x, 0, z), MaterialId::new(1));
+                shape.set(IVec3::new(x, 0, z), ColorId::new(1));
             }
         }
         let mut mesh = ChunkMesh::default();
@@ -298,8 +298,8 @@ mod tests {
             voxels in prop::collection::vec((0..40_i32, 0..6_i32, 0..6_i32, 1..4_u8), 1..300)
         ) {
             let mut shape = Shape::new();
-            for (x, y, z, material) in voxels {
-                shape.set(IVec3::new(x - 4, y, z), MaterialId::new(material));
+            for (x, y, z, color) in voxels {
+                shape.set(IVec3::new(x - 4, y, z), ColorId::new(color));
             }
             let mut mesh = ChunkMesh::default();
             for coord in [ChunkCoord(IVec3::ZERO), ChunkCoord(IVec3::new(1, 0, 0)), ChunkCoord(IVec3::new(-1, 0, 0))] {

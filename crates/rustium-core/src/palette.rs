@@ -6,11 +6,11 @@
 
 use std::num::NonZeroU8;
 
-/// Index of a [`Material`] in the Palette; voxels store it in one byte (0 means empty).
+/// Index of a [`Color`] in the Palette; voxels store it in one byte (0 means empty).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MaterialId(NonZeroU8);
+pub struct ColorId(NonZeroU8);
 
-impl MaterialId {
+impl ColorId {
     /// The first Palette entry, which every Palette has.
     pub const FIRST: Self = Self(NonZeroU8::MIN);
 
@@ -30,82 +30,78 @@ impl MaterialId {
 }
 
 /// A Palette entry: a base color plus the index of the [`MaterialGraph`](crate::MaterialGraph) shading it.
-///
-/// ponytail: a later milestone renames this to `Color` and `MaterialId` to `ColorId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Material {
+pub struct Color {
     /// Base color as 8-bit sRGB.
     pub color: [u8; 3],
     /// Index into the Scene's material graphs; 0 is the Default material.
     pub graph: u32,
 }
 
-impl Material {
+impl Color {
     /// A Color of `color` shaded by the Default material.
     pub fn new(color: [u8; 3]) -> Self {
         Self { color, graph: 0 }
     }
 }
 
-/// The ordered list of up to [`Palette::MAX_LEN`] Materials a Scene can use.
+/// The ordered list of up to [`Palette::MAX_LEN`] Colors a Scene can use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Palette {
-    materials: Vec<Material>,
+    colors: Vec<Color>,
 }
 
 impl Palette {
-    /// Most Materials one Palette can hold.
+    /// Most Colors one Palette can hold.
     pub const MAX_LEN: usize = 255;
 
     /// Changes the color of `id`; returns whether anything changed.
-    pub(crate) fn set_color(&mut self, id: MaterialId, color: [u8; 3]) -> bool {
-        match self.materials.get_mut(id.slot()) {
-            Some(material) if material.color != color => {
-                material.color = color;
+    pub(crate) fn set_color(&mut self, id: ColorId, color: [u8; 3]) -> bool {
+        match self.colors.get_mut(id.slot()) {
+            Some(entry) if entry.color != color => {
+                entry.color = color;
                 true
             }
             _ => false,
         }
     }
 
-    /// Material for `id`, if the Palette has that many entries.
-    pub fn get(&self, id: MaterialId) -> Option<&Material> {
-        self.materials.get(id.slot())
+    /// Color for `id`, if the Palette has that many entries.
+    pub fn get(&self, id: ColorId) -> Option<&Color> {
+        self.colors.get(id.slot())
     }
 
-    /// Mutable access to the Material for `id`; only Commands change the Palette.
-    pub(crate) fn get_mut(&mut self, id: MaterialId) -> Option<&mut Material> {
-        self.materials.get_mut(id.slot())
+    /// Mutable access to the Color for `id`; only Commands change the Palette.
+    pub(crate) fn get_mut(&mut self, id: ColorId) -> Option<&mut Color> {
+        self.colors.get_mut(id.slot())
     }
 
-    /// Number of Materials.
+    /// Number of Colors.
     pub fn len(&self) -> usize {
-        self.materials.len()
+        self.colors.len()
     }
 
-    /// Whether the Palette has no Materials.
+    /// Whether the Palette has no Colors.
     pub fn is_empty(&self) -> bool {
-        self.materials.is_empty()
+        self.colors.is_empty()
     }
 
-    /// Every Material with its id, in Palette order.
-    pub fn iter(&self) -> impl Iterator<Item = (MaterialId, &Material)> {
-        (1..=u8::MAX).filter_map(MaterialId::new).zip(&self.materials)
+    /// Every Color with its id, in Palette order.
+    pub fn iter(&self) -> impl Iterator<Item = (ColorId, &Color)> {
+        (1..=u8::MAX).filter_map(ColorId::new).zip(&self.colors)
     }
 
-    /// The Material whose color is closest to `color`.
-    pub fn nearest(&self, color: [u8; 3]) -> Option<MaterialId> {
-        let distance = |material: &Material| -> i32 {
-            material
+    /// The Color whose base color is closest to `color`.
+    pub fn nearest(&self, color: [u8; 3]) -> Option<ColorId> {
+        let distance = |entry: &Color| -> i32 {
+            entry
                 .color
                 .iter()
                 .zip(color)
                 .map(|(a, b)| (i32::from(*a) - i32::from(b)).pow(2))
                 .sum()
         };
-        self.iter()
-            .min_by_key(|(_, material)| distance(material))
-            .map(|(id, _)| id)
+        self.iter().min_by_key(|(_, entry)| distance(entry)).map(|(id, _)| id)
     }
 }
 
@@ -124,16 +120,16 @@ impl Default for Palette {
             (0.82, 0.38),
             (0.78, 0.24),
         ];
-        let mut materials = Vec::with_capacity(96);
+        let mut colors = Vec::with_capacity(96);
         for value in GREYS {
-            materials.push(Material::new(hsv_to_rgb(0.0, 0.0, value)));
+            colors.push(Color::new(hsv_to_rgb(0.0, 0.0, value)));
         }
         for hue in HUES {
             for (saturation, value) in SHADES {
-                materials.push(Material::new(hsv_to_rgb(hue, saturation, value)));
+                colors.push(Color::new(hsv_to_rgb(hue, saturation, value)));
             }
         }
-        Self { materials }
+        Self { colors }
     }
 }
 
@@ -154,14 +150,12 @@ mod tests {
     fn default_palette_has_96_colors_starting_with_light_grey() {
         let palette = Palette::default();
         assert_eq!(palette.len(), 96);
-        let first = MaterialId::new(1)
-            .and_then(|id| palette.get(id))
-            .map(|material| material.color);
+        let first = ColorId::new(1).and_then(|id| palette.get(id)).map(|color| color.color);
         assert_eq!(first, Some([245, 245, 245]));
     }
 
     #[test]
-    fn material_zero_does_not_exist() {
-        assert_eq!(MaterialId::new(0), None);
+    fn color_zero_does_not_exist() {
+        assert_eq!(ColorId::new(0), None);
     }
 }

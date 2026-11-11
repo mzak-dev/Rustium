@@ -4,7 +4,7 @@ use crate::edit::{Edit, EditKind, Recorder};
 use crate::error::Error;
 use crate::ids::{NodeId, ShapeId};
 use crate::material_graph::{MaterialGraph, SurfaceConstants};
-use crate::palette::MaterialId;
+use crate::palette::ColorId;
 use crate::raycast::RayHit;
 use crate::scene::Scene;
 use crate::scene_ops;
@@ -20,7 +20,7 @@ pub enum VoxelTool {
     Attach,
     /// Removes voxels around the hit voxel.
     Erase,
-    /// Changes the Material of existing voxels around the hit voxel.
+    /// Changes the Color of existing voxels around the hit voxel.
     Paint,
 }
 
@@ -47,8 +47,8 @@ pub enum Command {
         hit: RayHit,
         /// Where a Line or Box gesture ends; `None` means the same as `hit`.
         end: Option<RayHit>,
-        /// Material for Attach and Paint; ignored by Erase.
-        material: MaterialId,
+        /// Color for Attach and Paint; ignored by Erase.
+        color: ColorId,
         /// Reflections applied to every changed cell.
         mirror: Mirror,
     },
@@ -60,8 +60,8 @@ pub enum Command {
         mode: FillMode,
         /// The clicked voxel face.
         hit: RayHit,
-        /// Material to fill with.
-        material: MaterialId,
+        /// Color to fill with.
+        color: ColorId,
         /// Reflections applied to every changed cell.
         mirror: Mirror,
     },
@@ -178,7 +178,7 @@ pub enum Command {
     /// Points a Palette entry at a material graph.
     AssignGraph {
         /// The Palette entry.
-        id: MaterialId,
+        id: ColorId,
         /// Index of the graph; 0 is the Default material.
         graph: u32,
     },
@@ -191,9 +191,9 @@ pub enum Command {
         voxels: Vec<(IVec3, Voxel)>,
     },
     /// Changes the base color of one Palette entry.
-    SetMaterialColor {
+    SetColor {
         /// Palette entry to change.
-        material: MaterialId,
+        id: ColorId,
         /// New base color as 8-bit sRGB.
         color: [u8; 3],
     },
@@ -203,7 +203,7 @@ pub enum Command {
 ///
 /// # Errors
 ///
-/// [`Error::UnknownMaterial`] when the Material is not in the Palette, [`Error::BrushSize`] when the brush is
+/// [`Error::UnknownColor`] when the Color is not in the Palette, [`Error::BrushSize`] when the brush is
 /// empty or larger than [`Brush::MAX_SIZE`], [`Error::FillTooLarge`] for an oversized 3D Fill, and the Node errors
 /// ([`Error::UnknownNode`], [`Error::NotAModel`], [`Error::NotAGroup`], [`Error::ModelUnavailable`],
 /// [`Error::RootProtected`], [`Error::MoveIntoSelf`]) when a Command names a Node it cannot be applied to, and
@@ -217,7 +217,7 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
             brush,
             hit,
             end,
-            material,
+            color,
             mirror,
         } => apply_brush(
             scene,
@@ -225,16 +225,16 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
             *tool,
             *brush,
             (*hit, end.unwrap_or(*hit)),
-            *material,
+            *color,
             *mirror,
         ),
         Command::Fill {
             model,
             mode,
             hit,
-            material,
+            color,
             mirror,
-        } => apply_fill(scene, *model, *mode, *hit, *material, *mirror),
+        } => apply_fill(scene, *model, *mode, *hit, *color, *mirror),
         Command::MoveVoxels {
             model,
             selection,
@@ -257,7 +257,7 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::EditGraph { index, surface } => edit_graph(scene, *index, *surface),
         Command::AssignGraph { id, graph } => assign_graph(scene, *id, *graph),
         Command::SetVoxels { model, voxels } => apply_set_voxels(scene, *model, voxels),
-        Command::SetMaterialColor { material, color } => apply_set_color(scene, *material, *color),
+        Command::SetColor { id, color } => apply_set_color(scene, *id, *color),
     }
 }
 
@@ -281,8 +281,8 @@ fn apply_set_voxels(scene: &mut Scene, model: NodeId, voxels: &[(IVec3, Voxel)])
     }
     for (position, voxel) in voxels {
         check_position(*position)?;
-        if let Some(material) = voxel {
-            check_material(scene, *material)?;
+        if let Some(color) = voxel {
+            check_color(scene, *color)?;
         }
     }
     let mut rec = Recorder::new(scene);
@@ -292,10 +292,10 @@ fn apply_set_voxels(scene: &mut Scene, model: NodeId, voxels: &[(IVec3, Voxel)])
     Ok(rec.finish(EditKind::SetVoxels))
 }
 
-fn apply_set_color(scene: &mut Scene, material: MaterialId, color: [u8; 3]) -> Result<Option<Edit>, Error> {
-    check_material(scene, material)?;
+fn apply_set_color(scene: &mut Scene, id: ColorId, color: [u8; 3]) -> Result<Option<Edit>, Error> {
+    check_color(scene, id)?;
     let before = snapshot(scene);
-    if !scene.palette.set_color(material, color) {
+    if !scene.palette.set_color(id, color) {
         return Ok(None);
     }
     Ok(Some(Edit::materials_change(EditKind::SetColor, scene, before)))
@@ -334,12 +334,12 @@ fn edit_graph(scene: &mut Scene, index: u32, surface: SurfaceConstants) -> Resul
     Ok(Some(Edit::materials_change(EditKind::EditGraph, scene, before)))
 }
 
-fn assign_graph(scene: &mut Scene, id: MaterialId, graph: u32) -> Result<Option<Edit>, Error> {
+fn assign_graph(scene: &mut Scene, id: ColorId, graph: u32) -> Result<Option<Edit>, Error> {
     if usize::try_from(graph).map_or(true, |slot| slot >= scene.material_graphs.len()) {
         return Err(Error::UnknownGraph(graph));
     }
     let before = snapshot(scene);
-    let color = scene.palette.get_mut(id).ok_or(Error::UnknownMaterial(id.get()))?;
+    let color = scene.palette.get_mut(id).ok_or(Error::UnknownColor(id.get()))?;
     if color.graph == graph {
         return Ok(None);
     }
@@ -351,16 +351,16 @@ fn assign_graph(scene: &mut Scene, id: MaterialId, graph: u32) -> Result<Option<
 #[derive(Debug, Clone, Copy)]
 enum Op {
     /// Fill the cell when it is empty.
-    Place(MaterialId),
+    Place(ColorId),
     /// Empty the cell.
     Remove,
-    /// Change the Material when the cell is filled.
-    Recolor(MaterialId),
+    /// Change the Color when the cell is filled.
+    Recolor(ColorId),
 }
 
-fn check_material(scene: &Scene, material: MaterialId) -> Result<(), Error> {
-    if scene.palette().get(material).is_none() {
-        return Err(Error::UnknownMaterial(material.get()));
+fn check_color(scene: &Scene, color: ColorId) -> Result<(), Error> {
+    if scene.palette().get(color).is_none() {
+        return Err(Error::UnknownColor(color.get()));
     }
     Ok(())
 }
@@ -370,9 +370,9 @@ fn apply_to_cells(rec: &mut Recorder<'_>, shape: ShapeId, op: Op, cells: &[IVec3
         mirror.for_each_image(*cell, |image| {
             let current = rec.voxel(shape, image);
             match op {
-                Op::Place(material) if current.is_none() => rec.set(shape, image, Some(material)),
+                Op::Place(color) if current.is_none() => rec.set(shape, image, Some(color)),
                 Op::Remove => rec.set(shape, image, None),
-                Op::Recolor(material) if current.is_some() => rec.set(shape, image, Some(material)),
+                Op::Recolor(color) if current.is_some() => rec.set(shape, image, Some(color)),
                 Op::Place(_) | Op::Recolor(_) => {}
             }
         });
@@ -385,11 +385,11 @@ fn apply_brush(
     tool: VoxelTool,
     brush: Brush,
     (from, to): (RayHit, RayHit),
-    material: MaterialId,
+    color: ColorId,
     mirror: Mirror,
 ) -> Result<Option<Edit>, Error> {
     let shape = scene_ops::editable_shape(scene, model)?;
-    check_material(scene, material)?;
+    check_color(scene, color)?;
     check_position(from.voxel)?;
     check_position(to.voxel)?;
     if brush.size == 0 || brush.size > Brush::MAX_SIZE {
@@ -403,9 +403,9 @@ fn apply_brush(
         tools::brush_positions(shape, tool, brush, from, to)
     };
     let (op, kind) = match tool {
-        VoxelTool::Attach => (Op::Place(material), EditKind::Attach),
+        VoxelTool::Attach => (Op::Place(color), EditKind::Attach),
         VoxelTool::Erase => (Op::Remove, EditKind::Erase),
-        VoxelTool::Paint => (Op::Recolor(material), EditKind::Paint),
+        VoxelTool::Paint => (Op::Recolor(color), EditKind::Paint),
     };
     let mut rec = Recorder::new(scene);
     apply_to_cells(&mut rec, shape, op, &cells, mirror);
@@ -417,16 +417,16 @@ fn apply_fill(
     model: NodeId,
     mode: FillMode,
     hit: RayHit,
-    material: MaterialId,
+    color: ColorId,
     mirror: Mirror,
 ) -> Result<Option<Edit>, Error> {
     let shape = scene_ops::editable_shape(scene, model)?;
-    check_material(scene, material)?;
+    check_color(scene, color)?;
     let (cells, op) = {
         let shape = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
         match mode {
-            FillMode::Surface => (tools::face_region(shape, hit), Op::Recolor(material)),
-            FillMode::Volume => (tools::fill_volume(shape, hit)?, Op::Place(material)),
+            FillMode::Surface => (tools::face_region(shape, hit), Op::Recolor(color)),
+            FillMode::Volume => (tools::fill_volume(shape, hit)?, Op::Place(color)),
         }
     };
     let mut rec = Recorder::new(scene);
@@ -443,15 +443,15 @@ fn move_voxels(scene: &mut Scene, model: NodeId, selection: &Selection, offset: 
         let source = scene.shape(shape).ok_or(Error::UnknownNode(model))?;
         selection
             .iter()
-            .filter_map(|cell| source.get(cell).map(|material| (cell, material)))
+            .filter_map(|cell| source.get(cell).map(|color| (cell, color)))
             .collect()
     };
     let mut rec = Recorder::new(scene);
     for (cell, _) in &moving {
         rec.set(shape, *cell, None);
     }
-    for (cell, material) in &moving {
-        rec.set(shape, *cell + offset, Some(*material));
+    for (cell, color) in &moving {
+        rec.set(shape, *cell + offset, Some(*color));
     }
     Ok(rec.finish(EditKind::MoveVoxels))
 }
@@ -467,8 +467,8 @@ mod tests {
     use crate::tools::BrushKind;
     use crate::{CHUNK_SIZE, ChunkCoord};
 
-    fn material(number: u8) -> MaterialId {
-        MaterialId::new(number).unwrap()
+    fn color_id(number: u8) -> ColorId {
+        ColorId::new(number).unwrap()
     }
 
     fn first_model(scene: &Scene) -> NodeId {
@@ -493,7 +493,7 @@ mod tests {
             },
             hit: ground_hit(at),
             end: None,
-            material: material(1),
+            color: color_id(1),
             mirror: Mirror::default(),
         }
     }
@@ -565,21 +565,21 @@ mod tests {
         let command = Command::SetVoxels {
             model,
             voxels: vec![
-                (IVec3::ZERO, Some(material(3))),
-                (far, Some(material(4))),
+                (IVec3::ZERO, Some(color_id(3))),
+                (far, Some(color_id(4))),
                 (IVec3::new(1, 0, 0), None),
             ],
         };
         history.push(apply(&mut scene, &command).unwrap().unwrap());
         let shape = |scene: &Scene| scene.model_shape(model).unwrap().1.clone();
-        assert_eq!(shape(&scene).get(far), Some(material(4)));
+        assert_eq!(shape(&scene).get(far), Some(color_id(4)));
         assert_eq!(history.done().count(), 1);
         history.undo(&mut scene);
         assert!(shape(&scene).get(far).is_none());
         assert!(shape(&scene).get(IVec3::ZERO).is_none());
         assert_eq!(shape(&scene).volume(), None);
         history.redo(&mut scene);
-        assert_eq!(shape(&scene).get(IVec3::ZERO), Some(material(3)));
+        assert_eq!(shape(&scene).get(IVec3::ZERO), Some(color_id(3)));
     }
 
     #[test]
@@ -588,13 +588,13 @@ mod tests {
         let model = first_model(&scene);
         let command = Command::SetVoxels {
             model,
-            voxels: vec![(IVec3::ZERO, Some(material(1))), (IVec3::ONE, Some(material(200)))],
+            voxels: vec![(IVec3::ZERO, Some(color_id(1))), (IVec3::ONE, Some(color_id(200)))],
         };
-        assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownMaterial(200))));
+        assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownColor(200))));
         assert!(scene.model_shape(model).unwrap().1.get(IVec3::ZERO).is_none());
         let far = Command::SetVoxels {
             model,
-            voxels: vec![(IVec3::new(COORD_LIMIT + 1, 0, 0), Some(material(1)))],
+            voxels: vec![(IVec3::new(COORD_LIMIT + 1, 0, 0), Some(color_id(1)))],
         };
         assert!(matches!(apply(&mut scene, &far), Err(Error::OutOfRange { .. })));
     }
@@ -604,7 +604,7 @@ mod tests {
         let mut scene = Scene::new();
         let command = Command::SetVoxels {
             model: NodeId::ROOT,
-            voxels: vec![(IVec3::ZERO, Some(material(1)))],
+            voxels: vec![(IVec3::ZERO, Some(color_id(1)))],
         };
         assert!(matches!(apply(&mut scene, &command), Err(Error::NotAModel(_))));
     }
@@ -623,12 +623,9 @@ mod tests {
     fn palette_color_change_undoes_and_redoes() {
         let mut scene = Scene::new();
         let mut history = History::new(10);
-        let id = material(2);
+        let id = color_id(2);
         let original = scene.palette().get(id).unwrap().color;
-        let command = Command::SetMaterialColor {
-            material: id,
-            color: [1, 2, 3],
-        };
+        let command = Command::SetColor { id, color: [1, 2, 3] };
         let edit = apply(&mut scene, &command).unwrap().unwrap();
         assert!(edit.touches_materials());
         history.push(edit);
@@ -647,10 +644,10 @@ mod tests {
         let mut history = History::new(10);
         let voxels = Command::SetVoxels {
             model,
-            voxels: vec![(IVec3::ZERO, Some(material(1)))],
+            voxels: vec![(IVec3::ZERO, Some(color_id(1)))],
         };
-        let color = Command::SetMaterialColor {
-            material: material(1),
+        let color = Command::SetColor {
+            id: color_id(1),
             color: [9, 9, 9],
         };
         let first = apply(&mut scene, &voxels).unwrap().unwrap();
@@ -658,18 +655,18 @@ mod tests {
         history.push(first.merge(second));
         history.undo(&mut scene);
         assert!(scene.model_shape(model).unwrap().1.get(IVec3::ZERO).is_none());
-        assert_ne!(scene.palette().get(material(1)).unwrap().color, [9, 9, 9]);
+        assert_ne!(scene.palette().get(color_id(1)).unwrap().color, [9, 9, 9]);
     }
 
     #[test]
-    fn unknown_material_is_rejected() {
+    fn unknown_color_is_rejected() {
         let mut scene = Scene::new();
         let model = first_model(&scene);
         let mut command = attach_command(model, IVec3::ZERO, 1);
-        if let Command::ApplyBrush { material, .. } = &mut command {
-            *material = self::material(200);
+        if let Command::ApplyBrush { color, .. } = &mut command {
+            *color = self::color_id(200);
         }
-        assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownMaterial(200))));
+        assert!(matches!(apply(&mut scene, &command), Err(Error::UnknownColor(200))));
     }
 
     #[test]
@@ -724,13 +721,13 @@ mod tests {
                 face: Face::PosY,
                 target: HitTarget::Voxel,
             },
-            material: material(40),
+            color: color_id(40),
             mirror: Mirror::default(),
         };
         apply(&mut scene, &command).unwrap().unwrap();
         let shape = shape_of(&scene, model);
-        assert_eq!(shape.get(IVec3::new(0, 2, 1)), Some(material(40)));
-        assert_eq!(shape.get(IVec3::new(0, 1, 1)), Some(material(1)));
+        assert_eq!(shape.get(IVec3::new(0, 2, 1)), Some(color_id(40)));
+        assert_eq!(shape.get(IVec3::new(0, 1, 1)), Some(color_id(1)));
     }
 
     #[test]
@@ -748,7 +745,7 @@ mod tests {
                 face: Face::PosY,
                 target: HitTarget::Voxel,
             },
-            material: material(7),
+            color: color_id(7),
             mirror: Mirror::default(),
         };
         apply(&mut scene, &command).unwrap().unwrap();
@@ -833,8 +830,8 @@ mod material_graph_tests {
     use super::*;
     use crate::edit::History;
 
-    fn material(number: u8) -> MaterialId {
-        MaterialId::new(number).unwrap()
+    fn color_id(number: u8) -> ColorId {
+        ColorId::new(number).unwrap()
     }
 
     fn glow() -> SurfaceConstants {
@@ -874,20 +871,20 @@ mod material_graph_tests {
             .unwrap(),
         );
         let assign = Command::AssignGraph {
-            id: material(5),
+            id: color_id(5),
             graph: 1,
         };
         let edit = apply(&mut scene, &assign).unwrap().unwrap();
         assert!(edit.touches_materials());
         history.push(edit);
-        assert_eq!(scene.palette().get(material(5)).unwrap().graph, 1);
+        assert_eq!(scene.palette().get(color_id(5)).unwrap().graph, 1);
         assert!(
             (scene.material_graphs()[1].surface.roughness - 1.0).abs() < f32::EPSILON,
             "constants are clamped"
         );
 
         history.undo(&mut scene);
-        assert_eq!(scene.palette().get(material(5)).unwrap().graph, 0);
+        assert_eq!(scene.palette().get(color_id(5)).unwrap().graph, 0);
         history.undo(&mut scene);
         assert!(scene.material_graphs()[1].surface.emission_strength.abs() < f32::EPSILON);
         history.undo(&mut scene);
@@ -942,7 +939,7 @@ mod material_graph_tests {
         };
         assert!(matches!(apply(&mut scene, &edit_missing), Err(Error::UnknownGraph(9))));
         let assign_missing = Command::AssignGraph {
-            id: material(1),
+            id: color_id(1),
             graph: 3,
         };
         assert!(matches!(
@@ -950,12 +947,12 @@ mod material_graph_tests {
             Err(Error::UnknownGraph(3))
         ));
         let assign_unknown_color = Command::AssignGraph {
-            id: material(200),
+            id: color_id(200),
             graph: 0,
         };
         assert!(matches!(
             apply(&mut scene, &assign_unknown_color),
-            Err(Error::UnknownMaterial(200))
+            Err(Error::UnknownColor(200))
         ));
     }
 
@@ -963,7 +960,7 @@ mod material_graph_tests {
     fn assigning_the_same_graph_records_nothing() {
         let mut scene = Scene::new();
         let assign = Command::AssignGraph {
-            id: material(1),
+            id: color_id(1),
             graph: 0,
         };
         assert!(apply(&mut scene, &assign).unwrap().is_none());

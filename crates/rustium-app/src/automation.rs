@@ -3,7 +3,7 @@
 
 use glam::IVec3;
 use rustium_core::{
-    Brush, BrushKind, CHUNK_SIZE, ChunkCoord, Command, Face, HitTarget, MaterialId, Mirror, NodeId, NodeKind, RayHit,
+    Brush, BrushKind, CHUNK_SIZE, ChunkCoord, ColorId, Command, Face, HitTarget, Mirror, NodeId, NodeKind, RayHit,
     Shape, Volume, VoxelTool,
 };
 use rustium_mcp::{BrushTool, FaceDirection, Reply, Request, VoxelWrite};
@@ -30,11 +30,11 @@ pub(crate) fn handle(editor: &mut Editor, request: Request) -> Reply {
             voxel,
             face,
             ground,
-            material,
-        } => apply_brush(editor, model, tool, size, voxel, face, ground, material),
-        Request::SetPaletteColor { material, color } => {
-            let material = material_id(material)?;
-            let changed = execute(editor, &Command::SetMaterialColor { material, color })?;
+            color,
+        } => apply_brush(editor, model, tool, size, voxel, face, ground, color),
+        Request::SetPaletteColor { id, color } => {
+            let id = color_id(id)?;
+            let changed = execute(editor, &Command::SetColor { id, color })?;
             Ok(json!({ "changed": changed }))
         }
         Request::RunScript { model, source } => {
@@ -79,8 +79,8 @@ fn model_shape(editor: &Editor, model: Option<u32>) -> Result<&Shape, String> {
         .ok_or_else(|| format!("node {} has no shape", id.get()))
 }
 
-fn material_id(number: u8) -> Result<MaterialId, String> {
-    MaterialId::new(number).ok_or_else(|| "material numbers start at 1".to_owned())
+fn color_id(number: u8) -> Result<ColorId, String> {
+    ColorId::new(number).ok_or_else(|| "color numbers start at 1".to_owned())
 }
 
 fn vec3(position: [i32; 3]) -> IVec3 {
@@ -144,11 +144,11 @@ fn get_voxels(editor: &Editor, model: Option<u32>, positions: &[[i32; 3]]) -> Re
             positions.len()
         ));
     }
-    let materials: Vec<Option<u8>> = positions
+    let colors: Vec<Option<u8>> = positions
         .iter()
-        .map(|position| shape.get(vec3(*position)).map(MaterialId::get))
+        .map(|position| shape.get(vec3(*position)).map(ColorId::get))
         .collect();
-    Ok(json!({ "materials": materials }))
+    Ok(json!({ "colors": colors }))
 }
 
 /// Filled voxels in the box, in chunk order then local order, so a truncated answer is stable.
@@ -179,12 +179,12 @@ fn get_region(editor: &Editor, model: Option<u32>, min: [i32; 3], max: [i32; 3],
                     if position.cmplt(low).any() || position.cmpgt(high).any() {
                         continue;
                     }
-                    if let Some(material) = chunk.get(local) {
+                    if let Some(color) = chunk.get(local) {
                         if voxels.len() >= limit {
                             truncated = true;
                             break 'chunks;
                         }
-                        voxels.push(json!([position.x, position.y, position.z, material.get()]));
+                        voxels.push(json!([position.x, position.y, position.z, color.get()]));
                     }
                 }
             }
@@ -198,9 +198,9 @@ fn get_palette(editor: &Editor) -> Value {
         .scene
         .palette()
         .iter()
-        .map(|(id, material)| {
-            let [r, g, b] = material.color;
-            json!({ "material": id.get(), "hex": format!("#{r:02x}{g:02x}{b:02x}"), "rgb": material.color })
+        .map(|(id, color)| {
+            let [r, g, b] = color.color;
+            json!({ "color": id.get(), "hex": format!("#{r:02x}{g:02x}{b:02x}"), "rgb": color.color })
         })
         .collect();
     json!({ "palette": entries })
@@ -210,8 +210,8 @@ fn set_voxels(editor: &mut Editor, model: Option<u32>, writes: &[VoxelWrite]) ->
     let model = target_model(editor, model)?;
     let mut voxels = Vec::with_capacity(writes.len());
     for write in writes {
-        let material = write.material.map(material_id).transpose()?;
-        voxels.push((vec3(write.position), material));
+        let color = write.color.map(color_id).transpose()?;
+        voxels.push((vec3(write.position), color));
     }
     let count = voxels.len();
     let changed = execute(editor, &Command::SetVoxels { model, voxels })?;
@@ -227,7 +227,7 @@ fn apply_brush(
     voxel: [i32; 3],
     face: FaceDirection,
     ground: bool,
-    material: u8,
+    color: u8,
 ) -> Reply {
     let command = Command::ApplyBrush {
         model: target_model(editor, model)?,
@@ -254,7 +254,7 @@ fn apply_brush(
             },
             target: if ground { HitTarget::Ground } else { HitTarget::Voxel },
         },
-        material: material_id(material)?,
+        color: color_id(color)?,
     };
     let changed = execute(editor, &command)?;
     Ok(json!({ "changed": changed }))
@@ -275,9 +275,9 @@ mod tests {
     fn set_in(editor: &mut Editor, model: Option<u32>, voxels: &[([i32; 3], Option<u8>)]) -> Reply {
         let voxels = voxels
             .iter()
-            .map(|(position, material)| VoxelWrite {
+            .map(|(position, color)| VoxelWrite {
                 position: *position,
-                material: *material,
+                color: *color,
             })
             .collect();
         handle(editor, Request::SetVoxels { model, voxels })
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(reply["changed"], true);
         assert_eq!(editor.history.done().count(), 1);
         assert_eq!(
-            focus_shape(&editor).get(IVec3::new(40, 1, 2)).map(MaterialId::get),
+            focus_shape(&editor).get(IVec3::new(40, 1, 2)).map(ColorId::get),
             Some(6)
         );
         let shape = editor.scene.model_shape(editor.focus).unwrap().0;
@@ -326,7 +326,7 @@ mod tests {
             "the Focus Model is untouched"
         );
         let placed = editor.scene.model_shape(other).unwrap().1.get(IVec3::ZERO);
-        assert_eq!(placed.map(MaterialId::get), Some(2));
+        assert_eq!(placed.map(ColorId::get), Some(2));
 
         let info = handle(&mut editor, Request::SceneInfo).unwrap();
         let children = info["tree"]["children"].as_array().unwrap();
@@ -380,7 +380,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(voxels["materials"], json!([5, null]));
+        assert_eq!(voxels["colors"], json!([5, null]));
 
         let region = handle(
             &mut editor,
@@ -435,7 +435,7 @@ mod tests {
                 voxel: [0, -1, 0],
                 face: FaceDirection::PosY,
                 ground: true,
-                material: 3,
+                color: 3,
             },
         )
         .unwrap();
@@ -452,7 +452,7 @@ mod tests {
         handle(
             &mut editor,
             Request::SetPaletteColor {
-                material: 2,
+                id: 2,
                 color: [1, 2, 3],
             },
         )
@@ -461,11 +461,8 @@ mod tests {
         assert!(!editor.take_palette_dirty());
         editor.undo();
         assert!(editor.take_palette_dirty(), "undo changes the palette too");
-        let id = MaterialId::new(2).unwrap();
-        assert_ne!(
-            editor.scene.palette().get(id).map(|material| material.color),
-            Some([1, 2, 3])
-        );
+        let id = ColorId::new(2).unwrap();
+        assert_ne!(editor.scene.palette().get(id).map(|color| color.color), Some([1, 2, 3]));
     }
 
     #[test]

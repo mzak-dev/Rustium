@@ -49,8 +49,8 @@ pub enum FaceDirection {
 pub struct VoxelWrite {
     /// Voxel position.
     pub position: [i32; 3],
-    /// Material number 1–255, or `None` to erase.
-    pub material: Option<u8>,
+    /// Color number 1–255, or `None` to erase.
+    pub color: Option<u8>,
 }
 
 /// What an MCP client asks the editor to do. The UI thread answers every request; the server never touches
@@ -59,7 +59,7 @@ pub struct VoxelWrite {
 pub enum Request {
     /// Voxel size, the Node tree, the Focus, counts and History state.
     SceneInfo,
-    /// The Material at each position of a Model.
+    /// The Color at each position of a Model.
     GetVoxels {
         /// The Model's node id; `None` means the Focus Model.
         model: Option<u32>,
@@ -100,13 +100,13 @@ pub enum Request {
         face: FaceDirection,
         /// Treat the hit as the ground plane instead of a voxel.
         ground: bool,
-        /// Material for Attach and Paint.
-        material: u8,
+        /// Color for Attach and Paint.
+        color: u8,
     },
     /// Changes one Palette color.
     SetPaletteColor {
         /// Palette entry, 1–255.
-        material: u8,
+        id: u8,
         /// New color as 8-bit sRGB.
         color: [u8; 3],
     },
@@ -264,10 +264,7 @@ mod tests {
                 Permission::EditVoxels,
             ),
             (
-                Request::SetPaletteColor {
-                    material: 1,
-                    color: [0; 3],
-                },
+                Request::SetPaletteColor { id: 1, color: [0; 3] },
                 Permission::EditPalette,
             ),
             (
@@ -321,11 +318,11 @@ mod tests {
                 .recv()
                 .unwrap()
                 .reply
-                .send(Err("material 9 is not in the palette".to_owned()))
+                .send(Err("color 9 is not in the palette".to_owned()))
                 .unwrap();
         });
         let error = bridge.call(Request::SceneInfo).await.unwrap_err();
-        assert!(error.contains("material 9"));
+        assert!(error.contains("color 9"));
         ui.join().unwrap();
     }
 }

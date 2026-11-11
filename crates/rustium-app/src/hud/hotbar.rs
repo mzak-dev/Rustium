@@ -2,7 +2,7 @@
 
 use egui::{Align2, Color32, Context, FontId, Id, Sense, Stroke, StrokeKind, vec2};
 use fluent_bundle::FluentValue;
-use rustium_core::MaterialId;
+use rustium_core::ColorId;
 
 use super::widgets::{self, Look};
 use super::{Glass, Hud, Intro, MARGIN, Place, island};
@@ -10,9 +10,9 @@ use crate::icons::Icon;
 use crate::settings::Motion;
 use crate::theme;
 
-fn color_of(hud: &Hud<'_>, id: MaterialId) -> Color32 {
-    hud.editor.scene.palette().get(id).map_or(Color32::BLACK, |material| {
-        let [r, g, b] = material.color;
+fn color_of(hud: &Hud<'_>, id: ColorId) -> Color32 {
+    hud.editor.scene.palette().get(id).map_or(Color32::BLACK, |color| {
+        let [r, g, b] = color.color;
         Color32::from_rgb(r, g, b)
     })
 }
@@ -35,7 +35,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
         |ui, hud| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let current = color_of(hud, hud.editor.material());
+                let current = color_of(hud, hud.editor.color());
                 let (area, _) = ui.allocate_exact_size(vec2(54.0, 40.0), Sense::hover());
                 let swatch = egui::Rect::from_center_size(area.center_top() + vec2(0.0, 13.0), vec2(48.0, 24.0));
                 ui.painter().rect(
@@ -132,8 +132,8 @@ fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
                     );
                 });
                 ui.add_space(4.0);
-                let ids: Vec<MaterialId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
-                let current = hud.editor.material();
+                let ids: Vec<ColorId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
+                let current = hud.editor.color();
                 egui::Frame::new()
                     .fill(Color32::from_black_alpha(128))
                     .corner_radius(4)

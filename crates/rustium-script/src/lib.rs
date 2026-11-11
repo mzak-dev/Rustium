@@ -5,13 +5,13 @@
 //!
 //! | Luau | Meaning |
 //! |---|---|
-//! | `scene.get(x, y, z)` | Material number (1–255) of a voxel, or `nil` when empty |
-//! | `scene.set(x, y, z, material)` | Places a voxel; `nil` or `0` erases |
+//! | `scene.get(x, y, z)` | Color number (1–255) of a voxel, or `nil` when empty |
+//! | `scene.set(x, y, z, color)` | Places a voxel; `nil` or `0` erases |
 //! | `scene.erase(x, y, z)` | Removes a voxel |
-//! | `scene.fill(x1, y1, z1, x2, y2, z2, material)` | Sets a whole box |
-//! | `palette.len()` | Number of Materials |
-//! | `palette.color(material)` | `r, g, b` of a Material |
-//! | `palette.nearest(r, g, b)` | Material closest to a color |
+//! | `scene.fill(x1, y1, z1, x2, y2, z2, color)` | Sets a whole box |
+//! | `palette.len()` | Number of Colors |
+//! | `palette.color(color)` | `r, g, b` of a Color |
+//! | `palette.nearest(r, g, b)` | Color closest to an RGB value |
 //! | `print(...)` | Appends a line to [`Output::log`] |
 //!
 //! Writes are buffered and applied at the end as a single [`Command::SetVoxels`], so a script that fails
@@ -66,7 +66,7 @@ use std::time::{Duration, Instant};
 
 use glam::IVec3;
 use mlua::{Lua, LuaOptions, MultiValue, StdLib, Value, VmState};
-use rustium_core::{COORD_LIMIT, Command, Edit, EditKind, MaterialId, NodeId, Scene, Voxel, apply};
+use rustium_core::{COORD_LIMIT, ColorId, Command, Edit, EditKind, NodeId, Scene, Voxel, apply};
 
 /// Why a script did not run to completion.
 #[derive(Debug, thiserror::Error)]
@@ -185,13 +185,13 @@ fn execute(
                     Some(voxel) => *voxel,
                     None => scene.model_shape(model).and_then(|(_, shape)| shape.get(position)),
                 };
-                Ok(voxel.map(MaterialId::get))
+                Ok(voxel.map(ColorId::get))
             })?,
         )?;
         scene_api.set(
             "set",
-            scope.create_function(|_, (x, y, z, material): (f64, f64, f64, Option<u8>)| {
-                let voxel = voxel(scene, material)?;
+            scope.create_function(|_, (x, y, z, color): (f64, f64, f64, Option<u8>)| {
+                let voxel = voxel(scene, color)?;
                 write(pending, max_voxels, position(x, y, z)?, voxel)
             })?,
         )?;
@@ -204,8 +204,8 @@ fn execute(
         scene_api.set(
             "fill",
             scope.create_function(
-                |_, (x1, y1, z1, x2, y2, z2, material): (f64, f64, f64, f64, f64, f64, Option<u8>)| {
-                    let voxel = voxel(scene, material)?;
+                |_, (x1, y1, z1, x2, y2, z2, color): (f64, f64, f64, f64, f64, f64, Option<u8>)| {
+                    let voxel = voxel(scene, color)?;
                     let (a, b) = (position(x1, y1, z1)?, position(x2, y2, z2)?);
                     let (min, max) = (a.min(b), a.max(b));
                     let size = (max - min + IVec3::ONE).as_i64vec3();
@@ -233,17 +233,17 @@ fn execute(
         palette_api.set(
             "color",
             scope.create_function(|_, number: u8| {
-                let material = MaterialId::new(number)
+                let color = ColorId::new(number)
                     .and_then(|id| scene.palette().get(id))
-                    .ok_or_else(|| mlua::Error::runtime(format!("material {number} is not in the palette")))?;
-                let [r, g, b] = material.color;
+                    .ok_or_else(|| mlua::Error::runtime(format!("color {number} is not in the palette")))?;
+                let [r, g, b] = color.color;
                 Ok((r, g, b))
             })?,
         )?;
         palette_api.set(
             "nearest",
             scope.create_function(|_, (r, g, b): (u8, u8, u8)| {
-                Ok(scene.palette().nearest([r, g, b]).map(MaterialId::get))
+                Ok(scene.palette().nearest([r, g, b]).map(ColorId::get))
             })?,
         )?;
         globals.set("palette", palette_api)?;
@@ -311,14 +311,14 @@ fn position(x: f64, y: f64, z: f64) -> mlua::Result<IVec3> {
     Ok(IVec3::new(axis(x)?, axis(y)?, axis(z)?))
 }
 
-/// `nil` and `0` mean empty; any other number must be a Material of the Palette.
-fn voxel(scene: &Scene, material: Option<u8>) -> mlua::Result<Voxel> {
-    let Some(id) = material.and_then(MaterialId::new) else {
+/// `nil` and `0` mean empty; any other number must be a Color of the Palette.
+fn voxel(scene: &Scene, color: Option<u8>) -> mlua::Result<Voxel> {
+    let Some(id) = color.and_then(ColorId::new) else {
         return Ok(None);
     };
     if scene.palette().get(id).is_none() {
         return Err(mlua::Error::runtime(format!(
-            "material {} is not in the palette",
+            "color {} is not in the palette",
             id.get()
         )));
     }
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(edit.kind(), EditKind::Script);
         history.push(edit);
         assert_eq!(history.done().count(), 1);
-        assert_eq!(voxel(&scene, IVec3::new(9, 9, 0)).map(MaterialId::get), Some(5));
+        assert_eq!(voxel(&scene, IVec3::new(9, 9, 0)).map(ColorId::get), Some(5));
         history.undo(&mut scene);
         assert!(voxel(&scene, IVec3::new(9, 9, 0)).is_none());
         assert_eq!(volume(&scene), None);

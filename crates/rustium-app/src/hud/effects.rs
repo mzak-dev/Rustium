@@ -2,14 +2,14 @@
 //! shortcuts and the popups (add node, frame label, color picker); the canvas, the islands and the inspector live
 //! in the sibling `effects_*` files.
 
-use egui::{Align2, Color32, Context, Id, Key, Modifiers, Order, Pos2, Rect, Vec2, vec2};
+use egui::{Align2, Color32, Context, Id, Key, Modifiers, Order, Pos2, Rect, Stroke, StrokeKind, Vec2, vec2};
 use rustium_core::{
     FrameId, GraphEdit, GraphNodeId, GraphNodeKind, InputRef, MaterialGraph, NodeCategory, OutputRef, ParamValue,
     SocketType,
 };
 
 use super::effects_canvas::{self, Target};
-use super::{Glass, Hud, Toast, effects_bars};
+use super::{Glass, Hud, Toast, effects_bars, widgets};
 use crate::keymap::Action;
 use crate::theme;
 
@@ -79,6 +79,8 @@ pub(crate) enum WireEnd {
 /// The search popup of the Add node action.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AddPopup {
+    /// Index of the highlighted row (arrow keys move it, Enter adds it).
+    pub(crate) selected: usize,
     /// Where it opened, in screen points; new nodes land at the same place.
     pub(crate) at: Pos2,
     pub(crate) query: String,
@@ -175,13 +177,40 @@ fn graph_index(hud: &Hud<'_>) -> u32 {
     u32::try_from(hud.ui.effects.graph).unwrap_or(0)
 }
 
+/// The name to show for Material `index`: the built-in Default is translated, the others are the user's text.
+pub(crate) fn material_name(hud: &Hud<'_>, index: usize, graph: &MaterialGraph) -> String {
+    if index == 0 {
+        hud.tr("material-default-name")
+    } else {
+        graph.name.clone()
+    }
+}
+
+/// A translated message for an error of a Material Command; errors without one keep the core's English text.
+pub(crate) fn error_text(hud: &Hud<'_>, error: &rustium_core::Error) -> String {
+    use rustium_core::{Error, GraphError};
+    let key = match error {
+        Error::Graph(GraphError::Cycle) => "graph-error-cycle",
+        Error::Graph(GraphError::OutputProtected) => "graph-error-output-protected",
+        Error::Graph(GraphError::SecondOutput(_)) => "graph-error-second-output",
+        Error::Graph(GraphError::WrongValue) => "graph-error-wrong-value",
+        Error::Graph(GraphError::TooManyNodes) => "graph-error-too-many-nodes",
+        Error::Graph(GraphError::TooManyFrames) => "graph-error-too-many-frames",
+        Error::DefaultMaterialLocked => "graph-error-default-locked",
+        Error::TooManyGraphs(_) => "graph-error-too-many-materials",
+        _ => return error.to_string(),
+    };
+    hud.tr(key)
+}
+
 /// Applies a graph edit to the edited Material. Errors become a toast. `merge` joins the gesture in progress.
 pub(crate) fn graph_edit(hud: &mut Hud<'_>, edit: GraphEdit, merge: bool) -> bool {
     let index = graph_index(hud);
     match hud.editor.edit_material(index, edit, merge) {
         Ok(changed) => changed,
         Err(error) => {
-            hud.ui.toast = Some(Toast::new(error.to_string(), true));
+            let text = error_text(hud, &error);
+            hud.ui.toast = Some(Toast::new(text, true));
             false
         }
     }
@@ -192,7 +221,8 @@ pub(crate) fn command(hud: &mut Hud<'_>, command: &rustium_core::Command) -> boo
     match hud.editor.execute_checked(command) {
         Ok(changed) => changed,
         Err(error) => {
-            hud.ui.toast = Some(Toast::new(error.to_string(), true));
+            let text = error_text(hud, &error);
+            hud.ui.toast = Some(Toast::new(text, true));
             false
         }
     }
@@ -340,6 +370,8 @@ pub(crate) fn duplicate_selection(hud: &mut Hud<'_>) {
         }
         applied += 1;
     }
+    hud.editor
+        .relabel_material_edit(rustium_core::EditKind::DuplicateGraphNodes);
     hud.editor.finish_material_edit();
     if applied < total {
         // A partial copy is worse than none: take back what was applied (the first edit adds a node, so a
@@ -428,10 +460,21 @@ pub(crate) fn free_area(screen: Rect, inspector_open: bool) -> Rect {
     } else {
         0.0
     };
-    Rect::from_min_max(
-        egui::pos2(screen.left() + 76.0, screen.top() + 70.0),
-        egui::pos2(screen.right() - right - 12.0, screen.bottom() - 92.0),
-    )
+    let top_left = egui::pos2(screen.left() + 76.0, screen.top() + 70.0);
+    let bottom_right = egui::pos2(screen.right() - right - 12.0, screen.bottom() - 92.0);
+    let preview = effects_bars::preview_island_rect(screen);
+    // The Preview island sits in the bottom-left corner: keep the graph above it or to its right, whichever is
+    // roomier.
+    let above = Rect::from_min_max(
+        top_left,
+        egui::pos2(bottom_right.x, bottom_right.y.min(preview.top() - 12.0)),
+    );
+    let beside = Rect::from_min_max(
+        egui::pos2(top_left.x.max(preview.right() + 12.0), top_left.y),
+        bottom_right,
+    );
+    let area = |rect: Rect| rect.width().max(0.0) * rect.height().max(0.0);
+    if area(beside) > area(above) { beside } else { above }
 }
 
 /// Draws the Effects HUD and handles its keyboard.
@@ -553,7 +596,11 @@ pub(crate) fn open_add_popup(ctx: &Context, hud: &mut Hud<'_>) {
         .input(|input| input.pointer.hover_pos())
         .filter(|position| screen.contains(*position))
         .unwrap_or_else(|| screen.center());
+    if locked(hud) {
+        return;
+    }
     hud.ui.effects.add_popup = Some(AddPopup {
+        selected: 0,
         at,
         query: String::new(),
         fresh: true,
@@ -566,16 +613,46 @@ pub(crate) fn to_graph(hud: &Hud<'_>, position: Pos2) -> Vec2 {
 }
 
 /// Kinds that match `query`, in library order; an output that the graph already has is left out.
-pub(crate) fn matching_kinds(hud: &Hud<'_>, query: &str) -> Vec<GraphNodeKind> {
+///
+/// The query matches the translated name and the English one. `include_taken` keeps the outputs the graph already
+/// has (the Library lists them; adding one reports that the graph has it).
+pub(crate) fn matching_kinds(hud: &Hud<'_>, query: &str, include_taken: bool) -> Vec<GraphNodeKind> {
     let query = query.trim().to_lowercase();
     let graph = current(hud);
     GraphNodeKind::ALL
         .into_iter()
         .filter(|kind| {
-            let taken =
-                kind.is_output() && graph.is_some_and(|graph| graph.nodes().iter().any(|node| node.kind == *kind));
-            !taken && (query.is_empty() || kind_label(hud, *kind).to_lowercase().contains(&query))
+            let taken = !include_taken
+                && kind.is_output()
+                && graph.is_some_and(|graph| graph.nodes().iter().any(|node| node.kind == *kind));
+            !taken
+                && (query.is_empty()
+                    || kind_label(hud, *kind).to_lowercase().contains(&query)
+                    || kind.spec().label.to_lowercase().contains(&query))
         })
+        .collect()
+}
+
+/// `kinds` grouped for a node list: the library order, with the output nodes listed under Surface like the mock-up.
+pub(crate) fn library_groups(kinds: &[GraphNodeKind]) -> Vec<(NodeCategory, Vec<GraphNodeKind>)> {
+    let group_of = |kind: GraphNodeKind| match kind.spec().category {
+        NodeCategory::Output => NodeCategory::Shading,
+        other => other,
+    };
+    NodeCategory::ALL
+        .into_iter()
+        .filter(|category| *category != NodeCategory::Output)
+        .map(|category| {
+            let mut members: Vec<GraphNodeKind> = kinds
+                .iter()
+                .copied()
+                .filter(|kind| group_of(*kind) == category)
+                .collect();
+            // Outputs after the helpers of the same group.
+            members.sort_by_key(|kind| kind.is_output());
+            (category, members)
+        })
+        .filter(|(_, members)| !members.is_empty())
         .collect()
 }
 
@@ -654,7 +731,13 @@ fn add_popup(ctx: &Context, hud: &mut Hud<'_>) {
     };
     // A press in the frame that opened the popup (a fast click) is not a click outside it.
     let opened_now = popup.fresh;
-    let kinds = matching_kinds(hud, &popup.query);
+    let mut kinds = matching_kinds(hud, &popup.query, false);
+    let ordered: Vec<GraphNodeKind> = library_groups(&kinds)
+        .into_iter()
+        .flat_map(|(_, members)| members)
+        .collect();
+    kinds = ordered;
+    popup.selected = popup.selected.min(kinds.len().saturating_sub(1));
     let mut chosen = None;
     let mut keep = true;
     let response = egui::Area::new(Id::unique("effects-add-popup"))
@@ -673,31 +756,51 @@ fn add_popup(ctx: &Context, hud: &mut Hud<'_>) {
                     edit.request_focus();
                     popup.fresh = false;
                 }
+                if edit.changed() {
+                    popup.selected = 0;
+                }
+                let (down, up) = ui.input(|input| (input.key_pressed(Key::ArrowDown), input.key_pressed(Key::ArrowUp)));
+                if down && popup.selected + 1 < kinds.len() {
+                    popup.selected += 1;
+                }
+                if up {
+                    popup.selected = popup.selected.saturating_sub(1);
+                }
                 ui.add_space(4.0);
+                if kinds.is_empty() {
+                    ui.label(widgets::muted(hud.tr("search-no-results")).size(11.0));
+                }
                 egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for category in NodeCategory::ALL {
-                        let in_category: Vec<GraphNodeKind> = kinds
-                            .iter()
-                            .copied()
-                            .filter(|kind| kind.spec().category == category)
-                            .collect();
-                        if in_category.is_empty() {
-                            continue;
-                        }
+                    for (category, members) in library_groups(&kinds) {
                         ui.label(
                             egui::RichText::new(category_label(hud, category).to_uppercase())
                                 .color(theme::SUBTLE)
                                 .size(10.0),
                         );
-                        for kind in in_category {
-                            if library_row(ui, hud, kind).clicked() {
+                        for kind in members {
+                            let picked = kinds.get(popup.selected) == Some(&kind);
+                            let row = library_row(ui, hud, kind);
+                            if picked {
+                                ui.painter().rect_stroke(
+                                    row.rect,
+                                    7,
+                                    Stroke::new(1.0, theme::BORDER),
+                                    StrokeKind::Inside,
+                                );
+                                if down || up {
+                                    row.scroll_to_me(None);
+                                }
+                            }
+                            if row.clicked() {
                                 chosen = Some(kind);
                             }
                         }
                     }
                 });
                 if ui.input(|input| input.key_pressed(Key::Enter)) {
-                    chosen = chosen.or_else(|| kinds.first().copied());
+                    // Enter with nothing to add closes the popup instead of leaving it without focus.
+                    chosen = chosen.or_else(|| kinds.get(popup.selected).copied());
+                    keep &= chosen.is_some();
                 }
                 if ui.input(|input| input.key_pressed(Key::Escape)) {
                     keep = false;

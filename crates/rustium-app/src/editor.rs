@@ -953,6 +953,11 @@ impl Editor {
         self.validate();
     }
 
+    /// Gives the History step in progress another name (a gesture made of several edits, like a duplicate).
+    pub(crate) fn relabel_material_edit(&mut self, kind: rustium_core::EditKind) {
+        self.material_edit = self.material_edit.take().map(|edit| edit.with_kind(kind));
+    }
+
     /// Ends a Material slider drag: its Edits become one History step.
     pub(crate) fn finish_material_edit(&mut self) {
         if let Some(edit) = self.material_edit.take() {

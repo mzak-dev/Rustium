@@ -310,9 +310,8 @@ style-toon = Toon
 style-pixel = Pixel
 style-wire = Wire
 engine = Engine
-engine-path-tracing = Path tracing
-engine-software = software DDA
-engine-hardware = hardware ray query
+engine-active-software = software
+engine-active-hardware = hardware
 samples = Samples
 bounces = Bounces
 denoise = Denoise
@@ -352,7 +351,10 @@ style-wire-hint = Light lines along the voxel edges on a dark background
 denoise-hint = Smooths the noise of unfinished renders without blurring edges; applies to saved images too
 exposure = Exposure
 focus-hint = Distance to the sharp plane. Use the Pick focus tool to click it on the model.
-frames = frames
+frames-count = { $count ->
+    [one] { $count } frame
+   *[other] { $count } frames
+}
 save-video = Save video
 save-image-hint = Save the image on screen as a file
 save-video-hint = Render a turntable video that circles the model once

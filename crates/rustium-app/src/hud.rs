@@ -90,6 +90,8 @@ pub(crate) struct UiState {
     pub(crate) text_focus_before: bool,
     /// Where the Tool wheel is open, in points.
     pub(crate) tool_wheel: Option<Pos2>,
+    /// Where the right button went down over the viewport, until it is released.
+    pub(crate) wheel_press: Option<Pos2>,
     /// Viewport cursor bookkeeping.
     pub(crate) cursor: CursorUi,
     /// Where a marquee drag started, in points.
@@ -133,6 +135,7 @@ impl UiState {
             scale_draft: None,
             text_focus_before: false,
             tool_wheel: None,
+            wheel_press: None,
             cursor: CursorUi::default(),
             marquee: None,
             collapsed: HashSet::new(),
@@ -499,6 +502,9 @@ pub(crate) fn copy_client_config(ctx: &Context, hud: &mut Hud<'_>) {
     hud.ui.toast = Some(Toast::new(hud.tr("mcp-copied"), false));
 }
 
+/// Pointer travel (points) below which a right press and release count as a click.
+const WHEEL_SLOP: f32 = 8.0;
+
 /// Width of the band along the window border that resizes the frameless window.
 const RESIZE_BAND: f32 = 6.0;
 
@@ -552,9 +558,7 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         return;
     }
     let busy = hud.editor.is_stroking() || hud.ui.effects.gesture.is_some() || egui::Popup::is_any_open(ctx);
-    if response.secondary_clicked() && !busy {
-        hud.ui.tool_wheel = pointer;
-    }
+    open_wheel_on_right_click(ctx, hud, &response, pointer, busy);
 
 
     if hud.ui.mode == Mode::Render {
@@ -567,6 +571,32 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         return;
     }
     viewport::interact(ctx, hud, &response, screen, pointer);
+}
+
+/// Opens the Tool wheel when the right button is released near where it went down, however long it was held.
+fn open_wheel_on_right_click(
+    ctx: &Context,
+    hud: &mut Hud<'_>,
+    response: &egui::Response,
+    pointer: Option<Pos2>,
+    busy: bool,
+) {
+    let (pressed, released) = ctx.input(|input| {
+        (
+            input.pointer.button_pressed(egui::PointerButton::Secondary),
+            input.pointer.button_released(egui::PointerButton::Secondary),
+        )
+    });
+    if pressed && response.contains_pointer() && !busy {
+        hud.ui.wheel_press = pointer;
+    }
+    if released
+        && let Some(origin) = hud.ui.wheel_press.take()
+        && !busy
+        && pointer.is_none_or(|position| position.distance(origin) < WHEEL_SLOP)
+    {
+        hud.ui.tool_wheel = Some(origin);
+    }
 }
 
 fn resize_direction(screen: Rect, position: Pos2) -> Option<ResizeDirection> {

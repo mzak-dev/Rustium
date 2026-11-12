@@ -118,6 +118,7 @@ struct Setup {
     denoise: bool,
     lens: Option<ThinLens>,
     pass: RenderPass,
+    region: Option<[u32; 4]>,
 }
 
 impl Default for Setup {
@@ -131,6 +132,7 @@ impl Default for Setup {
             denoise: false,
             lens: None,
             pass: RenderPass::Beauty,
+            region: None,
         }
     }
 }
@@ -153,6 +155,7 @@ fn render_with(
     buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut tracer = PathTracer::new(&gpu.device, &buffers, format, ray_tracing);
+    tracer.set_time_budget(false);
     if ray_tracing == RayTracing::Hardware && has_ray_query(gpu) {
         assert_eq!(
             tracer.engine(),
@@ -194,7 +197,7 @@ fn render_with(
         sky: setup.sky,
         ground: setup.ground,
         transparent: false,
-        region: None,
+        region: setup.region,
         running: true,
         frame_rect: [0.0, 0.0, SIZE as f32, SIZE as f32],
         exposure: EXPOSURE,
@@ -233,7 +236,8 @@ fn area_luminance(image: &TraceImage, (cx, cy): (u32, u32)) -> f32 {
 
 /// ACES filmic curve plus the sRGB transfer function: what the screen shows for a linear value, in `0..=1`.
 fn display(linear: f32) -> f32 {
-    let mapped = ((linear * (2.51 * linear + 0.03)) / (linear * (2.43 * linear + 0.59) + 0.14)).clamp(0.0, 1.0);
+    let aces = ((linear * (2.51 * linear + 0.03)) / (linear * (2.43 * linear + 0.59) + 0.14)).clamp(0.0, 1.0);
+    let mapped = aces + (linear - aces) * (-linear / 0.04).exp();
     if mapped <= 0.003_130_8 {
         mapped * 12.92
     } else {
@@ -252,7 +256,8 @@ fn dump(name: &str, image: &TraceImage) {
     };
     let tonemap = |value: f32| {
         let x = value * EXPOSURE;
-        let mapped = ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0);
+        let aces = ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0.0, 1.0);
+        let mapped = aces + (x - aces) * (-x / 0.04).exp();
         let srgb = if mapped <= 0.003_130_8 {
             mapped * 12.92
         } else {
@@ -1363,4 +1368,291 @@ fn hardware_matches_software_with_haze_and_shadow_free_glass() {
         ..Setup::default()
     };
     assert_backends_agree("rq-haze", &gpu, &scene, &camera, &setup, None);
+}
+
+#[test]
+fn glass_resting_on_the_ground_shows_the_studio_floor_through_it() {
+    let gpu = gpu_or_skip!();
+    // Looking down at a glass block that stands on the floor: the rays leave through the bottom face right at the
+    // ground plane and must meet the floor there, not fall through to the sky below the horizon.
+    let camera = Camera::looking_at(Vec3::new(0.0, 22.0, 9.0), Vec3::new(0.0, 0.0, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        sun_height: 60.0,
+        samples: 64,
+        ..bright_setup()
+    };
+    let build = |with_glass: bool| {
+        let mut scene = Scene::new();
+        // A far floor voxel keeps the Scene non-empty; the glass block stands on the ground plane.
+        fill(&mut scene, IVec3::new(8, 0, 8), IVec3::new(8, 0, 8), id(3));
+        if with_glass {
+            fill(&mut scene, IVec3::new(-2, 0, -2), IVec3::new(1, 2, 1), id(1));
+            shade(
+                &mut scene,
+                1,
+                SurfaceConstants {
+                    transmission: 1.0,
+                    roughness: 0.0,
+                    ..SurfaceConstants::MATTE
+                },
+            );
+            let index = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+            apply(
+                &mut scene,
+                &Command::SetCastsShadow {
+                    index,
+                    casts_shadow: false,
+                },
+            )
+            .unwrap();
+        }
+        scene
+    };
+    let spot = camera.pixel(Vec3::new(0.0, 3.0, 0.0));
+    let glass = render(&gpu, &build(true), &camera, &setup);
+    let bare = render(&gpu, &build(false), &camera, &setup);
+    dump("glass-on-ground", &glass);
+    let (through, open) = (area_luminance(&glass, spot), area_luminance(&bare, spot));
+    assert!(
+        through > open * 0.6,
+        "the floor seen through grounded glass ({through}) is about as bright as the bare floor ({open})"
+    );
+    // The sky below the horizon is blue; the studio floor is neutral.
+    let [r, _, b] = rgb(&glass, spot);
+    assert!(r > b * 0.9, "no blue sky shows through the floor: r {r}, b {b}");
+}
+
+/// A tracer with the showpiece Scene uploaded, and a target to draw into.
+fn showpiece_tracer(gpu: &Gpu, size: (u32, u32)) -> (PathTracer, wgpu::TextureView, Camera) {
+    let (scene, camera) = showpiece();
+    let buffers = MaterialBuffers::new(&gpu.device);
+    buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
+    let mut tracer = PathTracer::new(
+        &gpu.device,
+        &buffers,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        RayTracing::Software,
+    );
+    tracer
+        .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
+        .unwrap();
+    tracer.upload_scene(&gpu.device, &gpu.queue, &scene);
+    tracer.set_time_budget(false);
+    let target = gpu
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("test target"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    (tracer, target, camera)
+}
+
+fn showpiece_frame(camera: &Camera, size: (u32, u32)) -> TraceFrame {
+    TraceFrame {
+        inv_view_proj: camera.view_proj.inverse().to_cols_array_2d(),
+        size,
+        samples: 8,
+        bounces: 4,
+        sun_turn_degrees: 135.0,
+        sun_height_degrees: 45.0,
+        sky: Sky::Clear,
+        ground: Ground::Studio,
+        transparent: false,
+        region: None,
+        running: true,
+        frame_rect: [0.0, 0.0, size.0 as f32, size.1 as f32],
+        exposure: EXPOSURE,
+        style: RenderStyle::Traced,
+        denoise: false,
+        lens: None,
+        pass: RenderPass::Beauty,
+    }
+}
+
+/// Encodes frames until the tracer has `frame.samples` samples and reads the picture back.
+fn run_to_target(gpu: &Gpu, tracer: &mut PathTracer, target: &wgpu::TextureView, frame: &TraceFrame) -> TraceImage {
+    for _ in 0..1000 {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        tracer.encode(&gpu.device, &gpu.queue, &mut encoder, target, frame);
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        if tracer.progress().samples >= frame.samples {
+            break;
+        }
+    }
+    tracer.read_image(&gpu.device, &gpu.queue).unwrap()
+}
+
+#[test]
+fn the_render_region_keeps_the_picture_outside_it() {
+    let gpu = gpu_or_skip!();
+    let (mut tracer, target, camera) = showpiece_tracer(&gpu, (SIZE, SIZE));
+    let frame = showpiece_frame(&camera, (SIZE, SIZE));
+    let (left, right) = ((SIZE / 4, SIZE / 2), (SIZE * 3 / 4, SIZE / 2));
+    // A new picture rendered in the left half only: the right half has nothing yet.
+    let left_half = TraceFrame {
+        region: Some([0, 0, SIZE / 2, SIZE]),
+        ..frame
+    };
+    let first = run_to_target(&gpu, &mut tracer, &target, &left_half);
+    dump("region-left", &first);
+    assert!(luminance(&first, left) > 0.0);
+    assert!(luminance(&first, right) < 1e-6, "nothing was traced outside the region");
+    // Moving only the region to the right half keeps the left half and traces the right half.
+    let right_half = TraceFrame {
+        region: Some([SIZE / 2, 0, SIZE, SIZE]),
+        ..frame
+    };
+    let second = run_to_target(&gpu, &mut tracer, &target, &right_half);
+    dump("region-right", &second);
+    assert_eq!(
+        rgb(&first, left),
+        rgb(&second, left),
+        "pixels outside the region keep the earlier picture"
+    );
+    assert!(luminance(&second, right) > 0.0, "the new region is traced");
+    // Changing the view restarts only the region too: what lies outside stays on screen, dimmed by the interface.
+    let moved = TraceFrame {
+        sun_height_degrees: 20.0,
+        ..right_half
+    };
+    let third = run_to_target(&gpu, &mut tracer, &target, &moved);
+    assert_eq!(
+        rgb(&second, left),
+        rgb(&third, left),
+        "outside the region nothing is touched"
+    );
+    assert!(
+        (luminance(&second, right) - luminance(&third, right)).abs() > 1e-4,
+        "the region follows the new sun"
+    );
+}
+
+#[test]
+fn a_banded_sweep_covers_every_row() {
+    let gpu = gpu_or_skip!();
+    // 300 rows do not fit the first band, so one sample takes several frames.
+    let (mut tracer, target, camera) = showpiece_tracer(&gpu, (64, 300));
+    tracer.set_time_budget(true);
+    let frame = TraceFrame {
+        samples: 1,
+        ..showpiece_frame(&camera, (64, 300))
+    };
+    let mut frames = 0;
+    while tracer.progress().samples < 1 {
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        tracer.encode(&gpu.device, &gpu.queue, &mut encoder, &target, &frame);
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        frames += 1;
+        assert!(frames < 100, "the sweep ends");
+    }
+    assert!(frames >= 2, "took {frames} frames");
+    let image = tracer.read_image(&gpu.device, &gpu.queue).unwrap();
+    assert!(luminance(&image, (32, 2)) > 0.0 && luminance(&image, (32, 297)) > 0.0);
+    assert!(image.rgba.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn an_image_bigger_than_the_budget_is_refused() {
+    let gpu = gpu_or_skip!();
+    assert!(rustium_render::check_image_size(&gpu.device, (1920, 1080)).is_ok());
+    let error = rustium_render::check_image_size(&gpu.device, (u32::MAX, 16)).unwrap_err();
+    assert!(matches!(error, rustium_render::Error::ImageTooLarge { .. }));
+    let (_, max_bytes) = rustium_render::trace_image_limits(&gpu.device);
+    let side = u32::try_from((max_bytes / 112).isqrt() + 64).unwrap();
+    assert!(rustium_render::trace_image_bytes((side, side)) > max_bytes);
+    assert!(rustium_render::check_image_size(&gpu.device, (side, side)).is_err());
+}
+
+#[test]
+fn clay_draws_glass_as_a_solid_that_casts_a_shadow() {
+    let gpu = gpu_or_skip!();
+    let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-12, 0, -12), IVec3::new(12, 0, 12), id(3));
+    fill(&mut scene, IVec3::new(-2, 1, -2), IVec3::new(1, 4, 1), id(1));
+    shade(
+        &mut scene,
+        1,
+        SurfaceConstants {
+            transmission: 1.0,
+            roughness: 0.0,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    let index = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+    apply(
+        &mut scene,
+        &Command::SetCastsShadow {
+            index,
+            casts_shadow: false,
+        },
+    )
+    .unwrap();
+    let shadowed_spot = camera.pixel(Vec3::new(-4.0, 1.0, 3.0));
+    let lit_spot = camera.pixel(Vec3::new(5.0, 1.0, 5.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        sun_height: 40.0,
+        samples: 48,
+        ..bright_setup()
+    };
+    let traced = render(&gpu, &scene, &camera, &setup);
+    let clay = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            style: RenderStyle::Clay,
+            ..setup
+        },
+    );
+    dump("clay-glass-shadow", &clay);
+    assert!(
+        luminance(&traced, shadowed_spot) > luminance(&traced, lit_spot) * 0.8,
+        "traced glass that casts no shadow leaves the floor lit"
+    );
+    assert!(
+        luminance(&clay, shadowed_spot) * 1.5 < luminance(&clay, lit_spot),
+        "clay makes the glass solid, so it shades the floor like any other block"
+    );
+}
+
+#[test]
+fn the_depth_pass_spans_the_models_from_near_to_far() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    let depth = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            samples: 6,
+            pass: RenderPass::Depth,
+            ground: Ground::Studio,
+            ..Setup::default()
+        },
+    );
+    let near = luminance(&depth, camera.pixel(Vec3::new(9.0, 0.0, 9.0)));
+    let far = luminance(&depth, camera.pixel(Vec3::new(-9.0, 0.0, -9.0)));
+    assert!((0.0..=1.0).contains(&near) && (0.0..=1.0).contains(&far));
+    assert!(
+        near > far + 0.3,
+        "the near floor corner ({near}) is much brighter than the far one ({far}): the range spans the Models"
+    );
 }

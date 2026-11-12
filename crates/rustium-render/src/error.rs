@@ -16,4 +16,23 @@ pub enum Error {
     /// The traced image could not be copied back from the GPU, or nothing has been traced yet.
     #[error("cannot read the rendered image back from the GPU")]
     Readback,
+    /// The image is bigger than the GPU can hold.
+    #[error(
+        "a {width} × {height} image needs {needed} bytes of GPU memory; at most {allowed} bytes and {max_side} pixels per side are allowed"
+    )]
+    ImageTooLarge {
+        /// Requested width in pixels.
+        width: u32,
+        /// Requested height in pixels.
+        height: u32,
+        /// Bytes the image's textures take.
+        needed: u64,
+        /// Bytes allowed for one image.
+        allowed: u64,
+        /// Largest side the device accepts.
+        max_side: u32,
+    },
+    /// The GPU ran out of memory while allocating the image.
+    #[error("the GPU ran out of memory while allocating the image")]
+    OutOfMemory,
 }

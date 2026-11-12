@@ -29,12 +29,16 @@ pub(crate) struct ResolveInput {
     pub(crate) denoise: bool,
     pub(crate) pass: RenderPass,
     pub(crate) samples: u32,
+    /// Whether depth of field is on.
+    pub(crate) defocus: bool,
 }
 
 impl ResolveInput {
-    /// The Wire style keeps its one-pixel lines, which the denoiser would smear.
+    /// The Wire style keeps its one-pixel lines, which the denoiser would smear; view passes are display colours with
+    /// no lighting noise; and with depth of field the pinhole G-buffer would stop the blur at the sharp edges and leave
+    /// a dark fringe.
     pub(crate) fn denoises(&self) -> bool {
-        self.denoise && self.style != RenderStyle::Wire
+        self.denoise && self.style != RenderStyle::Wire && self.pass == RenderPass::Beauty && !self.defocus
     }
 }
 
@@ -307,6 +311,7 @@ mod tests {
             denoise: true,
             pass: RenderPass::Beauty,
             samples: 1,
+            defocus: false,
         };
         assert!(!input.denoises());
         assert!(

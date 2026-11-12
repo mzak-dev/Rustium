@@ -426,6 +426,7 @@ file-error-save = Cannot save { $name }: { $reason }
 file-error-import = Cannot import { $name }: { $reason }
 file-error-export = Cannot export { $name }: { $reason }
 file-error-palette = Cannot read the palette { $name }: { $reason }
+file-error-autosave = Cannot write the recovery copy { $name }: { $reason }
 splash-recent-missing = This file is no longer there
 
 ## Effects mode (Material node editor)

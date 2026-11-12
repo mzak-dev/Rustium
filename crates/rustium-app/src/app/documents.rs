@@ -33,20 +33,43 @@ impl Running {
     pub(super) fn perform(&mut self, action: Pending, settings: &Settings) -> bool {
         match action {
             Pending::New => self.new_document(settings),
-            Pending::Open(Some(path)) => self.io.submit(IoJob::Load { path }),
-            Pending::Open(None) => self
-                .io
-                .pick_open(self.i18n.tr("dialog-open"), self.i18n.tr("file-type-scene")),
-            Pending::ImportVox => self.io.pick_import_vox(self.i18n.tr("dialog-import-vox")),
+            Pending::Open(Some(path)) => {
+                self.accept_loss();
+                self.io.submit(IoJob::Load { path });
+            }
+            Pending::Open(None) => {
+                self.accept_loss();
+                self.io
+                    .pick_open(self.i18n.tr("dialog-open"), self.i18n.tr("file-type-scene"));
+            }
+            Pending::ImportVox => {
+                self.accept_loss();
+                self.io.pick_import_vox(self.i18n.tr("dialog-import-vox"));
+            }
+            Pending::Import(path) => {
+                self.accept_loss();
+                self.io.submit(IoJob::ImportVox { path });
+            }
             Pending::Quit => {
-                // Synchronous on purpose: the process is about to end and a queued job would never run.
-                for path in files::recovery_files(self.doc.path.as_deref()) {
-                    let _ = std::fs::remove_file(path);
-                }
+                // Synchronous on purpose: the process is about to end and a queued job would never run. A recovery
+                // copy still queued or being written must not come back after the delete.
+                self.io
+                    .delete_for_quit(&files::recovery_files(self.doc.path.as_deref()));
                 return true;
             }
         }
         false
+    }
+
+    /// Remembers that the user has dealt with the changes made so far (saved or discarded them), so a file that
+    /// arrives later replaces the Scene without asking again, unless it was edited in the meantime.
+    fn accept_loss(&mut self) {
+        self.accepted_loss = Some((self.doc.id(), self.editor.revision));
+    }
+
+    /// Whether the Scene has unsaved changes the user has not been asked about since asking for a file.
+    fn edited_since_accepting(&self) -> bool {
+        self.is_dirty() && self.accepted_loss != Some((self.doc.id(), self.editor.revision))
     }
 
     fn new_document(&mut self, settings: &Settings) {
@@ -69,6 +92,7 @@ impl Running {
         }
         let job = SaveJob {
             scene: Box::new(self.editor.scene.clone()),
+            document: self.doc.id(),
             revision: self.editor.revision,
             then,
             obsolete: files::recovery_files(self.doc.path.as_deref()),
@@ -78,6 +102,7 @@ impl Running {
             self.io.submit(IoJob::Save {
                 path,
                 scene: job.scene,
+                document: job.document,
                 revision: job.revision,
                 then: job.then,
                 obsolete: job.obsolete,
@@ -140,7 +165,14 @@ impl Running {
             return false;
         };
         match (prompt, answer) {
-            (Prompt::Unsaved(action), PromptAnswer::Primary) => self.save(Some(action), false),
+            (Prompt::Unsaved(action), PromptAnswer::Primary) => {
+                if self.doc.saving {
+                    // A save is still running; saving again now would drop `action`. Ask again once it is done.
+                    self.ui.prompt = Some(Prompt::Unsaved(action));
+                } else {
+                    self.save(Some(action), false);
+                }
+            }
             (Prompt::Unsaved(action), PromptAnswer::Secondary) => return self.perform(action, settings),
             (Prompt::Recovery(offer), PromptAnswer::Primary) => self.io.submit(IoJob::LoadRecovery(offer)),
             (Prompt::Recovery(offer), PromptAnswer::Secondary) => self.io.submit(IoJob::Delete(vec![offer.recovery])),
@@ -186,18 +218,39 @@ impl Running {
                     scene,
                     origin,
                     recovery,
-                } => self.install_scene(path, *scene, origin, recovery, settings),
+                    source,
+                } => {
+                    if origin != Origin::Recovery && self.edited_since_accepting() {
+                        // The Scene was edited while the file was being chosen or read: ask before replacing it.
+                        let again = match origin {
+                            Origin::File => path.map(|path| Pending::Open(Some(path))),
+                            _ => source.map(Pending::Import),
+                        };
+                        if let (Some(again), None) = (again, &self.ui.prompt) {
+                            self.ui.prompt = Some(Prompt::Unsaved(again));
+                        }
+                        continue;
+                    }
+                    self.accepted_loss = None;
+                    self.install_scene(path, *scene, origin, recovery, settings);
+                }
                 IoOutcome::Saved {
                     path,
+                    document,
                     revision,
                     name,
                     then,
                 } => {
                     self.remember(&path, &name);
                     self.say("file-saved", &[("name", FluentValue::from(display_name(&path)))], false);
-                    self.doc.mark_saved(path, revision);
-                    if let Some(action) = then {
-                        quit |= self.perform(action, settings);
+                    if document == self.doc.id() {
+                        self.doc.mark_saved(path, revision);
+                        if let Some(action) = then {
+                            quit |= self.perform(action, settings);
+                        }
+                    } else {
+                        // The file was written, but another document is open now: it must not take this path.
+                        info!(path = %path.display(), "a save finished after its document was closed");
                     }
                 }
                 IoOutcome::Exported(path) => {
@@ -217,7 +270,11 @@ impl Running {
                 }
                 IoOutcome::Autosaved(revision) => debug!(revision, "recovery copy written"),
                 IoOutcome::RecentChecked(items) => self.ui.recent = items,
-                IoOutcome::Cancelled => self.doc.saving = false,
+                IoOutcome::Cancelled(document) => {
+                    if document == Some(self.doc.id()) {
+                        self.doc.saving = false;
+                    }
+                }
                 IoOutcome::Failed {
                     operation,
                     path,
@@ -235,8 +292,11 @@ impl Running {
             Operation::Import => "file-error-import",
             Operation::Export => "file-error-export",
             Operation::Palette => "file-error-palette",
-            // The recovery copy is a convenience; the log has the details.
-            Operation::Autosave => return,
+            // Not a reason to interrupt, but the user should know the safety net is missing.
+            Operation::Autosave => {
+                self.doc.note_autosave_failed();
+                "file-error-autosave"
+            }
         };
         if operation == Operation::Save {
             self.doc.saving = false;

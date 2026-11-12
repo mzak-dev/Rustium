@@ -94,11 +94,8 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             });
         });
     if ctx.input(|input| input.key_pressed(Key::Escape)) {
-        chosen = Some(if cancel {
-            AppCommand::PromptCancel
-        } else {
-            secondary.1.clone()
-        });
+        // Escape never destroys anything: it dismisses the prompt (the recovery file stays for the next start).
+        chosen = Some(AppCommand::PromptCancel);
     } else if ctx.input(|input| input.key_pressed(Key::Enter)) {
         chosen = Some(primary.1.clone());
     }

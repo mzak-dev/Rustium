@@ -123,6 +123,8 @@ struct Running {
     mcp: McpHost,
     io: Io,
     doc: Document,
+    /// The document and revision whose unsaved changes the user agreed to lose for the file being opened.
+    accepted_loss: Option<(u64, u64)>,
     recent: Vec<RecentFile>,
     splash_was_open: bool,
     title: String,
@@ -150,6 +152,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => {
                 if running.run_command(AppCommand::Quit, &mut self.settings) {
                     event_loop.exit();
+                } else {
+                    // The "unsaved changes" prompt has to appear.
+                    running.window.request_redraw();
                 }
             }
             WindowEvent::Resized(size) => {
@@ -329,6 +334,7 @@ impl Running {
             mcp,
             io,
             doc,
+            accepted_loss: None,
             recent: recent_files,
             splash_was_open: false,
             title: String::new(),

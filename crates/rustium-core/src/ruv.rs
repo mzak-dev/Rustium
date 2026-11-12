@@ -25,7 +25,9 @@ use crate::transform::{Orientation, Transform};
 pub const MAGIC: [u8; 8] = *b"RUSTIUMV";
 
 /// The newest format version this editor reads and the one it writes.
-pub const VERSION: u32 = 1;
+/// Version 1 stored material graphs as constant Surface parameters only; version 2 stores node graphs, so
+/// version 1 files are no longer read.
+pub const VERSION: u32 = 2;
 
 /// Largest body (uncompressed) accepted, so a damaged length cannot ask for gigabytes.
 const MAX_BODY: usize = 1 << 30;
@@ -110,7 +112,7 @@ pub fn decode_ruv(bytes: &[u8]) -> Result<Scene, FileError> {
         return Err(FileError::Truncated);
     };
     let version = u32::from_le_bytes(*version);
-    if version == 0 || version > VERSION {
+    if version < 2 || version > VERSION {
         return Err(FileError::UnsupportedVersion {
             found: version,
             supported: VERSION,
@@ -217,6 +219,11 @@ fn from_dto(dto: SceneDto) -> Result<Scene, FileError> {
     }
     if dto.materials.is_empty() || dto.materials.len() > MaterialGraph::MAX_PER_SCENE {
         return corrupt("the number of material graphs is out of range");
+    }
+    for graph in &dto.materials {
+        if graph.validate().is_err() {
+            return corrupt("a material graph is malformed");
+        }
     }
     let palette_len = dto.palette.len();
     let mut colors = Vec::with_capacity(palette_len);
@@ -333,7 +340,21 @@ mod tests {
         for x in -40..40 {
             target.set(IVec3::new(x, x / 2, 3), color);
         }
+        for sample in crate::SampleMaterial::ALL {
+            let add = crate::Command::AddMaterial {
+                graph: Box::new(sample.build()),
+            };
+            crate::apply(&mut scene, &add).unwrap();
+        }
         scene
+    }
+
+    #[test]
+    fn a_malformed_material_graph_is_rejected_on_load() {
+        let mut dto = to_dto(&sample()).unwrap();
+        let json = r#"{"name":"x","casts_shadow":true,"nodes":[],"links":[],"frames":[],"next_node":0,"next_frame":0}"#;
+        dto.materials.push(serde_json::from_str(json).unwrap());
+        assert!(matches!(from_dto(dto), Err(FileError::Corrupt(_))));
     }
 
     fn describe(scene: &Scene) -> Description {

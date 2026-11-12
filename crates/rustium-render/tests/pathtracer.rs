@@ -5,6 +5,7 @@
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::many_single_char_names,
+    clippy::print_stderr,
     reason = "test code"
 )]
 
@@ -14,7 +15,8 @@ use rustium_core::{
     SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
-    Ground, MaterialBuffers, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage,
+    Ground, MaterialBuffers, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame,
+    TraceImage,
 };
 
 const SIZE: u32 = 96;
@@ -29,7 +31,7 @@ struct Gpu {
 fn gpu() -> Option<Gpu> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+    let (device, queue) = pollster::block_on(rustium_render::request_device(&adapter)).ok()?;
     Some(Gpu { device, queue })
 }
 
@@ -133,14 +135,37 @@ impl Default for Setup {
     }
 }
 
+/// Renders with the software tracer.
 fn render(gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup) -> TraceImage {
+    render_with(gpu, scene, camera, setup, RayTracing::Software, None)
+}
+
+/// Renders `scene` with the given traversal; `before` is uploaded first, as an earlier state of the Scene.
+fn render_with(
+    gpu: &Gpu,
+    scene: &Scene,
+    camera: &Camera,
+    setup: &Setup,
+    ray_tracing: RayTracing,
+    before: Option<&Scene>,
+) -> TraceImage {
     let buffers = MaterialBuffers::new(&gpu.device);
     buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut tracer = PathTracer::new(&gpu.device, &buffers, format);
+    let mut tracer = PathTracer::new(&gpu.device, &buffers, format, ray_tracing);
+    if ray_tracing == RayTracing::Hardware && has_ray_query(gpu) {
+        assert_eq!(
+            tracer.engine(),
+            TraceEngine::Hardware,
+            "the hardware engine is the one under test"
+        );
+    }
     tracer
         .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
         .unwrap();
+    if let Some(before) = before {
+        tracer.upload_scene(&gpu.device, &gpu.queue, before);
+    }
     tracer.upload_scene(&gpu.device, &gpu.queue, scene);
     let target = gpu
         .device
@@ -390,9 +415,8 @@ fn glass_and_metal_render_without_blowing_up() {
     assert!(glass > 0.02, "clear glass shows what is behind it, got {glass}");
 }
 
-#[test]
-fn models_are_placed_by_their_transforms_and_hidden_ones_are_skipped() {
-    let gpu = gpu_or_skip!();
+/// An L-shaped Model, a turned and moved Instance of it, a mirrored Instance and a hidden Model; every voxel glows.
+fn instanced_scene() -> (Scene, Camera) {
     let mut scene = Scene::new();
     // Every voxel glows, so "lit" simply means "there is a voxel here".
     shade(
@@ -450,7 +474,36 @@ fn models_are_placed_by_their_transforms_and_hidden_ones_are_skipped() {
     )
     .unwrap();
 
+    // A second Instance, mirrored across X and moved behind the first, shares the Shape through the same BLAS.
+    apply(&mut scene, &Command::DuplicateAsInstance { node: a }).unwrap();
+    let mirrored = scene
+        .node(NodeId::ROOT)
+        .unwrap()
+        .children()
+        .iter()
+        .copied()
+        .find(|child| *child != a && *child != instance && *child != hidden)
+        .unwrap();
+    apply(
+        &mut scene,
+        &Command::SetTransform {
+            node: mirrored,
+            transform: Transform {
+                orientation: Orientation::mirror(0),
+                offset: IVec3::new(-3, 0, -8),
+            },
+        },
+    )
+    .unwrap();
+
     let camera = Camera::looking_at(Vec3::new(5.0, 28.0, 6.0), Vec3::new(5.0, 0.0, -1.0));
+    (scene, camera)
+}
+
+#[test]
+fn models_are_placed_by_their_transforms_and_hidden_ones_are_skipped() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = instanced_scene();
     let setup = Setup {
         sky: Sky::Clear,
         ground: Ground::None,
@@ -744,7 +797,12 @@ fn offline_rendering_reaches_the_target_and_can_be_cancelled() {
     let (scene, camera) = showpiece();
     let buffers = MaterialBuffers::new(&gpu.device);
     buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
-    let mut tracer = PathTracer::new(&gpu.device, &buffers, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut tracer = PathTracer::new(
+        &gpu.device,
+        &buffers,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        RayTracing::Software,
+    );
     tracer
         .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
         .unwrap();
@@ -859,4 +917,215 @@ fn a_gradient_graph_changes_the_color_along_its_axis() {
         (high[1] / high[0].max(1e-3)) > (low[1] / low[0].max(1e-3)) * 1.05,
         "the tip is greener: low {low:?} high {high:?}"
     );
+}
+
+/// How far two images of the same scene are apart: the mean absolute difference per channel, and the share of pixels
+/// that differ clearly (more than 0.25 in any channel).
+fn difference(a: &TraceImage, b: &TraceImage) -> (f32, f32) {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    let mut total = 0.0;
+    let mut off = 0_usize;
+    for (left, right) in a.rgba.chunks(4).zip(b.rgba.chunks(4)) {
+        let mut worst = 0.0_f32;
+        for (x, y) in left.iter().zip(right) {
+            total += (x - y).abs();
+            worst = worst.max((x - y).abs());
+        }
+        off += usize::from(worst > 0.25);
+    }
+    (total / a.rgba.len() as f32, off as f32 / (a.rgba.len() / 4) as f32)
+}
+
+fn has_ray_query(gpu: &Gpu) -> bool {
+    gpu.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+}
+
+/// Renders `scene` with both traversals and checks that they agree. The random numbers are seeded per pixel and
+/// sample, so only float rounding differs between the two. `before` is uploaded to the hardware tracer first, to
+/// exercise rebuilding the structures. Skips without ray query.
+fn assert_backends_agree(name: &str, gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup, before: Option<&Scene>) {
+    if !has_ray_query(gpu) {
+        eprintln!("no ray query on this adapter, skipping the hardware comparison");
+        return;
+    }
+    let software = render_with(gpu, scene, camera, setup, RayTracing::Software, None);
+    let hardware = render_with(gpu, scene, camera, setup, RayTracing::Hardware, before);
+    dump(&format!("{name}-software"), &software);
+    dump(&format!("{name}-hardware"), &hardware);
+    assert!(hardware.rgba.iter().all(|value| value.is_finite()));
+    let (mean, share) = difference(&software, &hardware);
+    eprintln!("{name}: mean difference {mean:.5}, clearly different pixels {share:.4}");
+    assert!(mean < 0.01, "{name}: mean difference {mean}");
+    assert!(share < 0.01, "{name}: {share} of the pixels differ");
+}
+
+#[test]
+fn the_engine_follows_the_preference_and_the_device() {
+    let gpu = gpu_or_skip!();
+    assert_eq!(RayTracing::Software.resolve(&gpu.device), TraceEngine::Software);
+    let hardware = if has_ray_query(&gpu) {
+        TraceEngine::Hardware
+    } else {
+        TraceEngine::Software
+    };
+    assert_eq!(RayTracing::Auto.resolve(&gpu.device), hardware);
+    assert_eq!(RayTracing::Hardware.resolve(&gpu.device), hardware);
+}
+
+#[test]
+fn hardware_matches_software_with_instances_mirrors_and_hidden_models() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = instanced_scene();
+    let setup = Setup {
+        samples: 16,
+        ..Setup::default()
+    };
+    assert_backends_agree("rq-instances", &gpu, &scene, &camera, &setup, None);
+}
+
+#[test]
+fn hardware_matches_software_on_a_lit_scene_with_glass_and_metal() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    // A floor wider than one chunk, so rays cross chunk boundaries and chunks that are empty in between.
+    fill(&mut scene, IVec3::new(-40, 0, -40), IVec3::new(40, 0, 40), id(8));
+    fill(&mut scene, IVec3::new(-5, 1, -1), IVec3::new(-3, 3, 1), id(1));
+    fill(&mut scene, IVec3::new(-1, 1, -1), IVec3::new(1, 3, 1), id(30));
+    fill(&mut scene, IVec3::new(30, 1, 30), IVec3::new(33, 6, 33), id(37));
+    shade(
+        &mut scene,
+        1,
+        SurfaceConstants {
+            transmission: 1.0,
+            roughness: 0.0,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    shade(
+        &mut scene,
+        30,
+        SurfaceConstants {
+            metallic: 1.0,
+            roughness: 0.15,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    let camera = Camera::looking_at(Vec3::new(2.0, 8.0, 16.0), Vec3::new(0.0, 1.5, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 32,
+        ..Setup::default()
+    };
+    assert_backends_agree("rq-lit", &gpu, &scene, &camera, &setup, None);
+}
+
+#[test]
+fn hardware_matches_software_in_the_styles() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    for (name, style) in [("toon", RenderStyle::Toon), ("wire", RenderStyle::Wire)] {
+        let setup = Setup {
+            ground: Ground::Studio,
+            samples: 4,
+            style,
+            ..Setup::default()
+        };
+        assert_backends_agree(&format!("rq-{name}"), &gpu, &scene, &camera, &setup, None);
+    }
+}
+
+#[test]
+fn hardware_follows_the_scene_when_it_changes() {
+    let gpu = gpu_or_skip!();
+    let (before, camera) = showpiece();
+    // A new chunk (a cube far from the others) and a Model that appears: the structures must be rebuilt.
+    let (mut after, _) = showpiece();
+    fill(&mut after, IVec3::new(40, 1, 40), IVec3::new(44, 5, 44), id(37));
+    apply(
+        &mut after,
+        &Command::NewModel {
+            parent: NodeId::ROOT,
+            name: "Another".to_owned(),
+        },
+    )
+    .unwrap();
+    let another = after.node(NodeId::ROOT).unwrap().children()[0];
+    fill_model(&mut after, another, IVec3::new(8, 1, -2), IVec3::new(10, 3, 0), id(8));
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 8,
+        ..Setup::default()
+    };
+    assert_backends_agree("rq-rebuild", &gpu, &after, &camera, &setup, Some(&before));
+}
+
+/// `cargo test -p rustium-render --test pathtracer -- --ignored --nocapture benchmark`: times both traversals on a
+/// larger scene (a field of towers over a wide floor) and prints milliseconds per sample.
+#[test]
+#[ignore = "benchmark, run on demand"]
+fn benchmark_software_against_hardware() {
+    let gpu = gpu_or_skip!();
+    if !has_ray_query(&gpu) {
+        eprintln!("no ray query on this adapter, skipping");
+        return;
+    }
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-96, 0, -96), IVec3::new(96, 0, 96), id(8));
+    for tower in 0..120_i32 {
+        let x = (tower * 37) % 170 - 85;
+        let z = (tower * 53) % 170 - 85;
+        let height = 4 + (tower * 7) % 28;
+        fill(
+            &mut scene,
+            IVec3::new(x, 1, z),
+            IVec3::new(x + 2, height, z + 2),
+            id(37),
+        );
+    }
+    let camera = Camera::looking_at(Vec3::new(40.0, 50.0, 110.0), Vec3::new(0.0, 6.0, 0.0));
+    let buffers = MaterialBuffers::new(&gpu.device);
+    buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
+    let frame = TraceFrame {
+        inv_view_proj: camera.view_proj.inverse().to_cols_array_2d(),
+        size: (SIZE * 2, SIZE * 2),
+        samples: 32,
+        bounces: 5,
+        sun_turn_degrees: 135.0,
+        sun_height_degrees: 45.0,
+        sky: Sky::Clear,
+        ground: Ground::Studio,
+        transparent: false,
+        region: None,
+        running: true,
+        frame_rect: [0.0; 4],
+        exposure: EXPOSURE,
+        style: RenderStyle::Traced,
+        denoise: false,
+        lens: None,
+        pass: RenderPass::Beauty,
+    };
+    for (name, mode) in [("software", RayTracing::Software), ("hardware", RayTracing::Hardware)] {
+        let mut tracer = PathTracer::new(&gpu.device, &buffers, wgpu::TextureFormat::Rgba8UnormSrgb, mode);
+        tracer
+            .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
+            .unwrap();
+        let started = std::time::Instant::now();
+        tracer.upload_scene(&gpu.device, &gpu.queue, &scene);
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let upload = started.elapsed().as_secs_f64() * 1000.0;
+        // The first render compiles the pipeline's code on first use; time the second one.
+        let _ = tracer
+            .render_to_image(&gpu.device, &gpu.queue, &frame, |_| true)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let _ = tracer
+            .render_to_image(&gpu.device, &gpu.queue, &frame, |_| true)
+            .unwrap();
+        let per_sample = started.elapsed().as_secs_f64() * 1000.0 / f64::from(frame.samples);
+        eprintln!(
+            "{name}: upload and build {upload:.1} ms, {per_sample:.1} ms per sample at {}x{}",
+            SIZE * 2,
+            SIZE * 2
+        );
+    }
 }

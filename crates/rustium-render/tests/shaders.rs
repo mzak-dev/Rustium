@@ -6,14 +6,15 @@ use rustium_render::compile_materials;
 use wgpu::naga;
 
 fn validate(name: &str, source: &str) {
+    validate_with(name, source, naga::valid::Capabilities::default());
+}
+
+fn validate_with(name: &str, source: &str, capabilities: naga::valid::Capabilities) {
     let module =
         naga::front::wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::default(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
 }
 
 /// The Default material plus every sample Material, the way a Scene would hold them.
@@ -147,14 +148,23 @@ fn post_shaders_are_valid_wgsl() {
 
 #[test]
 fn path_tracer_shaders_are_valid_wgsl() {
+    let body = format!(
+        "{}{}{}",
+        material_source(&sample_graphs()),
+        include_str!("../src/shaders/pathtracer.wgsl"),
+        include_str!("../src/shaders/trace_style.wgsl")
+    );
     validate(
-        "pathtracer",
+        "pathtracer (dda)",
+        &format!("{body}{}", include_str!("../src/shaders/trace_dda.wgsl")),
+    );
+    validate_with(
+        "pathtracer (ray query)",
         &format!(
-            "{}{}{}",
-            material_source(&sample_graphs()),
-            include_str!("../src/shaders/pathtracer.wgsl"),
-            include_str!("../src/shaders/trace_style.wgsl")
+            "enable wgpu_ray_query;\n{body}{}",
+            include_str!("../src/shaders/trace_rq.wgsl")
         ),
+        naga::valid::Capabilities::default() | naga::valid::Capabilities::RAY_QUERY,
     );
     validate("resolve", include_str!("../src/shaders/resolve.wgsl"));
     validate(

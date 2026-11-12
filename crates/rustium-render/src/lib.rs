@@ -14,18 +14,20 @@ mod material_pipelines;
 mod materials;
 mod offline;
 mod path_tracer;
+mod ray_scene;
 mod resolve;
 mod trace_scene;
 mod viewport_renderer;
 
 pub use error::Error;
 pub use glass_pass::GlassRect;
-pub use gpu_context::{GpuContext, GpuPreferences, GraphicsBackend};
+pub use gpu_context::{GpuContext, GpuPreferences, GraphicsBackend, request_device};
 pub use material_compiler::{CompileError, CompiledMaterials, PARAM_CAPACITY, compile_materials};
 pub use material_pipelines::CompileStatus;
 pub use materials::{GpuColor, GpuMaterialTable, MaterialBuffers};
 pub use offline::OfflineRenderer;
 pub use path_tracer::{
-    Ground, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage, TraceProgress,
+    Ground, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame, TraceImage,
+    TraceProgress,
 };
 pub use viewport_renderer::{CameraUniform, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};

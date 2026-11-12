@@ -265,6 +265,7 @@ mod tests {
     use rustium_core::{MaterialGraph, SampleMaterial};
 
     use super::*;
+    use crate::gpu_context::GraphicsBackend;
     use crate::material_compiler::{compile_materials, default_compiled};
     use crate::path_tracer::{PathTracer, RayTracing};
     use crate::viewport_renderer::create_scene_layout;
@@ -277,7 +278,10 @@ mod tests {
     }
 
     fn harness() -> Option<Harness> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        // The backends the app opens, so a machine with only DirectX 12 skips instead of failing.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        descriptor.backends = GraphicsBackend::Automatic.backends();
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         let buffers = MaterialBuffers::new(&device);

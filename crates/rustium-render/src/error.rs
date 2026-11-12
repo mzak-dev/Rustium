@@ -1,3 +1,5 @@
+use crate::GraphicsBackend;
+
 /// Errors raised while setting up or using the GPU.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -7,6 +9,9 @@ pub enum Error {
     /// No GPU adapter can present to the window.
     #[error("no compatible graphics adapter found")]
     RequestAdapter(#[from] wgpu::RequestAdapterError),
+    /// The graphics backend the user picked cannot be used yet (see [`GraphicsBackend::is_available`]).
+    #[error("the {0:?} graphics backend is not available yet")]
+    BackendUnavailable(GraphicsBackend),
     /// The graphics device the user picked is not present.
     #[error("graphics device \"{0}\" not found")]
     AdapterNotFound(String),

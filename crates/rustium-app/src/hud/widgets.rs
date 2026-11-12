@@ -228,6 +228,18 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
     options: &[(T, String)],
     enabled: bool,
 ) -> bool {
+    segmented_with_unavailable(ui, value, options, enabled, |_| None)
+}
+
+/// A [`segmented`] control whose options can be greyed out one by one: `unavailable` returns the hover text that
+/// says why an option cannot be picked, or `None` when it can.
+pub(crate) fn segmented_with_unavailable<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, String)],
+    enabled: bool,
+    unavailable: impl Fn(T) -> Option<String>,
+) -> bool {
     let mut changed = false;
     egui::Frame::new()
         .fill(theme::FIELD)
@@ -246,7 +258,11 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
                 };
                 for (option, label) in ordered.into_iter().map(|pair| (&pair.0, &pair.1)) {
                     let look = if *value == *option { Look::On } else { Look::Plain };
-                    if text_button(ui, label, 22.0, look, enabled).clicked() && *value != *option {
+                    let reason = unavailable(*option);
+                    let response = text_button(ui, label, 22.0, look, enabled && reason.is_none());
+                    if let Some(reason) = reason {
+                        response.on_disabled_hover_text(reason);
+                    } else if response.clicked() && *value != *option {
                         *value = *option;
                         changed = true;
                     }

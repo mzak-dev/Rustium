@@ -758,8 +758,7 @@ fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
     let wanted = rustium_render::GraphicsBackend::from(settings.backend);
     let mut devices: Vec<&str> = Vec::new();
     for choice in adapters {
-        let fits = wanted == rustium_render::GraphicsBackend::Automatic || choice.backend == Some(wanted);
-        if fits && !devices.contains(&choice.name.as_str()) {
+        if wanted.offers(choice) && !devices.contains(&choice.name.as_str()) {
             devices.push(&choice.name);
         }
     }
@@ -789,14 +788,17 @@ fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
         Some(&i18n.tr("settings-restart")),
         |ui| {
             let before = settings.backend;
-            widgets::segmented(ui, &mut settings.backend, &backends, true);
+            let work_in_progress = i18n.tr("backend-work-in-progress");
+            widgets::segmented_with_unavailable(ui, &mut settings.backend, &backends, true, |backend| {
+                let available = rustium_render::GraphicsBackend::from(backend).is_available();
+                (!available).then(|| work_in_progress.clone())
+            });
             let wanted = rustium_render::GraphicsBackend::from(settings.backend);
             if settings.backend != before
                 && let Some(name) = &settings.gpu_adapter
-                && !adapters.iter().any(|choice| {
-                    choice.name == *name
-                        && (wanted == rustium_render::GraphicsBackend::Automatic || choice.backend == Some(wanted))
-                })
+                && !adapters
+                    .iter()
+                    .any(|choice| choice.name == *name && wanted.offers(choice))
             {
                 settings.gpu_adapter = None;
             }

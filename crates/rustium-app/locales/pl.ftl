@@ -232,6 +232,7 @@ setting-pt-device-hint = Tryb Render liczy na tej samej karcie co widok; druga k
 pt-device-same = Jak widok
 startup-gpu-fallback = Nie udało się uruchomić wybranego interfejsu graficznego lub karty, więc użyto trybu automatycznego.
 backend-automatic = Automatycznie
+backend-work-in-progress = Prace w toku (WIP): DirectX 12 nie obsługuje jeszcze path tracera trybu Render, więc na razie jest wyłączony.
 setting-ray-tracing = Ray tracing
 setting-ray-tracing-hint = Sprzęt używa jednostek ray query karty graficznej w trybie Render; programowy tracer działa na każdej karcie.
 setting-ray-tracing-unsupported = Ta karta graficzna nie obsługuje ray query, więc używany jest tracer programowy.

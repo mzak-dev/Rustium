@@ -296,6 +296,7 @@ impl TaaPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_context::GraphicsBackend;
 
     const SIZE: u32 = 64;
     const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -322,7 +323,10 @@ mod tests {
     /// mean; a frame with the history ignored passes through unchanged.
     #[test]
     fn a_flickering_image_settles_towards_its_mean() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        // The backends the app opens, so a machine with only DirectX 12 skips instead of failing.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        descriptor.backends = GraphicsBackend::Automatic.backends();
+        let instance = wgpu::Instance::new(descriptor);
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
             eprintln!("no GPU adapter, skipping");
             return;

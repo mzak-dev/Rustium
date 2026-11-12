@@ -1,0 +1,33 @@
+name: Set up Rust
+description: Install the toolchain pinned by rust-toolchain.toml, extra targets, and the cargo cache.
+
+inputs:
+  targets:
+    description: Extra rustup targets, separated by spaces.
+    default: ""
+  cache-key:
+    description: Extra key for the cargo cache, so jobs that build differently do not share one.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        # With no argument rustup installs (and updates) the toolchain and components from rust-toolchain.toml.
+        rustup toolchain install --no-self-update
+        for target in $TARGETS; do
+          rustup target add "$target"
+        done
+        rustc --version
+        cargo --version
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
+      with:
+        key: ${{ inputs.cache-key }}
+        # Pull requests read the cache written by main, never their own, so caches cannot be poisoned from a PR.
+        save-if: ${{ github.ref == 'refs/heads/main' }}

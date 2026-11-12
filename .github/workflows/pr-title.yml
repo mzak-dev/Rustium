@@ -1,0 +1,22 @@
+name: PR title
+
+# Squash merges use the PR title as the commit message, and the release workflow reads those messages to pick
+# the next version, so every title must be a Conventional Commit header.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    name: Conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/release.py check-title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}

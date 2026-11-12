@@ -1,0 +1,98 @@
+name: Release PR approval
+
+# Approves the version-bump PR that release.yml opens on `release/next`, and only that PR. The checks run code
+# from the base branch (main), never from the PR, and read the PR's files through git:
+#
+#   - the PR comes from this repository's `release/next` branch and was opened by the release app;
+#   - it is exactly one commit on top of main;
+#   - it changes only Cargo.toml, Cargo.lock and CHANGELOG.md;
+#   - Cargo.toml differs only in [workspace.package] version, Cargo.lock only in the workspace crates' versions,
+#     and the new version is the one the Conventional Commits since the last tag call for.
+#
+# The approval comes from github-actions[bot] (GITHUB_TOKEN), a different identity from the app that opened the
+# PR, because GitHub does not let an author approve their own PR. Auto-merge, when RELEASE_AUTO_MERGE is 'true',
+# is enabled with the app's token: a merge made by GITHUB_TOKEN would not start the release workflow on main.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release-approve-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  approve:
+    name: Approve the version bump
+    if: >-
+      github.head_ref == 'release/next' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # approve
+    steps:
+      - name: Check who opened the PR
+        run: |
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::Set the RELEASE_BOT_LOGIN variable to the release app's bot login, e.g. my-app[bot] (docs/releasing.md)."
+            exit 1
+          fi
+          if [ "$AUTHOR" != "$EXPECTED" ]; then
+            echo "::error::Release PRs are opened by $EXPECTED; this one was opened by $AUTHOR."
+            exit 1
+          fi
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          EXPECTED: ${{ vars.RELEASE_BOT_LOGIN }}
+
+      - name: Check out main (trusted code), with the PR head as plain git objects
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          # Kept for the fetch below (private repositories); only main's code runs in this job.
+          persist-credentials: true
+
+      - name: Fetch the PR head
+        run: git fetch --no-tags origin "+refs/pull/$NUMBER/head:refs/remotes/pr/head"
+        env:
+          NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Verify the version bump
+        id: verify
+        run: python3 scripts/release.py verify-pr --base "$BASE_SHA" --head "$HEAD_SHA"
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+      - name: Approve
+        run: |
+          gh pr review "$NUMBER" --repo "$GITHUB_REPOSITORY" --approve --body \
+            "Verified automatically: this PR only bumps the workspace to v$VERSION, as the Conventional Commits since the last release call for."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          VERSION: ${{ steps.verify.outputs.version }}
+
+      - name: Get the release app token for auto-merge
+        if: vars.RELEASE_AUTO_MERGE == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Enable auto-merge
+        if: vars.RELEASE_AUTO_MERGE == 'true'
+        run: gh pr merge "$NUMBER" --repo "$GITHUB_REPOSITORY" --auto "--$METHOD"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          METHOD: ${{ vars.RELEASE_MERGE_METHOD || 'squash' }}

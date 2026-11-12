@@ -155,7 +155,8 @@ flowchart LR
 Further reading:
 - [ARCHITECTURE.md](ARCHITECTURE.md): how a frame flows and the coordinate conventions.
 - [GLOSSARY.md](GLOSSARY.md): the project's vocabulary (Scene, Model, Shape, Volume, Edit…).
-- [docs/adr](docs/adr): thirteen architecture decisions with their trade-offs.
+- [docs/adr](docs/adr): fourteen architecture decisions with their trade-offs.
+- [docs/releasing.md](docs/releasing.md): how versions, the changelog and release packages are produced.
 
 ## Development
 
@@ -173,6 +174,10 @@ The tests include property tests for the greedy mesher (it must cover exactly th
 ```bash
 cargo bench -p rustium-core
 ```
+
+## Releases
+
+Prebuilt packages for Windows, Linux and macOS are on the [Releases](https://github.com/mzak-dev/Rustium/releases) page. Versions are not edited by hand: commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:` bumps the minor version, `fix:` the patch), a bot keeps a release PR with the next version and changelog, and merging it builds and publishes the release. See [docs/releasing.md](docs/releasing.md).
 
 ## License
 

@@ -3,6 +3,32 @@
 // Every Model is drawn as one instance: three columns (images of the X, Y and Z axes) and an origin place the
 // Shape in the Scene. column_x.w is the dim factor of Models outside the Focus, column_y.w the drawing rank.
 
+// x: frame number, which moves the dither pattern from frame to frame. Binding 2 of the scene group.
+struct Dither {
+    frame: vec4<f32>,
+};
+
+@group(0) @binding(2) var<uniform> dither: Dither;
+
+// Interleaved gradient noise (Jimenez): a cheap, well spread per-pixel threshold in 0..1; `frame` shifts the pattern.
+fn dither_threshold(pixel: vec2<f32>, frame: f32) -> f32 {
+    let shifted = pixel + vec2<f32>(5.588238 * frame);
+    return fract(52.9829189 * fract(dot(shifted, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Fraction of the light the voxel's surface stops: an opaque Material 1, clear glass a little (its tint, a trace of
+// reflection that grows at grazing angles), haze by its density as if it were two voxels thick. The path tracer is
+// the reference for how transparency looks; this only has to read as glass or haze while editing.
+fn surface_coverage(surface: Surface, facing: f32) -> f32 {
+    let r0 = pow((surface.ior - 1.0) / (surface.ior + 1.0), 2.0);
+    let reflection = r0 + (1.0 - r0) * pow(1.0 - clamp(facing, 0.0, 1.0), 5.0);
+    let tint = 1.0 - luma(surface.base_color);
+    let glass = clamp(reflection * 1.5 + tint * 0.9 + 0.1, 0.0, 1.0);
+    let haze = 1.0 - exp(-surface.volume_density * 2.0);
+    let through = surface.transmission * (1.0 - glass);
+    return clamp(1.0 - through * (1.0 - haze), 0.0, 1.0);
+}
+
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
@@ -48,8 +74,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let surface = evaluate_material(in.color_index, in.world, in.normal);
     // The Material may bend the normal (Voxel bevel); it only changes the shading.
     let normal = surface.normal;
+    // Glass and haze: draw only the share of pixels that the surface covers, a different share each frame, and let
+    // the temporal pass average them (ADR 0006).
+    if (surface.transmission > 0.0 || surface.volume_density > 0.0) {
+        let facing = abs(dot(normalize(camera.eye.xyz - in.world), normal));
+        if (dither_threshold(in.clip.xy, dither.frame.x) >= surface_coverage(surface, facing)) {
+            discard;
+        }
+    }
     // Glowing voxels show their emission color unlit (not dimmed); the path tracer is the reference for how they
-    // light things. Transmission stays opaque here until the dithered transparency of M4.
+    // light things.
     if (surface.emission_strength > 0.0) {
         return vec4<f32>(surface.emission_color, 1.0);
     }

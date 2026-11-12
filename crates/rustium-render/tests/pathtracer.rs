@@ -11,8 +11,8 @@
 
 use glam::{IVec3, Mat4, Vec3};
 use rustium_core::{
-    Brush, ColorId, Command, Face, GraphEdit, GraphNodeKind, HitTarget, InputValue, Mirror, NodeId, Orientation, RayHit, SampleMaterial, Scene,
-    SurfaceConstants, Transform, VoxelTool, apply,
+    Brush, ColorId, Command, Face, GraphEdit, GraphNodeKind, HitTarget, InputValue, Mirror, NodeId, Orientation,
+    RayHit, SampleMaterial, Scene, SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
     Ground, MaterialBuffers, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame,
@@ -1289,7 +1289,10 @@ fn scattering_haze_changes_the_view_through_it() {
     let empty = render(&gpu, &Scene::new(), &camera, &setup);
     let spot = camera.pixel(Vec3::new(0.0, 3.0, 0.0));
     let (in_fog, open) = (area_luminance(&foggy, spot), area_luminance(&empty, spot));
-    assert!((in_fog - open).abs() > 0.05 * open, "fog {in_fog} changes the view {open}");
+    assert!(
+        (in_fog - open).abs() > 0.05 * open,
+        "fog {in_fog} changes the view {open}"
+    );
     assert!(foggy.rgba.iter().all(|value| value.is_finite()));
 }
 

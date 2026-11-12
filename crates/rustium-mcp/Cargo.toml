@@ -8,12 +8,15 @@ license.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+
+# The server and the stdio bridge need sockets and tokio; a wasm32 build only has the permission switches.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crossbeam-channel.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -33,7 +33,9 @@ fn fs_composite(in: FullscreenOutput) -> @location(0) vec4<f32> {
     if (coverage <= 0.0) {
         return color;
     }
-    let soft = textureSample(blurred, composite_sampler, in.uv).rgb;
+    // Explicit level: an implicit-derivative sample is not allowed after a branch on a per-pixel value (WGSL
+    // uniformity rules, which browsers enforce). The blur target has one mip level, so the result is the same.
+    let soft = textureSampleLevel(blurred, composite_sampler, in.uv, 0.0).rgb;
     let grey = dot(soft, vec3<f32>(0.2126, 0.7152, 0.0722));
     let saturated = mix(vec3<f32>(grey), soft, 1.2);
     return vec4<f32>(mix(color.rgb, saturated, coverage), 1.0);

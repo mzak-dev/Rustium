@@ -558,6 +558,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3103,6 +3113,7 @@ dependencies = [
  "fluent-bundle",
  "fluent-syntax",
  "glam",
+ "js-sys",
  "png",
  "pollster 0.4.0",
  "rfd",
@@ -3118,7 +3129,12 @@ dependencies = [
  "tracing-appender",
  "tracing-error",
  "tracing-subscriber",
+ "tracing-web",
  "unic-langid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "wgpu",
  "winit",
 ]
@@ -3171,12 +3187,15 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "naga",
  "png",
  "pollster 0.4.0",
  "rustium-core",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "wasm-bindgen-futures",
+ "web-time",
  "wgpu",
 ]
 
@@ -3188,6 +3207,18 @@ dependencies = [
  "mlua",
  "rustium-core",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rustium-web"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "rustium-app",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-web",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3978,6 +4009,19 @@ dependencies = [
  "thread_local",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tracing-web"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad1b385bc34748a00827cfaf5862756937e6738d6df2c9921a1a01ee39fd9bdb"
+dependencies = [
+ "js-sys",
+ "tracing-core",
+ "tracing-subscriber",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

@@ -1,6 +1,9 @@
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
 use std::path::PathBuf;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use egui::ViewportId;
@@ -10,10 +13,16 @@ use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_platform::{HitRegions, Platform};
 use rustium_render::{
     AdapterChoice, CameraUniform, GlassRect, GpuContext, GpuPreferences, LineVertex, ModelDraw, RayTracing, TraceFrame,
-    ViewportFrame, ViewportRenderer, available_adapters, startup_fallback,
+    ViewportFrame, ViewportRenderer,
 };
-use tracing::{error, info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use rustium_render::{available_adapters, startup_fallback};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::warn;
+use tracing::{error, info};
+use web_time::{Duration, Instant};
 use winit::application::ApplicationHandler;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
@@ -27,11 +36,16 @@ use crate::hud::{self, AppCommand, Hud, Mode, PreviewShape, Toast, UiState};
 use crate::i18n::I18n;
 use crate::mcp::McpHost;
 use crate::recent::{self, RecentFile};
-use crate::render_job::{self, Destination, JobSpec, Output, OutputKind};
-use crate::render_mode::{Backdrop, ImageFormat};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::render_job::{Destination, JobSpec, Output, OutputKind};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::render_mode::Backdrop;
+use crate::render_mode::ImageFormat;
 use crate::render_output::SaveOutcome;
-use crate::settings::{Backend, FrameLimit, RayTracingMode, Settings};
-use crate::{settings_window, splash, theme};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::settings::Backend;
+use crate::settings::{FrameLimit, RayTracingMode, Settings};
+use crate::{render_job, settings_window, splash, theme};
 
 mod documents;
 
@@ -46,6 +60,9 @@ pub(crate) enum UserEvent {
     Automation,
     /// The IO thread finished a job.
     Io,
+    /// The browser answered the request for a GPU (see [`App::gpu_slot`]).
+    #[cfg(target_arch = "wasm32")]
+    GpuReady,
 }
 
 /// The winit application: owns the settings and, once resumed, the running editor.
@@ -55,7 +72,14 @@ pub(crate) struct App {
     running: Option<Running>,
     error: Option<color_eyre::Report>,
     /// A file named on the command line, opened at startup.
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "a page has no command line"))]
     open_path: Option<PathBuf>,
+    /// The canvas while the browser is still looking for a GPU.
+    #[cfg(target_arch = "wasm32")]
+    pending_window: Option<Arc<Window>>,
+    /// Where the asynchronous GPU request leaves its result before it sends [`UserEvent::GpuReady`].
+    #[cfg(target_arch = "wasm32")]
+    gpu_slot: Rc<RefCell<Option<Result<GpuContext>>>>,
 }
 
 impl App {
@@ -66,16 +90,44 @@ impl App {
             running: None,
             error: None,
             open_path,
+            #[cfg(target_arch = "wasm32")]
+            pending_window: None,
+            #[cfg(target_arch = "wasm32")]
+            gpu_slot: Rc::default(),
         }
     }
 
     /// The error that stopped the event loop, if any.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_result(self) -> Result<()> {
         self.error.map_or(Ok(()), Err)
     }
 
+    /// Builds the editor around the GPU the browser handed out.
+    #[cfg(target_arch = "wasm32")]
+    fn start_with_gpu(&mut self, event_loop: &ActiveEventLoop) {
+        let opened = self.gpu_slot.borrow_mut().take();
+        let (Some(window), Some(opened)) = (self.pending_window.take(), opened) else {
+            return;
+        };
+        let started =
+            opened.and_then(|gpu| Running::assemble(window, gpu, None, &mut self.settings, &self.proxy, None));
+        match started {
+            Ok(mut running) => {
+                // The canvas got its size while the GPU was on its way, and that Resized event found no editor.
+                let size = running.window.inner_size();
+                running.gpu.resize(size.width, size.height);
+                running.window.request_redraw();
+                self.running = Some(running);
+            }
+            Err(report) => self.fail(event_loop, report),
+        }
+    }
+
     fn fail(&mut self, event_loop: &ActiveEventLoop, report: color_eyre::Report) {
         error!(error = ?report, "fatal error");
+        #[cfg(target_arch = "wasm32")]
+        crate::web::show_fatal_error(&format!("{report:#}"));
         self.error = Some(report);
         event_loop.exit();
     }
@@ -138,6 +190,7 @@ struct Running {
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    #[cfg(not(target_arch = "wasm32"))]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.running.is_some() {
             return;
@@ -146,6 +199,31 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(running) => self.running = Some(running),
             Err(report) => self.fail(event_loop, report),
         }
+    }
+
+    /// The browser hands out a GPU only asynchronously: the canvas is set up now, the editor once
+    /// [`UserEvent::GpuReady`] arrives.
+    #[cfg(target_arch = "wasm32")]
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.running.is_some() || self.pending_window.is_some() {
+            return;
+        }
+        let window = match create_window(event_loop) {
+            Ok(window) => window,
+            Err(report) => return self.fail(event_loop, report),
+        };
+        let size = window.inner_size();
+        let target = Arc::clone(&window);
+        let slot = Rc::clone(&self.gpu_slot);
+        let proxy = self.proxy.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let opened = GpuContext::new(target, size.width, size.height, GpuPreferences::default())
+                .await
+                .wrap_err("cannot open the GPU (this browser may not support WebGPU)");
+            *slot.borrow_mut() = Some(opened);
+            let _ = proxy.send_event(UserEvent::GpuReady);
+        });
+        self.pending_window = Some(window);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
@@ -181,6 +259,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        #[cfg(target_arch = "wasm32")]
+        if event == UserEvent::GpuReady {
+            return self.start_with_gpu(event_loop);
+        }
         let Some(running) = &mut self.running else {
             return;
         };
@@ -195,6 +277,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 running.window.request_redraw();
             }
+            #[cfg(target_arch = "wasm32")]
+            UserEvent::GpuReady => {}
         }
     }
 
@@ -219,65 +303,36 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl Running {
+    #[cfg(not(target_arch = "wasm32"))]
     fn new(
         event_loop: &ActiveEventLoop,
         settings: &mut Settings,
         proxy: &EventLoopProxy<UserEvent>,
         open_path: Option<PathBuf>,
     ) -> Result<Self> {
+        let window = create_window(event_loop)?;
+        let (gpu, startup_notice) = open_gpu(&window, settings)?;
+        Self::assemble(window, gpu, startup_notice, settings, proxy, open_path)
+    }
+
+    /// Builds the editor around an open window and GPU. `startup_notice` is shown as a toast.
+    fn assemble(
+        window: Arc<Window>,
+        mut gpu: GpuContext,
+        startup_notice: Option<String>,
+        settings: &mut Settings,
+        proxy: &EventLoopProxy<UserEvent>,
+        open_path: Option<PathBuf>,
+    ) -> Result<Self> {
         let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
-        let attributes = Window::default_attributes()
-            .with_title("Rustium")
-            .with_decorations(false)
-            .with_inner_size(LogicalSize::new(1440.0, 900.0))
-            .with_min_inner_size(LogicalSize::new(960.0, 640.0))
-            .with_window_icon(Icon::from_rgba(logo_rgba.clone(), logo_size.0, logo_size.1).ok());
-        #[cfg(windows)]
-        let attributes = {
-            use winit::platform::windows::WindowAttributesExtWindows;
-            attributes.with_undecorated_shadow(true)
-        };
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .wrap_err("cannot create the window")?,
-        );
         let platform = Platform::attach(&*window);
-        let size = window.inner_size();
-        let preferences = GpuPreferences {
-            backend: settings.backend.into(),
-            adapter: settings.gpu_adapter.clone(),
-        };
-        let mut startup_notice = None;
-        let mut gpu = match pollster::block_on(GpuContext::new(
-            Arc::clone(&window),
-            size.width,
-            size.height,
-            preferences.clone(),
-        )) {
-            Ok(gpu) => gpu,
-            Err(error) => {
-                // A saved backend or device that no longer works must never keep the editor from starting.
-                let Some(fallback) = startup_fallback(&preferences) else {
-                    return Err(error).wrap_err("cannot open the GPU");
-                };
-                warn!(%error, "the chosen graphics backend or device failed, falling back to Automatic");
-                let gpu = pollster::block_on(GpuContext::new(Arc::clone(&window), size.width, size.height, fallback))
-                    .wrap_err("cannot open the GPU")?;
-                settings.backend = Backend::Automatic;
-                settings.gpu_adapter = None;
-                settings.save();
-                startup_notice = Some(I18n::new(settings.language).tr("startup-gpu-fallback"));
-                gpu
-            }
-        };
         gpu.set_vsync(settings.vsync);
         let sample_counts = gpu.supported_sample_counts(wgpu::TextureFormat::Rgba8UnormSrgb);
         let samples = best_sample_count(&sample_counts, settings.msaa_samples);
         let mut viewport = ViewportRenderer::new(&gpu, samples);
         viewport.set_ray_tracing(&gpu, ray_tracing(settings.ray_tracing));
         let adapter_name = gpu.adapter_info().name;
-        let adapters = pollster::block_on(available_adapters());
+        let adapters = list_adapters();
         info!(samples, "viewport ready");
 
         let egui_ctx = egui::Context::default();
@@ -607,6 +662,8 @@ impl Running {
     /// Applies one HUD command; returns `true` when the app should quit.
     fn run_command(&mut self, command: AppCommand, settings: &mut Settings) -> bool {
         match command {
+            // A page is closed with its tab; leaving the event loop would only freeze it.
+            AppCommand::Quit if !crate::DESKTOP => {}
             AppCommand::Quit => return self.request(Pending::Quit, settings),
             AppCommand::NewScene => return self.request(Pending::New, settings),
             AppCommand::Open(path) => return self.request(Pending::Open(path), settings),
@@ -660,7 +717,14 @@ impl Running {
                 }
             }
             AppCommand::RestartRender => self.viewport.restart_trace(),
-            AppCommand::RunScript => self.run_script_file(),
+            AppCommand::RunScript => {
+                #[cfg(not(target_arch = "wasm32"))]
+                self.run_script_file();
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.ui.toast = Some(Toast::new(self.i18n.tr("web-desktop-only"), false));
+                }
+            }
         }
         false
     }
@@ -685,6 +749,7 @@ impl Running {
     }
 
     /// Main menu → Run script: pick a `.luau` file, run it on the Focus Model as one History step and report.
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_script_file(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .set_title(self.i18n.tr("menu-run-script"))
@@ -791,8 +856,15 @@ impl Running {
         }
     }
 
+    /// The browser cannot run render jobs (they need threads and files): says so under the Output tab.
+    #[cfg(target_arch = "wasm32")]
+    fn start_job(&mut self, _kind: JobKind) {
+        self.ui.render.message = Some(self.i18n.tr("web-desktop-only"));
+    }
+
     /// Starts a still, turntable or queue job on a worker thread, unless one is already running. Everything saved is
     /// rendered at the full output size by an offline renderer; the interactive preview is only a preview.
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_job(&mut self, kind: JobKind) {
         if self.ui.render.job.is_some() {
             return;
@@ -865,6 +937,7 @@ impl Running {
     }
 
     /// The translated reason when an image of `outputs` does not fit the GPU, or `None` when they all do.
+    #[cfg(not(target_arch = "wasm32"))]
     fn image_too_large(&self, outputs: &[Output]) -> Option<String> {
         outputs.iter().flat_map(|output| &output.frames).find_map(|frame| {
             match rustium_render::check_image_size(self.gpu.device(), frame.size) {
@@ -1068,6 +1141,75 @@ fn push_box(lines: &mut Vec<LineVertex>, volume: Volume, inflate: f32, color: [f
             color,
         });
     }
+}
+
+/// The editor's frameless window, or in the browser the page's canvas.
+fn create_window(event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
+    let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
+    let attributes = Window::default_attributes()
+        .with_title("Rustium")
+        .with_decorations(false)
+        .with_window_icon(Icon::from_rgba(logo_rgba, logo_size.0, logo_size.1).ok());
+    #[cfg(not(target_arch = "wasm32"))]
+    let attributes = attributes
+        .with_inner_size(LogicalSize::new(1440.0, 900.0))
+        .with_min_inner_size(LogicalSize::new(960.0, 640.0));
+    #[cfg(windows)]
+    let attributes = {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attributes.with_undecorated_shadow(true)
+    };
+    #[cfg(target_arch = "wasm32")]
+    let attributes = crate::web::canvas_attributes(attributes)?;
+    let window = event_loop
+        .create_window(attributes)
+        .wrap_err("cannot create the window")?;
+    Ok(Arc::new(window))
+}
+
+/// Opens the GPU the settings ask for, falling back to Automatic when that fails. The second value is a notice for the
+/// user when the fallback was taken (and the settings were changed to match).
+#[cfg(not(target_arch = "wasm32"))]
+fn open_gpu(window: &Arc<Window>, settings: &mut Settings) -> Result<(GpuContext, Option<String>)> {
+    let size = window.inner_size();
+    let preferences = GpuPreferences {
+        backend: settings.backend.into(),
+        adapter: settings.gpu_adapter.clone(),
+    };
+    let opened = pollster::block_on(GpuContext::new(
+        Arc::clone(window),
+        size.width,
+        size.height,
+        preferences.clone(),
+    ));
+    match opened {
+        Ok(gpu) => Ok((gpu, None)),
+        Err(error) => {
+            // A saved backend or device that no longer works must never keep the editor from starting.
+            let Some(fallback) = startup_fallback(&preferences) else {
+                return Err(error).wrap_err("cannot open the GPU");
+            };
+            warn!(%error, "the chosen graphics backend or device failed, falling back to Automatic");
+            let gpu = pollster::block_on(GpuContext::new(Arc::clone(window), size.width, size.height, fallback))
+                .wrap_err("cannot open the GPU")?;
+            settings.backend = Backend::Automatic;
+            settings.gpu_adapter = None;
+            settings.save();
+            Ok((gpu, Some(I18n::new(settings.language).tr("startup-gpu-fallback"))))
+        }
+    }
+}
+
+/// Every graphics device on the machine, for the Settings → Performance pickers.
+#[cfg(not(target_arch = "wasm32"))]
+fn list_adapters() -> Vec<AdapterChoice> {
+    pollster::block_on(available_adapters())
+}
+
+/// The browser picks the device itself; there is nothing to choose from.
+#[cfg(target_arch = "wasm32")]
+fn list_adapters() -> Vec<AdapterChoice> {
+    Vec::new()
 }
 
 /// Minimum time between frames when vertical sync is off and a frame limit is set.

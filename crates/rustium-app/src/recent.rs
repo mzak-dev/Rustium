@@ -51,7 +51,12 @@ pub(crate) fn load() -> Vec<RecentFile> {
 }
 
 /// Writes the list; failures are logged because losing it must not interrupt editing.
+///
+/// The browser keeps no list: a file it opened cannot be opened again by its name.
 pub(crate) fn save(files: &[RecentFile]) {
+    if !crate::DESKTOP {
+        return;
+    }
     let path = list_path();
     let list = RecentList { files: files.to_vec() };
     let result = toml::to_string_pretty(&list)

@@ -99,24 +99,27 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                         }
                     });
                 }
-                widgets::divider(ui, 32.0);
-                if widgets::icon_button(ui, Icon::Minimize, 32.0, Look::Plain, true)
-                    .on_hover_text(hud.tr("window-minimize"))
-                    .clicked()
-                {
-                    hud.send(AppCommand::Minimize);
-                }
-                let maximize = widgets::icon_button(ui, Icon::Maximize, 32.0, Look::Plain, true)
-                    .on_hover_text(hud.tr("window-maximize"));
-                hud.ui.maximize_button = Some(maximize.rect);
-                if maximize.clicked() {
-                    hud.send(AppCommand::ToggleMaximize);
-                }
-                if widgets::icon_button(ui, Icon::Close, 32.0, Look::Plain, true)
-                    .on_hover_text(hud.tr("window-close"))
-                    .clicked()
-                {
-                    hud.send(AppCommand::Quit);
+                // In the browser the page is the window: the tab has its own buttons.
+                if crate::DESKTOP {
+                    widgets::divider(ui, 32.0);
+                    if widgets::icon_button(ui, Icon::Minimize, 32.0, Look::Plain, true)
+                        .on_hover_text(hud.tr("window-minimize"))
+                        .clicked()
+                    {
+                        hud.send(AppCommand::Minimize);
+                    }
+                    let maximize = widgets::icon_button(ui, Icon::Maximize, 32.0, Look::Plain, true)
+                        .on_hover_text(hud.tr("window-maximize"));
+                    hud.ui.maximize_button = Some(maximize.rect);
+                    if maximize.clicked() {
+                        hud.send(AppCommand::ToggleMaximize);
+                    }
+                    if widgets::icon_button(ui, Icon::Close, 32.0, Look::Plain, true)
+                        .on_hover_text(hud.tr("window-close"))
+                        .clicked()
+                    {
+                        hud.send(AppCommand::Quit);
+                    }
                 }
             });
         },

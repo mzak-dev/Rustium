@@ -1,6 +1,8 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -194,29 +196,22 @@ impl Default for Settings {
 impl Settings {
     /// Reads the saved settings, falling back to defaults when the file is missing or unreadable.
     pub(crate) fn load() -> Self {
-        let path = settings_path();
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(text) = read_settings_text() else {
             return Self::default();
         };
         toml::from_str(&text).unwrap_or_else(|error| {
-            warn!(path = %path.display(), %error, "settings file is invalid, using defaults");
+            warn!(%error, "settings are invalid, using defaults");
             Self::default()
         })
     }
 
     /// Writes the settings; failures are logged because losing preferences must not interrupt editing.
     pub(crate) fn save(&self) {
-        let path = settings_path();
         let result = toml::to_string_pretty(self)
             .map_err(|error| error.to_string())
-            .and_then(|text| {
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                }
-                fs::write(&path, text).map_err(|error| error.to_string())
-            });
+            .and_then(|text| write_settings_text(&text));
         if let Err(error) = result {
-            warn!(path = %path.display(), %error, "cannot save settings");
+            warn!(%error, "cannot save settings");
         }
     }
 
@@ -266,10 +261,12 @@ impl Settings {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("dev", "mzak", "Rustium")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn settings_path() -> PathBuf {
     project_dirs().map_or_else(
         || PathBuf::from("settings.toml"),
@@ -277,9 +274,45 @@ fn settings_path() -> PathBuf {
     )
 }
 
+/// The text of the settings file, if there is one.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_settings_text() -> Option<String> {
+    fs::read_to_string(settings_path()).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_settings_text(text: &str) -> Result<(), String> {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+    }
+    fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Where the browser keeps the settings: the same TOML as the desktop's settings file, in local storage.
+#[cfg(target_arch = "wasm32")]
+const SETTINGS_KEY: &str = "rustium.settings";
+
+#[cfg(target_arch = "wasm32")]
+fn read_settings_text() -> Option<String> {
+    crate::web::storage_get(SETTINGS_KEY)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_settings_text(text: &str) -> Result<(), String> {
+    crate::web::storage_set(SETTINGS_KEY, text).map_err(|report| format!("{report:#}"))
+}
+
 /// Local data directory for logs and recovery files.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn data_dir() -> PathBuf {
     project_dirs().map_or_else(|| PathBuf::from("."), |dirs| dirs.data_local_dir().to_path_buf())
+}
+
+/// The browser has no file system: nothing is ever found or written under this directory.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn data_dir() -> PathBuf {
+    PathBuf::from("/rustium")
 }
 
 #[cfg(test)]

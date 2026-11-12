@@ -184,6 +184,7 @@ pub(crate) struct Distance {
 }
 
 /// What a finished script run did.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub(crate) struct ScriptRun {
     pub(crate) changed: bool,
@@ -936,6 +937,7 @@ impl Editor {
     }
 
     /// Runs a Luau script on the Model `model` as one History step. A failing script changes nothing.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn run_script(
         &mut self,
         model: NodeId,

@@ -231,6 +231,7 @@ setting-pt-device = Path tracing device
 setting-pt-device-hint = Render mode traces on the same GPU as the viewport; using a second device is not supported yet.
 pt-device-same = Same as viewport
 startup-gpu-fallback = The chosen graphics backend or device could not be started, so Automatic was used instead.
+web-desktop-only = Available in the desktop app.
 backend-automatic = Automatic
 backend-work-in-progress = Work in progress (WIP): DirectX 12 cannot run the Render mode path tracer yet, so it is turned off for now.
 setting-ray-tracing = Ray tracing

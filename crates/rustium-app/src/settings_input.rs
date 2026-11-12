@@ -6,8 +6,10 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{fs, thread};
 
+#[cfg(not(target_arch = "wasm32"))]
 use color_eyre::eyre::WrapErr;
 use egui::{Color32, ComboBox, Context, RichText, Stroke, Ui, vec2};
 use fluent_bundle::FluentValue;
@@ -346,6 +348,7 @@ fn pending_banner(ui: &mut Ui, hud: &mut Hud<'_>) {
 }
 
 /// Opens the import (`export == None`) or export dialog on a worker thread.
+#[cfg(not(target_arch = "wasm32"))]
 fn start_job(hud: &mut Hud<'_>, export: Option<String>) {
     let (sender, receiver) = mpsc::channel();
     let name = if export.is_some() {
@@ -370,17 +373,41 @@ fn start_job(hud: &mut Hud<'_>, export: Option<String>) {
     }
 }
 
-fn import_dialog() -> FileOutcome {
-    let Some(path) = rfd::FileDialog::new()
-        .add_filter("Rustium keymap", &["toml"])
-        .pick_file()
-    else {
-        return FileOutcome::Cancelled;
-    };
-    let result = fs::read_to_string(&path)
-        .wrap_err_with(|| format!("cannot read {}", path.display()))
-        .and_then(|text| Keymap::from_file_text(&text));
-    match result {
+/// Opens the browser's file picker for an import (`export == None`), or downloads the export at once.
+#[cfg(target_arch = "wasm32")]
+fn start_job(hud: &mut Hud<'_>, export: Option<String>) {
+    let (sender, receiver) = mpsc::channel();
+    if let Some(text) = export {
+        let outcome = match crate::web::download(EXPORT_NAME, text.as_bytes()) {
+            Ok(()) => FileOutcome::Exported(PathBuf::from(EXPORT_NAME)),
+            Err(report) => FileOutcome::Failed {
+                import: false,
+                reason: format!("{report:#}"),
+            },
+        };
+        let _ = sender.send(outcome);
+    } else {
+        let title = hud.tr("keymap-import");
+        wasm_bindgen_futures::spawn_local(async move {
+            let outcome = match crate::web::pick_file(title, KEYMAP_FILTER.to_owned(), vec!["toml"]).await {
+                Some((_, bytes)) => imported(&String::from_utf8_lossy(&bytes)),
+                None => FileOutcome::Cancelled,
+            };
+            let _ = sender.send(outcome);
+        });
+    }
+    hud.ui.keymap_ui.job = Some(receiver);
+}
+
+/// Name of the keymap file filter in the dialogs.
+const KEYMAP_FILTER: &str = "Rustium keymap";
+
+/// File name an export suggests.
+const EXPORT_NAME: &str = "rustium-keymap.toml";
+
+/// The outcome of importing the text of a keymap file.
+fn imported(text: &str) -> FileOutcome {
+    match Keymap::from_file_text(text) {
         Ok((keymap, skipped)) => FileOutcome::Imported { keymap, skipped },
         Err(report) => FileOutcome::Failed {
             import: true,
@@ -389,10 +416,25 @@ fn import_dialog() -> FileOutcome {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn import_dialog() -> FileOutcome {
+    let Some(path) = rfd::FileDialog::new().add_filter(KEYMAP_FILTER, &["toml"]).pick_file() else {
+        return FileOutcome::Cancelled;
+    };
+    match fs::read_to_string(&path).wrap_err_with(|| format!("cannot read {}", path.display())) {
+        Ok(text) => imported(&text),
+        Err(report) => FileOutcome::Failed {
+            import: true,
+            reason: format!("{report:#}"),
+        },
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn export_dialog(text: &str) -> FileOutcome {
     let Some(path) = rfd::FileDialog::new()
-        .add_filter("Rustium keymap", &["toml"])
-        .set_file_name("rustium-keymap.toml")
+        .add_filter(KEYMAP_FILTER, &["toml"])
+        .set_file_name(EXPORT_NAME)
         .save_file()
     else {
         return FileOutcome::Cancelled;

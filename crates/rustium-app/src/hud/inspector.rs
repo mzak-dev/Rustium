@@ -129,11 +129,14 @@ fn tabs(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
     egui::Frame::new().inner_margin(4).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            for (tab, key) in [
+            let tabs = [
                 (InspectorTab::Scene, "tab-scene"),
                 (InspectorTab::History, "tab-history"),
                 (InspectorTab::Mcp, "tab-mcp"),
-            ] {
+            ];
+            // A page cannot serve MCP.
+            let shown = if crate::DESKTOP { &tabs[..] } else { &tabs[..2] };
+            for &(tab, key) in shown {
                 let look = if hud.ui.inspector_tab == tab {
                     Look::On
                 } else {

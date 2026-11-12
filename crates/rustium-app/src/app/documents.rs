@@ -2,11 +2,11 @@
 //! recovery and the recent files list.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use fluent_bundle::FluentValue;
 use rustium_core::NodeId;
 use tracing::{debug, info, warn};
+use web_time::{Duration, Instant};
 
 use super::Running;
 use crate::files::{self, IoJob, IoOutcome, Operation, Origin, Pending, SaveJob, SaveStart};
@@ -213,7 +213,12 @@ impl Running {
 
     /// Writes a recovery copy when the interval has passed and the Scene changed since the last one.
     pub(super) fn autosave_tick(&mut self, settings: &Settings) {
-        if !settings.autosave || self.doc.saving || matches!(self.ui.prompt, Some(Prompt::Recovery(_))) {
+        // The browser could only hand a recovery copy out as a download.
+        if !crate::DESKTOP
+            || !settings.autosave
+            || self.doc.saving
+            || matches!(self.ui.prompt, Some(Prompt::Recovery(_)))
+        {
             return;
         }
         let now = Instant::now();
@@ -231,7 +236,8 @@ impl Running {
 
     /// When the event loop must wake up for the next autosave, if one is pending.
     pub(super) fn next_autosave(&self, settings: &Settings) -> Option<Instant> {
-        let waiting = settings.autosave
+        let waiting = crate::DESKTOP
+            && settings.autosave
             && !self.doc.saving
             && !matches!(self.ui.prompt, Some(Prompt::Recovery(_)))
             && self.is_dirty()

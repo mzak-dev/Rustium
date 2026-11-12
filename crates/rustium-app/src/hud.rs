@@ -94,6 +94,14 @@ pub(crate) struct UiState {
     pub(crate) tool_wheel: Option<Pos2>,
     /// Where the right button went down over the viewport, until it is released.
     pub(crate) wheel_press: Option<Pos2>,
+    /// What the middle-button orbit turns around, chosen when the button went down.
+    pub(crate) orbit_pivot: Option<glam::Vec3>,
+    /// The move gizmo arrow being dragged.
+    pub(crate) gizmo: Option<viewport::GizmoDrag>,
+    /// The camera gesture of the mouse button held over the Model view.
+    pub(crate) nav: Option<crate::mouse_map::Gesture>,
+    /// Fly speed in voxels per second; the wheel changes it while flying.
+    pub(crate) fly_speed: f32,
     /// The primary press in progress began while a text field had focus, so it must not reach the Tools.
     pub(crate) press_swallowed: bool,
     /// Viewport cursor bookkeeping.
@@ -146,6 +154,10 @@ impl UiState {
             text_focus_before: false,
             tool_wheel: None,
             wheel_press: None,
+            nav: None,
+            gizmo: None,
+            orbit_pivot: None,
+            fly_speed: 24.0,
             press_swallowed: false,
             cursor: CursorUi::default(),
             marquee: None,
@@ -599,7 +611,10 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         return;
     }
     let busy = hud.editor.is_stroking() || hud.ui.effects.gesture.is_some() || egui::Popup::is_any_open(ctx);
-    open_wheel_on_right_click(ctx, hud, &response, pointer, busy);
+    // Model mode flies on the right button instead of opening the wheel.
+    if hud.ui.mode != Mode::Model {
+        open_wheel_on_right_click(ctx, hud, &response, pointer, busy);
+    }
 
     // A press that began while a text field had focus only commits the field: the Tool must not act on it.
     let (pressed, down, released) = ctx.input(|input| {
@@ -696,6 +711,34 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
     };
     if scope == Scope::Effects {
         effects::extra_keys(ctx, hud);
+    }
+    // A color code pasted anywhere outside a text field picks that Color.
+    let pasted: Vec<String> = ctx.input(|input| {
+        input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Paste(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    for text in pasted {
+        hotbar::paste_hex(hud, &text);
+    }
+    if scope == Scope::Model {
+        let (all, join) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::J),
+            )
+        });
+        if all {
+            hud.editor.select_all();
+        }
+        if join {
+            hud.editor.merge_selected();
+        }
     }
     let pressed = ctx.input_mut(|input| hud.settings.keymap.take_pressed(input, scope));
     if scope == Scope::Effects && pressed.contains(&Action::AddNode) {

@@ -37,11 +37,12 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(34.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
+                let mouse = hud.settings.mouse;
                 let all = [
-                    ("LMB", "hint-place"),
-                    ("RMB", "hint-tool-wheel"),
-                    ("MMB", "hint-orbit"),
-                    ("Shift MMB", "hint-pan"),
+                    ("LMB".to_owned(), "hint-place"),
+                    (format!("{} WASD", mouse.fly), "hint-fly"),
+                    (mouse.orbit.to_string(), "hint-orbit"),
+                    (mouse.pan.to_string(), "hint-pan"),
                 ];
                 let shown = match hints_level {
                     0 => 4,
@@ -51,7 +52,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 for (button, key) in all.into_iter().take(shown) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(widgets::mono(button, 11.0).color(theme::TEXT));
+                        ui.label(widgets::mono(button.as_str(), 11.0).color(theme::TEXT));
                         ui.label(RichText::new(hud.tr(key)).color(theme::MUTED).size(11.0));
                     });
                 }

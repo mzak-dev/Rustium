@@ -67,36 +67,6 @@ pub(crate) fn text_button(ui: &mut Ui, text: &str, height: f32, look: Look, enab
     response
 }
 
-/// One row of a popup menu: full width, a check mark when `selected`, a subtle fill on hover and when selected.
-pub(crate) fn menu_row(ui: &mut Ui, text: &str, selected: bool) -> Response {
-    let width = 180.0;
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 6, theme::HOVER);
-    } else if selected {
-        ui.painter().rect_filled(rect, 6, theme::ACTIVE);
-    }
-    if selected {
-        let origin = rect.left_center() + vec2(10.0, 0.0);
-        let check = [vec2(0.0, 0.0), vec2(3.0, 3.5), vec2(8.0, -3.5)].map(|offset| origin + offset);
-        ui.painter()
-            .add(egui::Shape::line(check.to_vec(), Stroke::new(1.6, theme::TEXT)));
-    }
-    let color = if selected || response.hovered() {
-        Color32::WHITE
-    } else {
-        theme::TEXT
-    };
-    ui.painter().text(
-        rect.left_center() + vec2(28.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(12.0),
-        color,
-    );
-    response
-}
-
 /// A dialog footer button of a fixed `size`; `Look::Accent` is the filled primary one, anything else is outlined.
 pub(crate) fn dialog_button(ui: &mut Ui, text: &str, size: Vec2, look: Look) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -270,6 +240,15 @@ pub(crate) fn segmented_with_unavailable<T: PartialEq + Copy>(
             });
         });
     changed
+}
+
+/// A Blender-style tooltip: the name in bold and one muted line saying what it does.
+pub(crate) fn tip(response: Response, title: &str, description: &str) -> Response {
+    response.on_hover_ui(|ui| {
+        ui.set_max_width(260.0);
+        ui.label(RichText::new(title).font(theme::bold(12.0)).color(theme::TEXT));
+        ui.label(muted(description).size(11.0));
+    })
 }
 
 /// Muted label text.

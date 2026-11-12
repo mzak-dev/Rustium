@@ -75,29 +75,27 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     }
                 } else {
                     let grid_look = if hud.settings.show_grid { Look::On } else { Look::Plain };
-                    if widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true)
-                        .on_hover_text(hud.tr("grid"))
-                        .clicked()
-                    {
+                    let grid = widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true);
+                    if widgets::tip(grid, &hud.tr("grid"), &hud.tr("grid-tip")).clicked() {
                         hud.settings.show_grid = !hud.settings.show_grid;
                         hud.send(AppCommand::SettingsChanged);
                     }
-                    let shading = widgets::dropdown_button(ui, &hud.tr("shading-shaded"));
-                    egui::Popup::menu(&shading).show(|ui| {
-                        ui.set_min_width(170.0);
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        let _ = widgets::menu_row(ui, &hud.tr("shading-shaded"), true);
-                        ui.separator();
-                        for (projection, key) in [
-                            (Projection::Perspective, "projection-perspective"),
-                            (Projection::Orthographic, "projection-orthographic"),
-                        ] {
-                            let selected = hud.camera.projection == projection;
-                            if widgets::menu_row(ui, &hud.i18n.tr(key), selected).clicked() {
-                                hud.camera.projection = projection;
-                            }
+                    widgets::divider(ui, 32.0);
+                    for (projection, icon, key) in [
+                        (Projection::Perspective, Icon::Perspective, "projection-perspective"),
+                        (Projection::Orthographic, Icon::Orthographic, "projection-orthographic"),
+                    ] {
+                        let look = if hud.camera.projection == projection {
+                            Look::On
+                        } else {
+                            Look::Plain
+                        };
+                        let button = widgets::icon_button(ui, icon, 32.0, look, true);
+                        let tip = format!("{key}-tip");
+                        if widgets::tip(button, &hud.tr(key), &hud.tr(&tip)).clicked() {
+                            hud.camera.projection = projection;
                         }
-                    });
+                    }
                 }
                 // In the browser the page is the window: the tab has its own buttons.
                 if crate::DESKTOP {

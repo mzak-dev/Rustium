@@ -6,6 +6,7 @@ use egui::{Context, CursorIcon, Pos2};
 
 use super::{Hud, Mode, effects_canvas, render_viewport};
 use crate::cursor::{self, CursorSpec, Look, ModelCtx, PointerInput, RenderCtx};
+use crate::mouse_map::Gesture;
 
 /// Seconds the zoom badge stays after the last wheel tick.
 const ZOOM_BADGE_SECONDS: f64 = 0.35;
@@ -51,7 +52,16 @@ pub(super) fn update(ctx: &Context, hud: &mut Hud<'_>) {
         zooming,
     };
     let spec = match hud.ui.mode {
-        Mode::Model => Some(cursor::resolve_model(&model_context(hud, raw))),
+        Mode::Model => {
+            // The camera cursors follow the gesture of Settings → Input, whatever button it uses.
+            let gesture = hud.ui.nav;
+            let input = PointerInput {
+                middle_down: matches!(gesture, Some(Gesture::Orbit | Gesture::Pan)),
+                shift: gesture == Some(Gesture::Pan) || (gesture.is_none() && raw.shift),
+                ..raw
+            };
+            Some(cursor::resolve_model(&model_context(hud, input)))
+        }
         Mode::Render => cursor::resolve_render(RenderCtx {
             tool: hud.ui.render.tool,
             in_frame: render_viewport::frame_contains(hud, pointer),
@@ -100,5 +110,6 @@ fn model_context(hud: &Hud<'_>, input: PointerInput) -> ModelCtx {
         measuring,
         swatch,
         distance,
+        over_selection: editor.tool == crate::editor::Tool::SelectBox && editor.over_selection(),
     }
 }

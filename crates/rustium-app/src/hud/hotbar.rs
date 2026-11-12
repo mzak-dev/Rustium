@@ -2,7 +2,7 @@
 
 use egui::{Align2, Color32, Context, FontId, Id, Sense, Stroke, StrokeKind, vec2};
 use fluent_bundle::FluentValue;
-use rustium_core::ColorId;
+use rustium_core::{ColorId, Command, MaterialGraph};
 
 use super::widgets::{self, Look};
 use super::{Glass, Hud, Intro, MARGIN, Place, centre_budget, fit_key, fit_level, island};
@@ -18,8 +18,115 @@ fn color_of(hud: &Hud<'_>, id: ColorId) -> Color32 {
     })
 }
 
-fn hex(color: Color32) -> String {
+pub(crate) fn hex(color: Color32) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
+}
+
+/// A pasted `#RRGGBB`: finds or adds that Color, puts it in the active slot and, in Effects mode, gives it the
+/// Material being edited.
+pub(crate) fn paste_hex(hud: &mut Hud<'_>, text: &str) -> bool {
+    let Some(color) = super::effects::parse_hex(text) else {
+        return false;
+    };
+    let Some(id) = hud.editor.color_for([color.r(), color.g(), color.b()]) else {
+        return false;
+    };
+    let slot = hud.editor.active_slot;
+    if let Some(entry) = hud.editor.slots.get_mut(slot) {
+        *entry = id;
+    }
+    let graph = u32::try_from(hud.ui.effects.graph).unwrap_or(0);
+    let assigned = hud.ui.mode == super::Mode::Effects
+        && graph != 0
+        && super::effects::command(hud, &Command::AssignGraphToColors { ids: vec![id], graph });
+    let key = if assigned {
+        "color-pasted-assigned"
+    } else {
+        "color-pasted"
+    };
+    let text = hud.i18n.tr_args(key, &[("hex", FluentValue::from(hex(color)))]);
+    hud.ui.toast = Some(super::Toast::new(text, false));
+    true
+}
+
+/// The right-click menu of a Color: its Material in Effects mode, copy its hex, select its voxels.
+fn color_menu(ui: &mut egui::Ui, hud: &mut Hud<'_>, id: ColorId) {
+    let Some(entry) = hud.editor.scene.palette().get(id).copied() else {
+        return;
+    };
+    let key = if entry.graph == 0 {
+        "color-add-material"
+    } else {
+        "color-edit-material"
+    };
+    if ui.button(hud.tr(key)).clicked() {
+        hud.editor.release();
+        if entry.graph == 0 {
+            super::effects_bars::add_material(hud, MaterialGraph::blank(&hud.i18n.tr("effects-new-name")));
+            let graph = u32::try_from(hud.ui.effects.graph).unwrap_or(0);
+            if graph != 0 {
+                super::effects::command(hud, &Command::AssignGraphToColors { ids: vec![id], graph });
+            }
+        } else {
+            hud.ui.effects.select_graph(usize::try_from(entry.graph).unwrap_or(0));
+            hud.ui.effects.tab = super::effects::EffectsTab::Material;
+        }
+        hud.ui.mode = super::Mode::Effects;
+        ui.close();
+    }
+    let [r, g, b] = entry.color;
+    ui.menu_button(hud.tr("color-edit"), |ui| {
+        let mut color = Color32::from_rgb(r, g, b);
+        if super::effects::color_picker(ui, &mut color) {
+            hud.editor.set_color_live(id, [color.r(), color.g(), color.b()]);
+        }
+        if !ui.input(|input| input.pointer.any_down()) {
+            hud.editor.finish_material_edit();
+        }
+    });
+    if ui.button(hud.tr("color-copy-hex")).clicked() {
+        ui.ctx().copy_text(hex(Color32::from_rgb(r, g, b)));
+        ui.close();
+    }
+    ui.separator();
+    let count = hud.editor.scene.palette().len();
+    let previous = id.get().checked_sub(1).and_then(ColorId::new);
+    let next = ColorId::new(id.get().saturating_add(1)).filter(|next| usize::from(next.get()) <= count);
+    if ui
+        .add_enabled(previous.is_some(), egui::Button::new(hud.tr("color-move-left")))
+        .clicked()
+        && let Some(previous) = previous
+    {
+        hud.editor.swap_colors(id, previous);
+        ui.close();
+    }
+    if ui
+        .add_enabled(next.is_some(), egui::Button::new(hud.tr("color-move-right")))
+        .clicked()
+        && let Some(next) = next
+    {
+        hud.editor.swap_colors(id, next);
+        ui.close();
+    }
+    if ui
+        .add_enabled(count > 1, egui::Button::new(hud.tr("color-delete")))
+        .clicked()
+    {
+        hud.editor.delete_color(id);
+        ui.close();
+    }
+    ui.separator();
+    let model = hud.editor.scene.model_shape(hud.editor.focus).map(|(_, shape)| shape);
+    if ui
+        .add_enabled(model.is_some(), egui::Button::new(hud.tr("color-select-voxels")))
+        .clicked()
+    {
+        if let Some(shape) = model {
+            hud.editor.selection = rustium_core::select_by_color(shape, id);
+            hud.editor.tool = crate::editor::Tool::SelectBox;
+        }
+        ui.close();
+    }
 }
 
 /// Level 1 drops the Palette label, level 2 shrinks the slots, level 3 drops the current color.
@@ -118,9 +225,12 @@ fn slot_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, slot: usize, size: f32) {
             ("hex", FluentValue::from(hex(color))),
         ],
     );
-    if response.on_hover_text(label).clicked() {
+    let response = response.on_hover_text(label);
+    if response.clicked() {
         hud.editor.active_slot = slot;
     }
+    let id = hud.editor.slots[slot];
+    response.context_menu(|ui| color_menu(ui, hud, id));
 }
 
 fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
@@ -143,13 +253,42 @@ fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
             theme::island().inner_margin(10).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(hud.tr("palette")).font(theme::bold(12.0)));
-                    ui.label(widgets::mono("default.pal", 11.0).color(theme::MUTED));
                     ui.add_space(24.0);
                     let slot = ((hud.editor.active_slot + 1) % 10).to_string();
                     ui.label(
                         widgets::muted(hud.i18n.tr_args("palette-hint", &[("slot", FluentValue::from(slot))]))
                             .size(11.0),
                     );
+                    let new = widgets::icon_button(ui, Icon::NewFile, 24.0, Look::Plain, true);
+                    if widgets::tip(new, &hud.tr("palette-new"), &hud.tr("palette-new-tip")).clicked() {
+                        hud.editor.new_palette();
+                    }
+                    let import = widgets::icon_button(ui, Icon::Folder, 24.0, Look::Plain, true);
+                    if widgets::tip(import, &hud.tr("menu-import-palette"), &hud.tr("palette-import-tip")).clicked() {
+                        hud.send(super::AppCommand::ImportPalette);
+                    }
+                    let export = widgets::icon_button(ui, Icon::Download, 24.0, Look::Plain, true);
+                    if widgets::tip(export, &hud.tr("menu-export-palette"), &hud.tr("palette-export-tip")).clicked() {
+                        hud.send(super::AppCommand::ExportPalette);
+                    }
+                    // A copy of the current color, ready to edit with a right click.
+                    let room = hud.editor.scene.palette().len() < rustium_core::Palette::MAX_LEN;
+                    let add = widgets::icon_button(ui, Icon::Plus, 24.0, Look::Plain, room);
+                    if widgets::tip(add, &hud.tr("palette-add"), &hud.tr("palette-add-tip")).clicked() {
+                        let current = hud.editor.color();
+                        if let Some(color) = hud.editor.scene.palette().get(current).map(|entry| entry.color)
+                            && hud
+                                .editor
+                                .execute_checked(&Command::AddColor { color })
+                                .unwrap_or(false)
+                            && let Some(id) = u8::try_from(hud.editor.scene.palette().len())
+                                .ok()
+                                .and_then(ColorId::new)
+                        {
+                            let slot = hud.editor.active_slot;
+                            hud.editor.slots[slot] = id;
+                        }
+                    }
                 });
                 ui.add_space(4.0);
                 let ids: Vec<ColorId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
@@ -182,12 +321,14 @@ fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
                                     StrokeKind::Inside,
                                 );
                             }
-                            if response.on_hover_text(hex(color)).clicked() {
+                            let response = response.on_hover_text(hex(color));
+                            if response.clicked() {
                                 let slot = hud.editor.active_slot;
                                 if let Some(entry) = hud.editor.slots.get_mut(slot) {
                                     *entry = *id;
                                 }
                             }
+                            response.context_menu(|ui| color_menu(ui, hud, *id));
                         }
                     });
             });

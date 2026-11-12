@@ -126,6 +126,6 @@ mod tests {
     fn arguments_are_substituted() {
         let i18n = I18n::new(Language::Polish);
         let text = i18n.tr_args("palette-hint", &[("slot", FluentValue::from(3))]);
-        assert_eq!(text, "Kliknij kolor, aby wstawić go do slotu 3");
+        assert_eq!(text, "Klik: wstaw do slotu 3 · prawy przycisk: edytuj");
     }
 }

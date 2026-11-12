@@ -115,6 +115,17 @@ impl OrbitCamera {
         }
     }
 
+    /// Fly mode: turns the view in place (the eye stays where it is) by `look` points of pointer travel, then moves
+    /// the eye by `step` voxels along the view's right, the world up and the view's forward.
+    pub(crate) fn fly(&mut self, look: Vec2, step: Vec3) {
+        let eye = self.eye();
+        self.yaw = (self.yaw - look.x * ORBIT_SPEED).rem_euclid(TAU);
+        self.pitch = (self.pitch + look.y * ORBIT_SPEED).clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
+        let rotation = self.rotation();
+        let eye = eye + rotation.x_axis * step.x + Vec3::Y * step.y - rotation.z_axis * step.z;
+        self.target = eye - self.direction() * self.distance;
+    }
+
     /// Moves the target with the pointer; `delta` in points, `viewport_height` in points.
     pub(crate) fn pan(&mut self, delta: Vec2, viewport_height: f32) {
         let units_per_point =
@@ -306,6 +317,18 @@ mod tests {
         camera.isometric();
         let direction = (camera.eye() - camera.target).normalize();
         assert!((direction.x - direction.z).abs() < 1e-5 && (direction.x - direction.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn flying_turns_in_place_and_moves_forward() {
+        let mut camera = OrbitCamera::default();
+        let eye = camera.eye();
+        camera.fly(Vec2::new(40.0, -10.0), Vec3::ZERO);
+        assert!((camera.eye() - eye).length() < 1e-3, "turning keeps the eye");
+        let forward = (camera.target - camera.eye()).normalize();
+        let before = camera.eye();
+        camera.fly(Vec2::ZERO, Vec3::new(0.0, 0.0, 5.0));
+        assert!((camera.eye() - (before + forward * 5.0)).length() < 1e-3);
     }
 
     #[test]

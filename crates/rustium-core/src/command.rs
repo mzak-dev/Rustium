@@ -247,6 +247,30 @@ pub enum Command {
         /// New base color as 8-bit sRGB.
         color: [u8; 3],
     },
+    /// Removes a Color from the Palette. Its voxels take the nearest remaining Color, and voxels of later Colors
+    /// follow their Color as it moves down by one. The last Color cannot be removed.
+    DeleteColor {
+        /// The Color to remove.
+        id: ColorId,
+    },
+    /// Swaps two Colors of the Palette; voxels keep their look, so they swap ids too.
+    SwapColors {
+        /// One Color.
+        a: ColorId,
+        /// The other.
+        b: ColorId,
+    },
+    /// Replaces the whole Palette (1 to 255 colors, all with the Default material); every voxel takes the new Color
+    /// nearest to how it looked, so Models keep their look as far as the new colors allow.
+    ReplacePalette {
+        /// The new colors as 8-bit sRGB, in order.
+        colors: Vec<[u8; 3]>,
+    },
+    /// Appends a Color shaded by the Default material; does nothing when the Palette is full.
+    AddColor {
+        /// Base color as 8-bit sRGB.
+        color: [u8; 3],
+    },
 }
 
 /// Applies `command` to `scene` and returns the resulting Edit, or `None` when nothing changed.
@@ -315,6 +339,55 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::EditMaterial { index, edit } => edit_material(scene, *index, edit),
         Command::SetVoxels { model, voxels } => apply_set_voxels(scene, *model, voxels),
         Command::SetColor { id, color } => apply_set_color(scene, *id, *color),
+        Command::DeleteColor { id } => delete_color(scene, *id),
+        Command::ReplacePalette { colors } => {
+            let Some(palette) = crate::Palette::from_colors(colors.iter().copied().map(crate::Color::new).collect())
+            else {
+                return Err(Error::PaletteSize(colors.len()));
+            };
+            let old = scene.palette.clone();
+            let new = palette.clone();
+            let nearest = move |color: ColorId| {
+                old.get(color)
+                    .and_then(|entry| new.nearest(entry.color))
+                    .unwrap_or(ColorId::FIRST)
+            };
+            Ok(recolor(
+                scene,
+                EditKind::ReplacePalette,
+                |current| {
+                    let changed = *current != palette;
+                    *current = palette;
+                    changed
+                },
+                nearest,
+            ))
+        }
+        Command::SwapColors { a, b } => {
+            check_color(scene, *a)?;
+            check_color(scene, *b)?;
+            Ok(recolor(
+                scene,
+                EditKind::SwapColors,
+                |palette| palette.swap(*a, *b),
+                |color| {
+                    if color == *a {
+                        *b
+                    } else if color == *b {
+                        *a
+                    } else {
+                        color
+                    }
+                },
+            ))
+        }
+        Command::AddColor { color } => {
+            let before = snapshot(scene);
+            if !scene.palette.push(*color) {
+                return Ok(None);
+            }
+            Ok(Some(Edit::materials_change(EditKind::AddColor, scene, before)))
+        }
     }
 }
 
@@ -356,6 +429,80 @@ fn apply_set_color(scene: &mut Scene, id: ColorId, color: [u8; 3]) -> Result<Opt
         return Ok(None);
     }
     Ok(Some(Edit::materials_change(EditKind::SetColor, scene, before)))
+}
+
+fn delete_color(scene: &mut Scene, id: ColorId) -> Result<Option<Edit>, Error> {
+    check_color(scene, id)?;
+    let removed = scene.palette.get(id).map(|entry| entry.color).unwrap_or_default();
+    // The nearest of the other Colors, numbered as it will be once `id` is gone.
+    let replacement = scene
+        .palette
+        .iter()
+        .filter(|(other, _)| *other != id)
+        .min_by_key(|(_, entry)| {
+            entry
+                .color
+                .iter()
+                .zip(removed)
+                .map(|(a, b)| (i32::from(*a) - i32::from(b)).pow(2))
+                .sum::<i32>()
+        })
+        .map(|(other, _)| other);
+    let Some(replacement) = replacement else {
+        return Ok(None);
+    };
+    let shifted = |color: ColorId| {
+        if color > id {
+            ColorId::new(color.get() - 1).unwrap_or(color)
+        } else {
+            color
+        }
+    };
+    let replacement = shifted(replacement);
+    Ok(recolor(
+        scene,
+        EditKind::DeleteColor,
+        |palette| palette.remove(id),
+        |color| {
+            if color == id { replacement } else { shifted(color) }
+        },
+    ))
+}
+
+/// Changes the Palette with `change` and gives every voxel of every Shape the Color `remap` says, as one Edit.
+fn recolor(
+    scene: &mut Scene,
+    kind: EditKind,
+    change: impl FnOnce(&mut crate::Palette) -> bool,
+    remap: impl Fn(ColorId) -> ColorId,
+) -> Option<Edit> {
+    let before = snapshot(scene);
+    if !change(&mut scene.palette) {
+        return None;
+    }
+    let changes: Vec<(ShapeId, IVec3, ColorId)> = scene
+        .shapes
+        .iter()
+        .enumerate()
+        .flat_map(|(index, shape)| {
+            let id = ShapeId::from_raw(u32::try_from(index).unwrap_or(u32::MAX));
+            let remap = &remap;
+            shape.voxels().filter_map(move |(cell, color)| {
+                let new = remap(color);
+                (new != color).then_some((id, cell, new))
+            })
+        })
+        .collect();
+    let mut rec = Recorder::new(scene);
+    for (shape, cell, color) in changes {
+        rec.set(shape, cell, Some(color));
+    }
+    let voxels = rec.finish(kind);
+    let palette = Edit::materials_change(kind, scene, before);
+    Some(match voxels {
+        Some(voxels) => voxels.merge(palette),
+        None => palette,
+    })
 }
 
 fn snapshot(scene: &Scene) -> (crate::Palette, Vec<MaterialGraph>) {
@@ -1290,5 +1437,53 @@ mod material_graph_tests {
             Err(Error::Graph(GraphError::NoSurface))
         ));
         assert_eq!(scene.material_graphs().len(), 2);
+    }
+
+    #[test]
+    fn deleting_a_color_moves_its_voxels_to_the_nearest_and_shifts_later_ids() {
+        let mut scene = Scene::new();
+        let mut history = History::new(50);
+        let model = scene.node(NodeId::ROOT).unwrap().children()[0];
+        let (two, three) = (ColorId::new(2).unwrap(), ColorId::new(3).unwrap());
+        let set = Command::SetVoxels {
+            model,
+            voxels: vec![(IVec3::ZERO, Some(two)), (IVec3::X, Some(three))],
+        };
+        history.push(apply(&mut scene, &set).unwrap().unwrap());
+        let length = scene.palette().len();
+        let third = scene.palette().get(three).unwrap().color;
+        let removed = scene.palette().get(two).unwrap().color;
+        history.push(apply(&mut scene, &Command::DeleteColor { id: two }).unwrap().unwrap());
+        assert_eq!(scene.palette().len(), length - 1);
+        let (_, shape) = scene.model_shape(model).unwrap();
+        assert_eq!(shape.get(IVec3::X), Some(two), "color 3 moved down to 2");
+        assert_eq!(scene.palette().get(two).unwrap().color, third);
+        assert_eq!(
+            shape.get(IVec3::ZERO),
+            scene.palette().nearest(removed),
+            "took the nearest color"
+        );
+        history.undo(&mut scene);
+        let (_, shape) = scene.model_shape(model).unwrap();
+        assert_eq!(shape.get(IVec3::ZERO), Some(two));
+        assert_eq!(shape.get(IVec3::X), Some(three));
+        assert_eq!(scene.palette().len(), length);
+    }
+
+    #[test]
+    fn swapping_colors_keeps_how_voxels_look() {
+        let mut scene = Scene::new();
+        let model = scene.node(NodeId::ROOT).unwrap().children()[0];
+        let (one, two) = (ColorId::new(1).unwrap(), ColorId::new(2).unwrap());
+        let set = Command::SetVoxels {
+            model,
+            voxels: vec![(IVec3::ZERO, Some(one))],
+        };
+        apply(&mut scene, &set).unwrap();
+        let look = scene.palette().get(one).unwrap().color;
+        apply(&mut scene, &Command::SwapColors { a: one, b: two }).unwrap();
+        let (_, shape) = scene.model_shape(model).unwrap();
+        assert_eq!(shape.get(IVec3::ZERO), Some(two));
+        assert_eq!(scene.palette().get(two).unwrap().color, look);
     }
 }

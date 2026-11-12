@@ -713,6 +713,18 @@ fn assign_grid(ui: &mut Ui, hud: &mut Hud<'_>, graph: u32) {
     padded(ui, 0, |ui| {
         note(ui, hud.tr("material-assign-hint"));
         ui.add_space(4.0);
+        // A typed or pasted color code assigns that Color (added to the Palette when it is new).
+        if let Some(text) = widgets::text_field(
+            ui,
+            egui::IdSalt::new(("assign-hex", graph)),
+            "",
+            true,
+            Some("#RRGGBB"),
+            ui.available_width(),
+        ) {
+            super::hotbar::paste_hex(hud, &text);
+        }
+        ui.add_space(4.0);
         let ids: Vec<ColorId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
         let cell =
             ((ui.available_width() - ASSIGN_GAP * (ASSIGN_COLUMNS as f32 - 1.0)) / ASSIGN_COLUMNS as f32).floor();

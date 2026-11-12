@@ -187,6 +187,8 @@ pub(crate) struct Settings {
     pub(crate) vsync: bool,
     pub(crate) frame_limit: FrameLimit,
     pub(crate) keymap: Keymap,
+    /// Mouse buttons of the Model view's camera gestures.
+    pub(crate) mouse: crate::mouse_map::MouseMap,
     pub(crate) mcp: McpSettings,
 }
 
@@ -220,6 +222,7 @@ impl Default for Settings {
             vsync: true,
             frame_limit: FrameLimit::MatchDisplay,
             keymap: Keymap::default(),
+            mouse: crate::mouse_map::MouseMap::default(),
             mcp: McpSettings::default(),
         }
     }
@@ -281,6 +284,7 @@ impl Settings {
             Section::Input => {
                 self.invert_zoom = defaults.invert_zoom;
                 self.keymap = defaults.keymap;
+                self.mouse = defaults.mouse;
             }
             Section::Performance => {
                 self.backend = defaults.backend;

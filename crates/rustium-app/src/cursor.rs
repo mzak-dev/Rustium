@@ -18,7 +18,6 @@ use crate::theme;
 /// The thing a cursor stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CursorKind {
-    SelectBox,
     SelectColor,
     Attach,
     Erase,
@@ -127,6 +126,8 @@ pub(crate) struct ModelCtx {
     pub(crate) swatch: Option<[u8; 3]>,
     /// Distance text of the Measure Tool.
     pub(crate) distance: Option<String>,
+    /// The Cursor is over something selected that it would drag.
+    pub(crate) over_selection: bool,
 }
 
 /// The cursor over the 3D view.
@@ -143,7 +144,9 @@ pub(crate) fn resolve_model(ctx: &ModelCtx) -> CursorSpec {
         return CursorSpec::new(CursorKind::Zoom, CursorState::Normal);
     }
     let kind = match ctx.tool {
-        Tool::SelectBox => CursorKind::SelectBox,
+        Tool::SelectBox if ctx.over_selection => CursorKind::Move,
+        Tool::SelectBox if ctx.input.primary_down => CursorKind::BoxSelect,
+        Tool::SelectBox => CursorKind::Arrow,
         Tool::SelectColor => CursorKind::SelectColor,
         Tool::Attach => CursorKind::Attach,
         Tool::Erase => CursorKind::Erase,
@@ -326,8 +329,7 @@ pub(crate) fn system_icon(spec: &CursorSpec) -> CursorIcon {
     }
     let pressed = spec.state == CursorState::Pressed;
     match spec.kind {
-        CursorKind::SelectBox
-        | CursorKind::Attach
+        CursorKind::Attach
         | CursorKind::Erase
         | CursorKind::Paint
         | CursorKind::Pick
@@ -380,7 +382,7 @@ fn body(spec: &CursorSpec) -> Body {
 /// The context icon next to the hotspot.
 fn badge_icon(kind: CursorKind) -> Option<Icon> {
     match kind {
-        CursorKind::SelectBox | CursorKind::Region => Some(Icon::SelectBox),
+        CursorKind::Region => Some(Icon::SelectBox),
         CursorKind::SelectColor => Some(Icon::SelectColor),
         CursorKind::Attach => Some(Icon::Attach),
         CursorKind::Erase => Some(Icon::Erase),
@@ -602,6 +604,7 @@ mod tests {
             measuring: false,
             swatch: None,
             distance: None,
+            over_selection: false,
         }
     }
 

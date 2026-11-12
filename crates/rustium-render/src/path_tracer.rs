@@ -203,7 +203,8 @@ pub struct TraceFrame {
     pub pass: RenderPass,
 }
 
-/// The part of a [`TraceFrame`] that changes what is rendered; any difference restarts accumulation.
+/// The part of a [`TraceFrame`] that changes what is rendered; any difference restarts accumulation. The shown pass is
+/// not part of it: every pass is accumulated beside the beauty image, so switching only changes the resolve stage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TraceKey {
     inv_view_proj: [[f32; 4]; 4],
@@ -216,7 +217,6 @@ struct TraceKey {
     region: Option<[u32; 4]>,
     style: RenderStyle,
     lens: Option<ThinLens>,
-    pass: RenderPass,
 }
 
 impl TraceFrame {
@@ -232,7 +232,6 @@ impl TraceFrame {
             region: self.region,
             style: self.style,
             lens: self.lens,
-            pass: self.pass,
         }
     }
 
@@ -325,6 +324,9 @@ struct Accumulation {
     size: (u32, u32),
     textures: [wgpu::Texture; 2],
     gbuffer: GBuffer,
+    /// The view passes (albedo, normal, depth) accumulated beside the beauty image: two layers, ping-pong like
+    /// `textures`.
+    passes: [wgpu::Texture; 2],
     /// `compute_groups[i]` reads texture `i` and writes texture `1 - i`.
     compute_groups: [wgpu::BindGroup; 2],
     present_group: wgpu::BindGroup,
@@ -372,8 +374,6 @@ pub struct PathTracer {
     /// Block size of the coarse picture shown until the first sample of the current view is complete; `None` once
     /// the picture is fine everywhere.
     coarse: Option<u32>,
-    /// Frames since the displayed picture was last resolved.
-    since_resolve: u32,
     /// When the viewport last encoded a frame that traced, to time the frames.
     last_traced: Option<Instant>,
     /// Corners of the visible Models, for the depth pass.
@@ -390,9 +390,6 @@ const FIRST_BAND_ROWS: u32 = 128;
 const MAX_SWEEP_FRAMES: u32 = 32;
 /// The coarsest block of the preview picture shown while the view changes.
 const MAX_PREVIEW_BLOCK: u32 = 16;
-/// While a sweep is running the displayed picture is re-resolved (and denoised) at least this often, in frames; it is
-/// always resolved when a sweep completes.
-const RESOLVE_EVERY: u32 = 8;
 
 /// The frame as the coarse picture shows it: the Pixel style (one traced pixel per block, copied over the block)
 /// without denoising.
@@ -486,8 +483,8 @@ impl BandBudget {
 }
 
 /// Bytes of GPU memory one pixel of a [`PathTracer`] image takes: two accumulation textures, two G-buffer textures, two
-/// denoiser scratch textures and the resolved image, 16 bytes each.
-const BYTES_PER_PIXEL: u64 = 7 * 16;
+/// denoiser scratch textures, the resolved image and two two-layer view pass textures, 16 bytes each.
+const BYTES_PER_PIXEL: u64 = 11 * 16;
 /// The most video memory one tracer's images may take (3 GiB). `wgpu` reports no memory size, so this is a
 /// conservative stand-in for a GPU with 8 GB, leaving room for the viewport tracer that runs beside an offline one.
 const MAX_IMAGE_BYTES: u64 = 3 << 30;
@@ -595,6 +592,26 @@ impl PathTracer {
             storage_texture_entry(5),
             storage_texture_entry(7),
             storage_texture_entry(8),
+            wgpu::BindGroupLayoutEntry {
+                binding: 12,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 13,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: ACCUM_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                },
+                count: None,
+            },
         ];
         if hardware {
             compute_entries.push(wgpu::BindGroupLayoutEntry {
@@ -707,7 +724,6 @@ impl PathTracer {
             budget: BandBudget::new(),
             changed: false,
             coarse: None,
-            since_resolve: 0,
             last_traced: None,
             bounds: None,
             target_samples: 0,
@@ -831,12 +847,22 @@ impl PathTracer {
         let height = frame.size.1;
         let passes = (frame.running || self.samples_done == 0) && self.samples_done < self.target_samples;
         let now = Instant::now();
-        let mut refresh = false;
+        // What the resolve stage does this frame: nothing (the picture on screen stays), the coarse picture of a new
+        // view, or the accumulated image (`fresh`: even if only samples changed).
+        let mut coarse_now = false;
+        let mut fresh = false;
         if passes {
             if self.changed {
                 // The picture of the old view is stale.
                 self.coarse = None;
             }
+            // The time since the last traced frame is what this GPU needs for a frame; a long gap was an idle
+            // interface, not a slow GPU.
+            let took = self
+                .last_traced
+                .map(|then| now.saturating_duration_since(then))
+                .filter(|took| *took < Duration::from_secs(10));
+            let rows = self.budget.next_rows(took, height);
             if self.samples_done == 0 && self.sweep_row == 0 && self.coarse.is_none() {
                 self.coarse = self
                     .budget
@@ -849,26 +875,21 @@ impl PathTracer {
                     self.write_params(queue, &coarse, 1, 0..height, block);
                     self.encode_trace_pass(encoder, frame.size, 0..height);
                     self.last_traced = None;
-                    refresh = true;
+                    coarse_now = true;
                 }
             }
-            if !refresh {
-                // The time since the last traced frame is what this GPU needs for a frame; a long gap was an idle
-                // interface, not a slow GPU.
-                let took = self
-                    .last_traced
-                    .map(|then| now.saturating_duration_since(then))
-                    .filter(|took| *took < Duration::from_secs(10));
-                let rows = self.budget.next_rows(took, height);
+            if !coarse_now {
                 let end = (self.sweep_row + rows).min(height);
                 self.write_params(queue, &frame, 1, self.sweep_row..end, resolve::pixel_block(height));
                 self.encode_trace_pass(encoder, frame.size, self.sweep_row..end);
                 self.last_traced = Some(now);
                 if end >= height {
+                    // The sweep wrote the other texture of the pair; it now holds the complete sample.
+                    self.current = 1 - self.current;
                     self.sweep_row = 0;
                     self.samples_done += 1;
                     self.coarse = None;
-                    refresh = true;
+                    fresh = true;
                 } else {
                     self.sweep_row = end;
                 }
@@ -877,16 +898,22 @@ impl PathTracer {
             self.last_traced = None;
             self.write_params(queue, &frame, 0, 0..height, resolve::pixel_block(height));
         }
-        // The coarse picture is cheap to resolve (no denoising); the fine one only when a sweep completed or every
-        // few frames, so the full-image resolve is not a fixed cost of every band.
-        self.since_resolve += 1;
-        let fresh = passes && (refresh || self.coarse.is_some() || self.since_resolve >= RESOLVE_EVERY);
-        if fresh {
-            self.since_resolve = 0;
-        }
-        match self.coarse {
-            Some(block) => self.encode_resolve(queue, encoder, &coarse_frame(&frame), block, fresh),
-            None => self.encode_resolve(queue, encoder, &frame, resolve::pixel_block(height), fresh),
+        if coarse_now {
+            // The coarse picture sits in the texture the sweep is about to fill; it is resolved now and not again.
+            if let Some(block) = self.coarse {
+                self.encode_resolve(queue, encoder, &coarse_frame(&frame), block, true, 1 - self.current);
+            }
+        } else if self.coarse.is_none() || !passes {
+            // While the first sample of a new view is being swept there is no complete image to resolve; the coarse
+            // picture stays on screen until the sweep completes.
+            self.encode_resolve(
+                queue,
+                encoder,
+                &frame,
+                resolve::pixel_block(height),
+                fresh,
+                self.current,
+            );
         }
         let Some(accumulation) = &self.accumulation else {
             return;
@@ -955,6 +982,7 @@ impl PathTracer {
                 label: Some("path tracer offline encoder"),
             });
             self.encode_trace_pass(&mut encoder, frame.size, 0..frame.size.1);
+            self.current = 1 - self.current;
             self.samples_done += count;
             queue.submit(std::iter::once(encoder.finish()));
             if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
@@ -968,7 +996,14 @@ impl PathTracer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("path tracer resolve encoder"),
         });
-        self.encode_resolve(queue, &mut encoder, &frame, resolve::pixel_block(frame.size.1), true);
+        self.encode_resolve(
+            queue,
+            &mut encoder,
+            &frame,
+            resolve::pixel_block(frame.size.1),
+            true,
+            self.current,
+        );
         queue.submit(std::iter::once(encoder.finish()));
         self.read_image(device, queue).map(Some)
     }
@@ -1060,16 +1095,7 @@ impl PathTracer {
                 0.0,
             ],
             band: [rows.start, rows.end, 0, 0],
-            aov: [
-                if frame.pass == RenderPass::Beauty {
-                    0.0
-                } else {
-                    frame.pass.index() as f32
-                },
-                depth.0,
-                depth.1,
-                0.0,
-            ],
+            aov: [0.0, depth.0, depth.1, 0.0],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         let present = PresentParams {
@@ -1108,23 +1134,13 @@ impl PathTracer {
         })
     }
 
-    /// Traces one sample per pixel for the rows in `rows`; the other rows keep what they held.
-    fn encode_trace_pass(&mut self, encoder: &mut wgpu::CommandEncoder, size: (u32, u32), rows: std::ops::Range<u32>) {
+    /// Traces one sample per pixel for the rows in `rows`, reading the image in `current` and writing the other
+    /// texture of the pair. Every row of the image has to be traced (or copied by the shader outside the region)
+    /// before the pair is swapped, so a sweep in bands needs no copying; the caller swaps `current` when it is done.
+    fn encode_trace_pass(&self, encoder: &mut wgpu::CommandEncoder, size: (u32, u32), rows: std::ops::Range<u32>) {
         let Some(accumulation) = &self.accumulation else {
             return;
         };
-        if rows.len() < size.1 as usize {
-            // The shader writes the band only; the other texture of the ping-pong pair gets the rest first.
-            encoder.copy_texture_to_texture(
-                accumulation.textures[self.current].as_image_copy(),
-                accumulation.textures[1 - self.current].as_image_copy(),
-                wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("path tracer pass"),
             timestamp_writes: None,
@@ -1133,11 +1149,10 @@ impl PathTracer {
         pass.set_bind_group(0, &accumulation.compute_groups[self.current], &[]);
         let band_rows = u32::try_from(rows.len()).unwrap_or(size.1);
         pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), band_rows.div_ceil(WORKGROUP), 1);
-        drop(pass);
-        self.current = 1 - self.current;
     }
 
-    /// Refreshes the resolved image when new samples arrived or the style or denoise setting changed.
+    /// Refreshes the resolved image from the accumulation texture `read` when `fresh` or when the style, pass or
+    /// denoise setting changed.
     fn encode_resolve(
         &mut self,
         queue: &wgpu::Queue,
@@ -1145,6 +1160,7 @@ impl PathTracer {
         frame: &TraceFrame,
         block: u32,
         fresh: bool,
+        read: usize,
     ) {
         let key = ResolveKey {
             size: frame.size,
@@ -1157,12 +1173,8 @@ impl PathTracer {
             return;
         }
         self.resolved_for = Some(key);
-        self.resolver.encode(
-            queue,
-            encoder,
-            self.current,
-            &frame.resolve_input(self.samples_done, block),
-        );
+        self.resolver
+            .encode(queue, encoder, read, &frame.resolve_input(self.samples_done, block));
     }
 
     /// Copies the resolved image (denoised and styled as the last frame asked) to the CPU, blocking until the GPU has
@@ -1273,15 +1285,36 @@ impl PathTracer {
             geometry: texture("path tracer G-buffer geometry"),
             albedo: texture("path tracer G-buffer albedo"),
         };
+        let pass_texture = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 2,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: ACCUM_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let passes = [
+            pass_texture("path tracer view passes A"),
+            pass_texture("path tracer view passes B"),
+        ];
         let resolved = self
             .resolver
-            .bind(device, size, &textures, &gbuffer.geometry, &gbuffer.albedo);
-        let compute_groups = self.compute_groups_for(device, &textures, &gbuffer);
+            .bind(device, size, &textures, &gbuffer.geometry, &gbuffer.albedo, &passes);
+        let compute_groups = self.compute_groups_for(device, &textures, &gbuffer, &passes);
         let present_group = self.present_group(device, &resolved);
         Accumulation {
             size,
             textures,
             gbuffer,
+            passes,
             compute_groups,
             present_group,
         }
@@ -1289,7 +1322,12 @@ impl PathTracer {
 
     fn rebuild_groups(&mut self, device: &wgpu::Device) {
         if let Some(accumulation) = self.accumulation.take() {
-            let compute_groups = self.compute_groups_for(device, &accumulation.textures, &accumulation.gbuffer);
+            let compute_groups = self.compute_groups_for(
+                device,
+                &accumulation.textures,
+                &accumulation.gbuffer,
+                &accumulation.passes,
+            );
             self.accumulation = Some(Accumulation {
                 compute_groups,
                 ..accumulation
@@ -1303,8 +1341,12 @@ impl PathTracer {
         device: &wgpu::Device,
         textures: &[wgpu::Texture; 2],
         gbuffer: &GBuffer,
+        passes: &[wgpu::Texture; 2],
     ) -> [wgpu::BindGroup; 2] {
         let views = textures
+            .each_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let pass_views = passes
             .each_ref()
             .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
         let geometry_view = gbuffer.geometry.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1350,6 +1392,14 @@ impl PathTracer {
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: wgpu::BindingResource::TextureView(&albedo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::TextureView(&pass_views[read]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(&pass_views[1 - read]),
                 },
             ];
             if let Some(rays) = &self.rays {
@@ -1572,6 +1622,10 @@ mod tests {
             pass: RenderPass::Albedo,
             ..frame
         };
-        assert_ne!(frame.key(), albedo.key(), "view passes are traced, so they restart");
+        assert_eq!(
+            frame.key(),
+            albedo.key(),
+            "every view pass is accumulated beside the beauty image, so switching does not restart"
+        );
     }
 }

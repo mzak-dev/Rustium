@@ -75,35 +75,47 @@ fn write_gbuffer(pixel: vec2<u32>, centre: vec2<f32>) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// View passes: albedo, normal and depth of the first surface, traced per sample like the beauty pass so the
-// accumulation anti-aliases them and depth of field blurs them. Premultiplied, display-ready colour; the sky is empty.
+// View passes: albedo, normal and depth of the first surface the camera ray sees. `radiance` records that hit (so the
+// passes cost no extra ray) and the sample loop accumulates them beside the beauty image, so anti-aliasing and depth of
+// field apply to them too and switching the shown pass never restarts the render.
 
-fn aov_sample(ray: Ray) -> vec4<f32> {
-    let hit = trace(ray.origin, ray.dir, 0u, 0u);
-    if (!hit.hit) {
-        return vec4<f32>(0.0, 0.0, 0.0, select(1.0, 0.0, params.options.y == 1u));
+struct FirstHit {
+    hit: bool,
+    t: f32,
+    normal: vec3<f32>,
+    albedo: vec3<f32>,
+};
+
+var<private> first_hit: FirstHit;
+
+struct ViewPasses {
+    // Albedo in rgb, coverage in a.
+    albedo: vec4<f32>,
+    // Normal as a colour in rgb, depth as a grey value in a.
+    normal: vec4<f32>,
+};
+
+fn record_first_hit(hit: Hit, albedo: vec3<f32>) {
+    first_hit = FirstHit(true, hit.t, hit.normal, albedo);
+}
+
+// The passes of the sample just traced along `ray`. Premultiplied, display-ready; the sky is black and empty (opaque
+// black unless the background is transparent).
+fn first_hit_passes(ray: Ray) -> ViewPasses {
+    if (!first_hit.hit) {
+        return ViewPasses(vec4<f32>(0.0, 0.0, 0.0, select(1.0, 0.0, params.options.y == 1u)), vec4<f32>(0.0));
     }
-    var color = vec3<f32>(0.0);
-    if (params.aov.x < 1.5) {
-        if (hit.color_index == GROUND_ID) {
-            color = params.ground.rgb;
-        } else {
-            let surface = shade(hit.color_index, hit.model, ray.origin + ray.dir * hit.t, hit.normal);
-            let clear = surface.transmission > 0.5 || surface.volume_density > 0.0;
-            color = select(surface.base_color, vec3<f32>(1.0), clear);
-        }
-    } else if (params.aov.x < 2.5) {
-        color = hit.normal * 0.5 + vec3<f32>(0.5);
-    } else {
-        // Distance along the view direction, mapped so the nearest part of the Models is white and the farthest black.
-        let near = params.inv_view_proj * vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        let far = params.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
-        let forward = normalize(far.xyz / far.w - near.xyz / near.w);
-        let depth = dot(ray.origin + ray.dir * hit.t - near.xyz / near.w, forward);
-        let span = max(params.aov.z - params.aov.y, 1.0e-3);
-        color = vec3<f32>(1.0 - clamp((depth - params.aov.y) / span, 0.0, 1.0));
-    }
-    return vec4<f32>(color, 1.0);
+    // Distance along the view direction, mapped so the nearest part of the Models is white and the farthest black.
+    let near = params.inv_view_proj * vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    let far = params.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    let forward = normalize(far.xyz / far.w - near.xyz / near.w);
+    let depth = dot(ray.origin + ray.dir * first_hit.t - near.xyz / near.w, forward);
+    let span = max(params.aov.z - params.aov.y, 1.0e-3);
+    let grey = 1.0 - clamp((depth - params.aov.y) / span, 0.0, 1.0);
+    return ViewPasses(
+        vec4<f32>(first_hit.albedo, 1.0),
+        vec4<f32>(first_hit.normal * 0.5 + vec3<f32>(0.5), grey),
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------------

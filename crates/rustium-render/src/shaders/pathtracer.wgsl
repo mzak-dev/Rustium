@@ -30,8 +30,7 @@ struct Params {
     lens: vec4<f32>,
     // x: first row traced by this dispatch, y: one past the last row (the other rows were copied beforehand).
     band: vec4<u32>,
-    // x: view pass (0 = beauty, 1 = albedo, 2 = normal, 3 = depth), y/z: nearest and farthest distance of the Models
-    // along the view direction, for the depth pass.
+    // y/z: nearest and farthest distance of the Models along the view direction, for the depth pass (x is unused).
     aov: vec4<f32>,
 };
 
@@ -47,6 +46,11 @@ struct Params {
 // and rgb albedo.
 @group(0) @binding(7) var gbuffer_geometry: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(8) var gbuffer_albedo: texture_storage_2d<rgba32float, write>;
+// The view passes accumulated beside the beauty image, two layers each: layer 0 holds the albedo (rgb) and coverage
+// (a), layer 1 the normal as a colour (rgb) and the depth as a grey value (a). They are display-ready, premultiplied by
+// coverage.
+@group(0) @binding(12) var history_aov: texture_2d_array<f32>;
+@group(0) @binding(13) var output_aov: texture_storage_2d_array<rgba32float, write>;
 
 // A visible Model: scene = (column_x, column_y, column_z) * local + offset, plus where its Shape's chunk grid is.
 struct ModelRecord {
@@ -448,6 +452,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
     var medium_model = 0u;
     var medium_ior = 1.0;
     var bounces = 0u;
+    first_hit.hit = false;
     var specular = true;
     // The ray has not been bent or scattered since the camera, so a sky behind it is the background.
     var straight = true;
@@ -510,8 +515,16 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             surface.normal = hit.normal;
             surface.roughness = 1.0;
             surface.ior = 1.5;
+            if (segment == 0u) {
+                record_first_hit(hit, params.ground.rgb);
+            }
         } else {
             surface = shade(hit.color_index, hit.model, point, hit.normal);
+            if (segment == 0u) {
+                // What shows through glass or haze is not the surface's color: the view passes show white there.
+                let clear = surface.transmission > 0.5 || surface.volume_density > 0.0;
+                record_first_hit(hit, select(surface.base_color, vec3<f32>(1.0), clear));
+            }
             if (params.style.x == STYLE_CLAY) {
                 surface = clay_surface(surface);
             }
@@ -658,12 +671,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (id.x >= width || id.y >= height || id.y >= params.band.y) {
         return;
     }
-    let previous = textureLoad(history, vec2<i32>(id.xy), 0);
+    let pixel = vec2<i32>(id.xy);
+    let previous = textureLoad(history, pixel, 0);
+    let previous_albedo = textureLoad(history_aov, pixel, 0, 0);
+    let previous_normal = textureLoad(history_aov, pixel, 1, 0);
     var result = vec4<f32>(0.0);
+    var result_albedo = vec4<f32>(0.0);
+    var result_normal = vec4<f32>(0.0);
     let in_region = id.x >= params.region.x && id.y >= params.region.y && id.x < params.region.z && id.y < params.region.w;
     if (!in_region) {
         // Outside the region nothing new is traced: the picture there stays as it was.
-        textureStore(output, vec2<i32>(id.xy), previous);
+        textureStore(output, pixel, previous);
+        textureStore(output_aov, pixel, 0, previous_albedo);
+        textureStore(output_aov, pixel, 1, previous_normal);
         return;
     }
     let block = max(params.style.y, 1u);
@@ -675,21 +695,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let count = params.options.z;
         let spread = select(1.0, f32(block), pixelated);
         var sum = vec4<f32>(0.0);
+        var sum_albedo = vec4<f32>(0.0);
+        var sum_normal = vec4<f32>(0.0);
         for (var s = 0u; s < count; s += 1u) {
             rng_state = pcg(id.x + id.y * width + pcg(done + s + 1u) * 2654435761u);
             let position = vec2<f32>(id.xy) + vec2<f32>(rand(), rand()) * spread;
             var ray = primary_ray(position);
             ray = thin_lens(ray);
-            if (params.aov.x > 0.5) {
-                sum += aov_sample(ray);
-            } else {
-                sum += radiance(ray.origin, ray.dir);
-            }
+            sum += radiance(ray.origin, ray.dir);
+            let passes = first_hit_passes(ray);
+            sum_albedo += passes.albedo;
+            sum_normal += passes.normal;
         }
-        result = mix(previous, sum / f32(count), f32(count) / f32(done + count));
+        let weight = f32(count) / f32(done + count);
+        result = mix(previous, sum / f32(count), weight);
+        result_albedo = mix(previous_albedo, sum_albedo / f32(count), weight);
+        result_normal = mix(previous_normal, sum_normal / f32(count), weight);
         if (params.style.z == 1u) {
             write_gbuffer(id.xy, pixel_centre(id.xy));
         }
     }
-    textureStore(output, vec2<i32>(id.xy), result);
+    textureStore(output, pixel, result);
+    textureStore(output_aov, pixel, 0, result_albedo);
+    textureStore(output_aov, pixel, 1, result_normal);
 }

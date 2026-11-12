@@ -78,14 +78,15 @@ pub(crate) fn raycast_ground(ray: Ray, max_distance: f32) -> Option<(RayHit, f32
     ))
 }
 
-/// The background an empty Model is drawn against, seen from any side: of the three axis planes through the origin,
-/// the one the ray faces most directly that lies ahead of it. The hit is a ground hit whose `voxel` is the cell
-/// behind the plane, so Attach places in the cell in front of it, on the camera's side.
+/// The background an empty Model is built on: the floor y = 0, from above or from below. Only when the ray cannot
+/// reach the floor (a view straight from the side) does it fall back to the upright plane through the origin that it
+/// faces most directly. The hit is a ground hit whose `voxel` is the cell behind the plane, so Attach places in the
+/// cell in front of it, on the camera's side.
 pub fn pick_background(ray: Ray, max_distance: f32) -> Option<RayHit> {
     let direction = ray.direction.normalize_or_zero();
-    let mut axes = [0, 1, 2];
-    axes.sort_by(|a, b| direction[*b].abs().total_cmp(&direction[*a].abs()));
-    axes.into_iter().find_map(|axis| {
+    let mut walls = [0, 2];
+    walls.sort_by(|a, b| direction[*b].abs().total_cmp(&direction[*a].abs()));
+    [1, walls[0], walls[1]].into_iter().find_map(|axis| {
         let slope = direction[axis];
         if slope.abs() < 1e-4 {
             return None;
@@ -249,20 +250,18 @@ mod tests {
     }
 
     #[test]
-    fn the_background_faces_the_camera_from_every_side() {
+    fn the_background_is_the_floor_unless_the_view_is_straight_from_the_side() {
         for (origin, direction, attach) in [
             (Vec3::new(2.5, 9.0, 1.5), Vec3::NEG_Y, IVec3::new(2, 0, 1)),
             (Vec3::new(2.5, -9.0, 1.5), Vec3::Y, IVec3::new(2, -1, 1)),
+            // A low, almost level view still lands on the floor, never on a wall in the air.
             (
                 Vec3::new(9.0, 2.5, 1.5),
                 Vec3::new(-1.0, -0.2, 0.0),
-                IVec3::new(0, 0, 1),
+                IVec3::new(-4, 0, 1),
             ),
-            (
-                Vec3::new(2.5, 2.5, -9.0),
-                Vec3::Z,
-                IVec3::new(0, 0, -1) + IVec3::new(2, 2, 0),
-            ),
+            (Vec3::new(9.0, 2.5, 1.5), Vec3::NEG_X, IVec3::new(0, 2, 1)),
+            (Vec3::new(2.5, 2.5, -9.0), Vec3::Z, IVec3::new(2, 2, -1)),
         ] {
             let hit = pick_background(Ray { origin, direction }, 100.0).unwrap();
             assert_eq!(hit.voxel + hit.face.normal(), attach, "from {origin}");

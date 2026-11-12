@@ -53,6 +53,24 @@ pub struct VoxelWrite {
     pub color: Option<u8>,
 }
 
+/// Surface constants of a Material; a missing field keeps the current value (a new Material starts matte).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceParams {
+    /// 0 (mirror) to 1 (matte).
+    pub roughness: Option<f32>,
+    /// 0 for paint or plastic up to 1 for bare metal.
+    pub metallic: Option<f32>,
+    /// Color of the emitted light as `[r, g, b]`, 0-255 each.
+    pub emission_color: Option<[u8; 3]>,
+    /// Brightness of the emitted light, 0 (no glow) to 32.
+    pub emission_strength: Option<f32>,
+    /// 0 (opaque) to 1 (clear glass).
+    pub transmission: Option<f32>,
+    /// Index of refraction, 1 to 3, used when transmission is above 0.
+    pub ior: Option<f32>,
+}
+
 /// What an MCP client asks the editor to do. The UI thread answers every request; the server never touches
 /// the Scene itself.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,17 +137,88 @@ pub enum Request {
     },
     /// Starts a render.
     StartRender,
+    /// Every Material with the Colors that use it and its node graph.
+    GetMaterials,
+    /// Every node kind a Material graph can hold, with its sockets and parameters.
+    GetMaterialNodeKinds,
+    /// Appends a Material.
+    CreateMaterial {
+        /// Its name.
+        name: String,
+        /// Label of a built-in sample graph to start from, for example "Roof slate".
+        sample: Option<String>,
+        /// Constants for a one-node Material; `None` with no sample starts from the Voxel color.
+        surface: Option<SurfaceParams>,
+    },
+    /// Copies a Material and appends the copy.
+    DuplicateMaterial {
+        /// Index of the Material to copy.
+        index: u32,
+        /// Name of the copy; empty names it after the original.
+        name: String,
+    },
+    /// Deletes a Material; its Colors fall back to the Default material.
+    DeleteMaterial {
+        /// Index of the Material.
+        index: u32,
+    },
+    /// Renames a Material.
+    RenameMaterial {
+        /// Index of the Material.
+        index: u32,
+        /// The new name.
+        name: String,
+    },
+    /// Turns "Casts shadow" of a Material on or off.
+    SetMaterialCastsShadow {
+        /// Index of the Material.
+        index: u32,
+        /// Whether its voxels block light.
+        casts_shadow: bool,
+    },
+    /// Changes the Surface output's constants of a Material.
+    SetMaterialSurface {
+        /// Index of the Material.
+        index: u32,
+        /// The constants to change.
+        surface: SurfaceParams,
+    },
+    /// Applies one change to the node graph of a Material.
+    EditMaterialGraph {
+        /// Index of the Material.
+        index: u32,
+        /// A `rustium_core::GraphEdit` as JSON; the editor parses it.
+        edit: Value,
+    },
+    /// Points Palette entries at a Material.
+    AssignMaterial {
+        /// Palette entries, 1–255.
+        colors: Vec<u8>,
+        /// Index of the Material; 0 is the Default material.
+        material: u32,
+    },
 }
 
 impl Request {
     /// The permission a client needs to send this request.
     pub fn permission(&self) -> Permission {
         match self {
-            Self::SceneInfo | Self::GetVoxels { .. } | Self::GetRegion { .. } | Self::GetPalette => {
-                Permission::ReadModel
-            }
+            Self::SceneInfo
+            | Self::GetVoxels { .. }
+            | Self::GetRegion { .. }
+            | Self::GetPalette
+            | Self::GetMaterials
+            | Self::GetMaterialNodeKinds => Permission::ReadModel,
             Self::SetVoxels { .. } | Self::ApplyBrush { .. } => Permission::EditVoxels,
-            Self::SetPaletteColor { .. } => Permission::EditPalette,
+            Self::SetPaletteColor { .. }
+            | Self::CreateMaterial { .. }
+            | Self::DuplicateMaterial { .. }
+            | Self::DeleteMaterial { .. }
+            | Self::RenameMaterial { .. }
+            | Self::SetMaterialCastsShadow { .. }
+            | Self::SetMaterialSurface { .. }
+            | Self::EditMaterialGraph { .. }
+            | Self::AssignMaterial { .. } => Permission::EditPalette,
             Self::RunScript { .. } => Permission::RunScripts,
             Self::StartRender => Permission::StartRenders,
         }
@@ -274,6 +363,8 @@ mod tests {
                 Permission::RunScripts,
             ),
             (Request::StartRender, Permission::StartRenders),
+            (Request::GetMaterials, Permission::ReadModel),
+            (Request::DeleteMaterial { index: 1 }, Permission::EditPalette),
         ];
         for (request, permission) in cases {
             assert_eq!(request.permission(), permission);

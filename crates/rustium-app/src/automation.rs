@@ -3,10 +3,10 @@
 
 use glam::IVec3;
 use rustium_core::{
-    Brush, BrushKind, CHUNK_SIZE, ChunkCoord, ColorId, Command, Face, HitTarget, Mirror, NodeId, NodeKind, RayHit,
-    Shape, Volume, VoxelTool,
+    Brush, BrushKind, CHUNK_SIZE, ChunkCoord, ColorId, Command, Face, GraphEdit, GraphNodeKind, HitTarget,
+    MaterialGraph, Mirror, NodeId, NodeKind, RayHit, SampleMaterial, Shape, SurfaceConstants, Volume, VoxelTool,
 };
-use rustium_mcp::{BrushTool, FaceDirection, Reply, Request, VoxelWrite};
+use rustium_mcp::{BrushTool, FaceDirection, Reply, Request, SurfaceParams, VoxelWrite};
 use rustium_script::Limits;
 use serde_json::{Value, json};
 
@@ -14,6 +14,8 @@ use crate::editor::Editor;
 
 /// Most positions one `get_voxels` call may look up.
 const MAX_LOOKUPS: usize = 100_000;
+/// Longest Material name an MCP client may set, in characters (the same limit as renaming).
+const MATERIAL_NAME_MAX: usize = 64;
 
 /// Applies `request` to the editor and builds the JSON answer for the MCP client.
 pub(crate) fn handle(editor: &mut Editor, request: Request) -> Reply {
@@ -44,8 +46,52 @@ pub(crate) fn handle(editor: &mut Editor, request: Request) -> Reply {
                 .map_err(|error| error.to_string())?;
             Ok(json!({ "changed": output.changed, "log": output.log }))
         }
-        Request::StartRender => Err("Rendering is not available until milestone M3 (the path tracer).".to_owned()),
+        Request::StartRender => {
+            Err("Starting a render over MCP is not wired up yet; ask the user to start it in Render mode.".to_owned())
+        }
+        Request::GetMaterials => Ok(get_materials(editor)),
+        Request::GetMaterialNodeKinds => Ok(material_node_kinds()),
+        Request::CreateMaterial { name, sample, surface } => {
+            let graph = new_material(&name, sample.as_deref(), surface)?;
+            let changed = execute(editor, &Command::AddMaterial { graph: Box::new(graph) })?;
+            Ok(json!({ "changed": changed, "index": last_material(editor) }))
+        }
+        Request::DuplicateMaterial { index, name } => {
+            let changed = execute(editor, &Command::DuplicateMaterial { index, name })?;
+            Ok(json!({ "changed": changed, "index": last_material(editor) }))
+        }
+        Request::DeleteMaterial { index } => changed(editor, &Command::DeleteMaterial { index }),
+        Request::RenameMaterial { index, name } => changed(editor, &Command::RenameMaterial { index, name }),
+        Request::SetMaterialCastsShadow { index, casts_shadow } => {
+            changed(editor, &Command::SetCastsShadow { index, casts_shadow })
+        }
+        Request::SetMaterialSurface { index, surface } => {
+            // An unknown or locked index keeps the matte base; the Command then reports why it is refused.
+            let current = material(editor, index).map_or(SurfaceConstants::MATTE, MaterialGraph::surface_constants);
+            let surface = merge_surface(current, surface);
+            changed(editor, &Command::EditGraph { index, surface })
+        }
+        Request::EditMaterialGraph { index, edit } => {
+            let edit: GraphEdit =
+                serde_json::from_value(edit).map_err(|error| format!("`edit` is not a graph edit: {error}"))?;
+            let graph = material(editor, index);
+            let added_id = match edit {
+                GraphEdit::AddNode { .. } => graph.map(|graph| graph.next_node_id().get()),
+                GraphEdit::AddFrame { .. } => graph.map(|graph| graph.next_frame_id().get()),
+                _ => None,
+            };
+            let changed = execute(editor, &Command::EditMaterial { index, edit })?;
+            Ok(json!({ "changed": changed, "added_id": added_id }))
+        }
+        Request::AssignMaterial { colors, material } => {
+            let ids = colors.into_iter().map(color_id).collect::<Result<Vec<_>, _>>()?;
+            changed(editor, &Command::AssignGraphToColors { ids, graph: material })
+        }
     }
+}
+
+fn changed(editor: &mut Editor, command: &Command) -> Reply {
+    Ok(json!({ "changed": execute(editor, command)? }))
 }
 
 fn execute(editor: &mut Editor, command: &Command) -> Result<bool, String> {
@@ -200,10 +246,116 @@ fn get_palette(editor: &Editor) -> Value {
         .iter()
         .map(|(id, color)| {
             let [r, g, b] = color.color;
-            json!({ "color": id.get(), "hex": format!("#{r:02x}{g:02x}{b:02x}"), "rgb": color.color })
+            json!({
+                "color": id.get(),
+                "hex": format!("#{r:02x}{g:02x}{b:02x}"),
+                "rgb": color.color,
+                "material": color.graph,
+            })
         })
         .collect();
     json!({ "palette": entries })
+}
+
+fn material(editor: &Editor, index: u32) -> Option<&MaterialGraph> {
+    editor.scene.material_graphs().get(usize::try_from(index).ok()?)
+}
+
+/// Index of the newest Material, which is where `AddMaterial` and `DuplicateMaterial` put theirs.
+fn last_material(editor: &Editor) -> usize {
+    editor.scene.material_graphs().len().saturating_sub(1)
+}
+
+/// Every Material with the Colors that use it. The graph is the same JSON `edit_material_graph` edits refer to.
+fn get_materials(editor: &Editor) -> Value {
+    let palette = editor.scene.palette();
+    let mut materials = Vec::new();
+    for (index, graph) in editor.scene.material_graphs().iter().enumerate() {
+        let colors: Vec<u8> = palette
+            .iter()
+            .filter(|(_, color)| usize::try_from(color.graph).ok() == Some(index))
+            .map(|(id, _)| id.get())
+            .collect();
+        materials.push(json!({
+            "index": index,
+            "name": graph.name,
+            "locked": index == 0,
+            "colors": colors,
+            "surface": graph.surface_constants(),
+            "graph": graph,
+        }));
+    }
+    json!({ "materials": materials, "max_materials": MaterialGraph::MAX_PER_SCENE })
+}
+
+/// The node library: what `AddNode` accepts and what each socket and parameter number means.
+fn material_node_kinds() -> Value {
+    let mut kinds = Vec::new();
+    for kind in GraphNodeKind::ALL {
+        let spec = kind.spec();
+        let inputs: Vec<Value> = spec
+            .inputs
+            .iter()
+            .map(|input| json!({ "name": input.name, "type": format!("{:?}", input.ty), "default": input.default }))
+            .collect();
+        let outputs: Vec<Value> = spec
+            .outputs
+            .iter()
+            .map(|output| json!({ "name": output.name, "type": format!("{:?}", output.ty) }))
+            .collect();
+        let params: Vec<Value> = spec
+            .params
+            .iter()
+            .map(|param| json!({ "name": param.name, "kind": format!("{:?}", param.kind) }))
+            .collect();
+        kinds.push(json!({
+            "kind": kind,
+            "label": spec.label,
+            "description": spec.description,
+            "inputs": inputs,
+            "outputs": outputs,
+            "params": params,
+        }));
+    }
+    json!({ "node_kinds": kinds })
+}
+
+/// The graph `create_material` adds: a named sample, a one-node graph of constants, or the blank starter.
+fn new_material(name: &str, sample: Option<&str>, surface: Option<SurfaceParams>) -> Result<MaterialGraph, String> {
+    let name: String = name.trim().chars().take(MATERIAL_NAME_MAX).collect();
+    match (sample, surface) {
+        (Some(_), Some(_)) => Err("pass `sample` or `surface`, not both".to_owned()),
+        (Some(label), None) => {
+            let Some(sample) = SampleMaterial::ALL
+                .into_iter()
+                .find(|sample| sample.label().eq_ignore_ascii_case(label.trim()))
+            else {
+                let known: Vec<&str> = SampleMaterial::ALL.iter().map(|sample| sample.label()).collect();
+                return Err(format!("no sample called {label:?}; use one of {}", known.join(", ")));
+            };
+            let mut graph = sample.build();
+            if !name.is_empty() {
+                graph.name = name;
+            }
+            Ok(graph)
+        }
+        (None, Some(surface)) => Ok(MaterialGraph::from_constants(
+            &name,
+            merge_surface(SurfaceConstants::MATTE, surface),
+        )),
+        (None, None) => Ok(MaterialGraph::blank(&name)),
+    }
+}
+
+fn merge_surface(base: SurfaceConstants, change: SurfaceParams) -> SurfaceConstants {
+    SurfaceConstants {
+        roughness: change.roughness.unwrap_or(base.roughness),
+        metallic: change.metallic.unwrap_or(base.metallic),
+        emission_color: change.emission_color.unwrap_or(base.emission_color),
+        emission_strength: change.emission_strength.unwrap_or(base.emission_strength),
+        transmission: change.transmission.unwrap_or(base.transmission),
+        ior: change.ior.unwrap_or(base.ior),
+    }
 }
 
 fn set_voxels(editor: &mut Editor, model: Option<u32>, writes: &[VoxelWrite]) -> Reply {
@@ -420,7 +572,139 @@ mod tests {
         assert!(!editor.history.can_undo());
         let error = set(&mut editor, &[([i32::MAX, 0, 0], Some(1))]).unwrap_err();
         assert!(error.contains("outside"), "{error}");
-        assert!(handle(&mut editor, Request::StartRender).unwrap_err().contains("M3"));
+        let error = handle(&mut editor, Request::StartRender).unwrap_err();
+        assert!(error.contains("Render mode"), "{error}");
+    }
+
+    fn create(editor: &mut Editor, sample: Option<&str>, surface: Option<SurfaceParams>) -> Reply {
+        handle(
+            editor,
+            Request::CreateMaterial {
+                name: "Lamp".to_owned(),
+                sample: sample.map(str::to_owned),
+                surface,
+            },
+        )
+    }
+
+    #[test]
+    fn materials_are_created_assigned_and_listed_with_their_colors() {
+        let mut editor = editor();
+        let glow = SurfaceParams {
+            emission_strength: Some(4.0),
+            ..SurfaceParams::default()
+        };
+        let reply = create(&mut editor, None, Some(glow)).unwrap();
+        assert_eq!(reply["index"], 1);
+        let assign = Request::AssignMaterial {
+            colors: vec![3, 4],
+            material: 1,
+        };
+        assert_eq!(handle(&mut editor, assign).unwrap()["changed"], true);
+        assert_eq!(editor.history.done().count(), 2, "each tool call is one undo step");
+
+        let listed = handle(&mut editor, Request::GetMaterials).unwrap();
+        let lamp = &listed["materials"][1];
+        assert_eq!(lamp["name"], "Lamp");
+        assert_eq!(lamp["colors"], json!([3, 4]));
+        assert_eq!(lamp["surface"]["emission_strength"], 4.0);
+        assert_eq!(lamp["surface"]["roughness"], json!(SurfaceConstants::MATTE.roughness));
+        assert_eq!(listed["materials"][0]["locked"], true);
+        let palette = handle(&mut editor, Request::GetPalette).unwrap();
+        assert_eq!(palette["palette"][2]["material"], 1);
+
+        let sample = create(&mut editor, Some("roof SLATE"), None).unwrap();
+        assert_eq!(sample["index"], 2);
+        assert_eq!(editor.scene.material_graphs()[2].name, "Lamp");
+        let error = create(&mut editor, Some("Lava"), None).unwrap_err();
+        assert!(error.contains("Roof slate"), "{error}");
+        let error = create(&mut editor, Some("Glass"), Some(glow)).unwrap_err();
+        assert!(error.contains("not both"), "{error}");
+
+        editor.undo();
+        editor.undo();
+        let after_undo = handle(&mut editor, Request::GetMaterials).unwrap();
+        assert_eq!(after_undo["materials"][1]["colors"], json!([]));
+    }
+
+    #[test]
+    fn material_settings_change_one_step_at_a_time() {
+        let mut editor = editor();
+        create(&mut editor, None, None).unwrap();
+        let surface = SurfaceParams {
+            metallic: Some(1.0),
+            ..SurfaceParams::default()
+        };
+        handle(&mut editor, Request::SetMaterialSurface { index: 1, surface }).unwrap();
+        let graph = &editor.scene.material_graphs()[1];
+        assert!((graph.surface_constants().metallic - 1.0).abs() < f32::EPSILON);
+        handle(
+            &mut editor,
+            Request::RenameMaterial {
+                index: 1,
+                name: "Steel".to_owned(),
+            },
+        )
+        .unwrap();
+        handle(
+            &mut editor,
+            Request::SetMaterialCastsShadow {
+                index: 1,
+                casts_shadow: false,
+            },
+        )
+        .unwrap();
+        let copy = handle(
+            &mut editor,
+            Request::DuplicateMaterial {
+                index: 1,
+                name: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(copy["index"], 2);
+        assert_eq!(editor.scene.material_graphs()[2].name, "Steel copy");
+        assert!(!editor.scene.material_graphs()[2].casts_shadow);
+        handle(&mut editor, Request::DeleteMaterial { index: 1 }).unwrap();
+        assert_eq!(editor.scene.material_graphs().len(), 2);
+        assert_eq!(editor.history.done().count(), 6);
+    }
+
+    #[test]
+    fn graph_edits_arrive_as_json_and_report_new_ids() {
+        let mut editor = editor();
+        create(&mut editor, None, None).unwrap();
+        let add = |kind: &str| Request::EditMaterialGraph {
+            index: 1,
+            edit: json!({ "AddNode": { "kind": kind, "position": [0.0, 0.0] } }),
+        };
+        let expected = editor.scene.material_graphs()[1].next_node_id().get();
+        let reply = handle(&mut editor, add("Noise")).unwrap();
+        assert_eq!(reply["added_id"], expected);
+        let node = reply["added_id"].clone();
+        let set = Request::EditMaterialGraph {
+            index: 1,
+            edit: json!({ "SetParam": { "node": node, "param": 0, "value": { "Float": 2.0 } } }),
+        };
+        assert_eq!(handle(&mut editor, set).unwrap()["changed"], true);
+
+        let error = handle(&mut editor, add("Teapot")).unwrap_err();
+        assert!(error.contains("not a graph edit"), "{error}");
+        let locked = Request::EditMaterialGraph {
+            index: 0,
+            edit: json!({ "AddNode": { "kind": "Noise", "position": [0.0, 0.0] } }),
+        };
+        assert!(handle(&mut editor, locked).is_err(), "the Default material is locked");
+        assert_eq!(editor.history.done().count(), 3);
+
+        let kinds = handle(&mut editor, Request::GetMaterialNodeKinds).unwrap();
+        let noise = kinds["node_kinds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|kind| kind["kind"] == "Noise")
+            .unwrap();
+        assert_eq!(noise["params"][0]["name"], "Scale", "SetParam 0 above is the Scale");
     }
 
     #[test]

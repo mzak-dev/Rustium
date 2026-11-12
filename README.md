@@ -13,7 +13,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows_·_Linux_·_macOS-1A1D22)
 ![Status](https://img.shields.io/badge/status-M1–M7_·_preview-A6AFBC)
 
-<img src="docs/images/editor.jpg" alt="Rustium editor: colored voxel rows on a ground grid, floating glass tool panels around the viewport" width="100%">
+<img src="docs/images/editor.jpg" alt="Rustium editor: a voxel scene with glass and colored blocks on a ground grid, floating glass tool panels around the viewport" width="100%">
 
 </div>
 
@@ -34,16 +34,24 @@ Most voxel editors make you choose: a polished UI or a renderer you can trust an
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/start-screen.jpg" alt="Start screen with the Rustium logo, New model and Open file buttons"></td>
-    <td width="50%"><img src="docs/images/palette-history.jpg" alt="Palette popover with 96 colors above the hotbar, History tab listing edits"></td>
+    <td width="50%"><img src="docs/images/effects.jpg" alt="Effects mode: the Roof slate Material as a node graph with Voxel color, Noise, Mix, Remap, Voxel bevel and Surface nodes"></td>
+    <td width="50%"><img src="docs/images/render.jpg" alt="Render mode: path-traced scene with a glass box, a haze box and a yellow pillar on a dark slab"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Effects mode: Materials are node graphs compiled to WGSL</sub></td>
+    <td align="center"><sub>Render mode: progressive path tracer with glass and haze</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/start-screen.jpg" alt="Start screen with the Rustium logo among glass voxels, New model and Open file buttons"></td>
+    <td width="50%"><img src="docs/images/palette.jpg" alt="Palette popover with 96 colors above the hotbar"></td>
   </tr>
   <tr>
     <td align="center"><sub>Start screen</sub></td>
-    <td align="center"><sub>96-color palette and the History tab: click any step to jump back</sub></td>
+    <td align="center"><sub>96-color palette: click a color to put it in the active slot</sub></td>
   </tr>
 </table>
 
-<sub>Screenshots show the Polish interface; switch languages in Settings → General.</sub>
+<sub>The interface is also available in Polish; switch languages in Settings → General.</sub>
 
 ## Features
 

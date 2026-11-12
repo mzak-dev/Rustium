@@ -754,8 +754,8 @@ impl PathTracer {
     }
 
     // HOT PATH: runs every frame while Render mode is open. Everything else in this file runs on change only.
-    /// Traces a band of rows of the next sample (the whole picture when the GPU is fast enough, see [`BandBudget`])
-    /// and draws the resolved image into `target`.
+    /// Traces a band of rows of the next sample (the whole picture when the GPU is fast enough, adapted to the frame
+    /// time) and draws the resolved image into `target`.
     pub fn encode(
         &mut self,
         device: &wgpu::Device,

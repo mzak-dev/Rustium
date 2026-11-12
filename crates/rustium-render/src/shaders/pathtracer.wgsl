@@ -254,7 +254,7 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, mode: u32
                     // Haze dims the light by its density over the stretch of the voxel the ray crosses.
                     let t_next = min(t_max.x, min(t_max.y, t_max.z));
                     let centre = vec3<f32>(voxel) + vec3<f32>(0.5);
-                    optical += evaluate_material(found, centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
+                    optical += evaluate_material(found, centre, vec3<f32>(0.0, 1.0, 0.0), centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
                         * max(t_next - t_cur, 0.0);
                     if (optical > OPAQUE_DEPTH) {
                         return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
@@ -302,6 +302,16 @@ fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32
         result.model = index;
     }
     return result;
+}
+
+// `evaluate_material` for a point on Model `model`: its Shape-space position and normal come from the Model's
+// transform, which is the inverse of the one `trace_record` applies to rays.
+fn shade(color_index: u32, model: u32, point: vec3<f32>, normal: vec3<f32>) -> Surface {
+    let record = models[model];
+    let moved = point - record.offset.xyz;
+    let local_position = vec3<f32>(dot(record.column_x.xyz, moved), dot(record.column_y.xyz, moved), dot(record.column_z.xyz, moved));
+    let local_normal = vec3<f32>(dot(record.column_x.xyz, normal), dot(record.column_y.xyz, normal), dot(record.column_z.xyz, normal));
+    return evaluate_material(color_index, point, normal, local_position, local_normal);
 }
 
 fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside: u32) -> Hit {
@@ -448,7 +458,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
 
         if (medium != 0u) {
             // Haze: sample where the ray scatters; the Material's colour is the albedo.
-            let haze = evaluate_material(medium_color, origin, -dir);
+            let haze = shade(medium_color, medium_model, origin, -dir);
             if (haze.volume_density > 0.0) {
                 let flight = -log(max(1.0 - rand(), 1.0e-7)) / haze.volume_density;
                 if (flight < hit.t || !hit.hit) {
@@ -498,7 +508,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             surface.roughness = 1.0;
             surface.ior = 1.5;
         } else {
-            surface = evaluate_material(hit.color_index, point, hit.normal);
+            surface = shade(hit.color_index, hit.model, point, hit.normal);
             if (params.style.x == STYLE_CLAY) {
                 surface = clay_surface(surface);
             }
@@ -547,7 +557,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             let n_to = select(surface.ior, 1.0, air);
             var roughness = surface.roughness;
             if (air) {
-                roughness = evaluate_material(medium_color, point, hit.normal).roughness;
+                roughness = shade(medium_color, medium_model, point, hit.normal).roughness;
             }
             // Rough glass: the microfacet normal is the face normal scattered by the roughness.
             var facet = hit.normal;

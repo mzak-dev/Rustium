@@ -36,6 +36,8 @@ struct VertexOutput {
     @location(2) ao: f32,
     @location(3) @interpolate(flat) dim: f32,
     @location(4) @interpolate(flat) color_index: u32,
+    @location(5) local: vec3<f32>,
+    @location(6) @interpolate(flat) local_normal: vec3<f32>,
 };
 
 fn face_normal(face: u32) -> vec3<f32> {
@@ -62,6 +64,8 @@ fn vs_main(
     out.normal = column_x.xyz * local_normal.x + column_y.xyz * local_normal.y + column_z.xyz * local_normal.z;
     out.ao = f32((packed >> 3u) & 3u) / 3.0;
     out.world = world;
+    out.local = position;
+    out.local_normal = local_normal;
     out.color_index = (packed >> 8u) & 255u;
     out.dim = column_x.w;
     return out;
@@ -71,7 +75,7 @@ fn vs_main(
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The mesh's per-vertex occlusion feeds the Ambient occlusion node.
     material_ao = in.ao;
-    let surface = evaluate_material(in.color_index, in.world, in.normal);
+    let surface = evaluate_material(in.color_index, in.world, in.normal, in.local, in.local_normal);
     // The Material may bend the normal (Voxel bevel); it only changes the shading.
     let normal = surface.normal;
     // Glass and haze: draw only the share of pixels that the surface covers, a different share each frame, and let

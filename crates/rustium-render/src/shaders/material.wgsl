@@ -5,7 +5,10 @@
 // Color's Material inside `evaluate_material`); the code above it is the fixed helper library the generated code
 // calls. Callers keep using the same signature.
 //
-// Units: `position` is in the Scene's voxel space, so one unit is one voxel.
+// Units: `position` is in the Scene's voxel space, so one unit is one voxel. `local_position` and `local_normal` are
+// the same point and face normal in the space of the Model's Shape (before the Model's Transform): the Space option
+// "Model" of Noise, Cells and Gradient reads them, so a pattern moves with its Model.
+//   fn evaluate_material(color_index, position, normal, local_position, local_normal) -> Surface
 
 // One Color of the Palette: linear base color and the index of its Material.
 struct ColorEntry {

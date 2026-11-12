@@ -924,6 +924,48 @@ fn a_gradient_graph_changes_the_color_along_its_axis() {
     );
 }
 
+#[test]
+fn a_model_space_gradient_moves_with_its_model() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-1, 0, -1), IVec3::new(1, 7, 1), id(3));
+    let graph = u32::try_from(scene.material_graphs().len()).unwrap();
+    let add = Command::AddMaterial {
+        graph: Box::new(SampleMaterial::Grass.build()),
+    };
+    apply(&mut scene, &add).unwrap();
+    apply(&mut scene, &Command::AssignGraph { id: id(3), graph }).unwrap();
+    // The pillar stands 30 voxels higher: in World space the whole gradient would be past its end.
+    let model = first_model(&scene);
+    apply(
+        &mut scene,
+        &Command::SetTransform {
+            node: model,
+            transform: Transform {
+                orientation: Orientation::default(),
+                offset: IVec3::new(0, 30, 0),
+            },
+        },
+    )
+    .unwrap();
+    let camera = Camera::looking_at(Vec3::new(0.0, 34.0, 18.0), Vec3::new(0.0, 34.0, 0.0));
+    let setup = Setup {
+        sky: Sky::Overcast,
+        ground: Ground::None,
+        sun_height: 60.0,
+        samples: 32,
+        ..Setup::default()
+    };
+    let image = render(&gpu, &scene, &camera, &setup);
+    dump("model-space", &image);
+    let low = rgb(&image, camera.pixel(Vec3::new(0.0, 30.5, 2.0)));
+    let high = rgb(&image, camera.pixel(Vec3::new(0.0, 37.5, 2.0)));
+    assert!(
+        (high[1] / high[0].max(1e-3)) > (low[1] / low[0].max(1e-3)) * 1.05,
+        "the tip is greener in the Model's own space: low {low:?} high {high:?}"
+    );
+}
+
 /// How far two images of the same scene are apart: the mean absolute difference per channel, and the share of pixels
 /// that differ clearly (more than 0.25 in any channel).
 fn difference(a: &TraceImage, b: &TraceImage) -> (f32, f32) {

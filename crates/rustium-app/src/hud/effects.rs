@@ -332,12 +332,23 @@ pub(crate) fn duplicate_selection(hud: &mut Hud<'_>) {
         }
     }
     hud.editor.finish_material_edit();
+    let total = edits.len();
+    let mut applied = 0;
     for edit in edits {
         if !graph_edit(hud, edit, true) {
             break;
         }
+        applied += 1;
     }
     hud.editor.finish_material_edit();
+    if applied < total {
+        // A partial copy is worse than none: take back what was applied (the first edit adds a node, so a
+        // failure before any edit leaves nothing to undo).
+        if applied > 0 {
+            hud.editor.undo();
+        }
+        return;
+    }
     hud.ui.effects.selection = mapping.into_iter().map(|(_, id)| id).collect();
     hud.ui.effects.frame_selection = None;
 }

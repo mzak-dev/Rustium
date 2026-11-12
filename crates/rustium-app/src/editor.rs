@@ -916,11 +916,14 @@ impl Editor {
 
     pub(crate) fn undo(&mut self) {
         self.release();
-        let (changed, colors) = self
+        let Some((changed, colors)) = self
             .history
             .undo(&mut self.scene)
             .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
-            .unwrap_or_default();
+        else {
+            // Nothing to undo: the document must not look edited.
+            return;
+        };
         self.revision += 1;
         self.palette_dirty |= colors;
         self.mark_dirty(changed);
@@ -930,11 +933,14 @@ impl Editor {
 
     pub(crate) fn redo(&mut self) {
         self.release();
-        let (changed, colors) = self
+        let Some((changed, colors)) = self
             .history
             .redo(&mut self.scene)
             .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
-            .unwrap_or_default();
+        else {
+            // Nothing to redo: the document must not look edited.
+            return;
+        };
         self.revision += 1;
         self.palette_dirty |= colors;
         self.mark_dirty(changed);
@@ -1102,6 +1108,15 @@ mod tests {
             .scene
             .model_shape(editor.focus)
             .map_or(0, |(_, shape)| shape.used_count())
+    }
+
+    #[test]
+    fn undo_and_redo_with_nothing_to_do_leave_the_document_unchanged() {
+        let mut editor = Editor::new(0.25, 50);
+        let revision = editor.revision;
+        editor.undo();
+        editor.redo();
+        assert_eq!(editor.revision, revision);
     }
 
     #[test]

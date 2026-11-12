@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 /// A group of MCP tools the user can switch on or off in the MCP tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Permission {
-    /// Scene info, Volume, voxel queries and the Palette.
+    /// Scene info, Volume, voxel queries, the Palette and Materials.
     ReadModel,
     /// Setting and erasing voxels, applying a Brush.
     EditVoxels,
-    /// Changing Palette colors.
+    /// Changing Palette colors and Materials.
     EditPalette,
     /// Running Luau scripts.
     RunScripts,
@@ -33,7 +33,7 @@ impl Permission {
         match self {
             Self::ReadModel => "Read model",
             Self::EditVoxels => "Edit voxels",
-            Self::EditPalette => "Edit palette",
+            Self::EditPalette => "Edit palette & materials",
             Self::RunScripts => "Run scripts",
             Self::StartRenders => "Start renders",
         }
@@ -52,11 +52,11 @@ impl Permission {
     reason = "each bool is one permission switch in the MCP tab"
 )]
 pub struct Permissions {
-    /// Scene info, Volume, voxel queries and the Palette.
+    /// Scene info, Volume, voxel queries, the Palette and Materials.
     pub read_model: bool,
     /// Setting and erasing voxels, applying a Brush.
     pub edit_voxels: bool,
-    /// Changing Palette colors.
+    /// Changing Palette colors and Materials.
     pub edit_palette: bool,
     /// Running Luau scripts.
     pub run_scripts: bool,

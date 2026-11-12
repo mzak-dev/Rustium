@@ -99,6 +99,16 @@ fn a_client_lists_tools_and_reads_the_model_through_the_ui_thread() {
         "set_palette_color",
         "run_script",
         "start_render",
+        "get_materials",
+        "get_material_node_kinds",
+        "create_material",
+        "duplicate_material",
+        "delete_material",
+        "rename_material",
+        "set_material_casts_shadow",
+        "set_material_surface",
+        "edit_material_graph",
+        "assign_material",
     ] {
         assert!(names.contains(&expected), "{expected} missing from {names:?}");
     }

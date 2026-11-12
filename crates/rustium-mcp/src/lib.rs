@@ -45,7 +45,7 @@ mod stdio;
 mod tools;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use bridge::{Bridge, BrushTool, Envelope, FaceDirection, Reply, Request, VoxelWrite, channel};
+pub use bridge::{Bridge, BrushTool, Envelope, FaceDirection, Reply, Request, SurfaceParams, VoxelWrite, channel};
 #[cfg(not(target_arch = "wasm32"))]
 pub use error::Error;
 pub use permission::{Permission, Permissions, SharedPermissions};

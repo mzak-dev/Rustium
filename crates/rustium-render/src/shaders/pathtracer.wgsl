@@ -254,7 +254,10 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, mode: u32
                     // Haze dims the light by its density over the stretch of the voxel the ray crosses.
                     let t_next = min(t_max.x, min(t_max.y, t_max.z));
                     let centre = vec3<f32>(voxel) + vec3<f32>(0.5);
-                    optical += evaluate_material(found, centre, vec3<f32>(0.0, 1.0, 0.0), centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
+                    // `centre` is in Shape space; the Material's World-space position is the Scene one.
+                    let scene_centre = model.column_x.xyz * centre.x + model.column_y.xyz * centre.y + model.column_z.xyz * centre.z
+                        + model.offset.xyz;
+                    optical += evaluate_material(found, scene_centre, vec3<f32>(0.0, 1.0, 0.0), centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
                         * max(t_next - t_cur, 0.0);
                     if (optical > OPAQUE_DEPTH) {
                         return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);

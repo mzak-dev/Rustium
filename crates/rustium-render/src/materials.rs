@@ -13,7 +13,8 @@ pub struct GpuColor {
     /// Linear base color.
     pub albedo: [f32; 3],
     /// Bits 0..16: index of the Color's material graph. Bit 16 is set when the Material does not cast shadows, bit 17
-    /// when it has a Volume output and a see-through Surface (haze dims shadow rays instead of stopping them).
+    /// when it has a Volume output and a see-through Surface (haze dims shadow rays instead of stopping them), bit 18
+    /// when it is see-through glass without a Volume output (shadow rays pass it, dimmed and tinted).
     pub graph: u32,
 }
 
@@ -21,6 +22,8 @@ pub struct GpuColor {
 const FLAG_NO_SHADOW: u32 = 1 << 16;
 /// The Material is see-through haze: a Volume output on a transmitting Surface (`COLOR_VOLUMETRIC` in `material.wgsl`).
 const FLAG_VOLUMETRIC: u32 = 1 << 17;
+/// The Material is see-through glass: a transmitting Surface without a Volume output (`COLOR_TRANSMISSIVE`).
+const FLAG_TRANSMISSIVE: u32 = 1 << 18;
 
 const _: () = assert!(size_of::<GpuColor>() == 16);
 
@@ -62,8 +65,12 @@ impl GpuMaterialTable {
                     packed |= FLAG_NO_SHADOW;
                 }
                 // Shadow rays only dim in a see-through voxel; an opaque Surface with a Volume output still blocks.
-                if found.volume_output().is_some() && found.transmits() {
-                    packed |= FLAG_VOLUMETRIC;
+                if found.transmits() {
+                    packed |= if found.volume_output().is_some() {
+                        FLAG_VOLUMETRIC
+                    } else {
+                        FLAG_TRANSMISSIVE
+                    };
                 }
             }
             if let Some(slot) = table.colors.get_mut(usize::from(id.get())) {

@@ -54,9 +54,10 @@ fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model:
     return result;
 }
 
-// The fraction of sunlight that gets along the ray (see the DDA variant). Every chunk box on the ray is walked in
-// MODE_SHADOW: a blocking voxel ends the query, haze adds its optical depth chunk by chunk.
-fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+// The sunlight that gets along the ray (see the DDA variant). Every chunk box on the ray is walked in MODE_SHADOW: a
+// blocking voxel ends the query, haze adds its optical depth and glass its tint chunk by chunk.
+fn shadow_light(origin: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    shadow_tint = vec3<f32>(1.0);
     var optical = 0.0;
     var rq: ray_query;
     rayQueryInitialize(&rq, scene_tlas, RayDesc(0u, 0xFFu, 0.0, FAR, origin, dir));
@@ -70,9 +71,9 @@ fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
         }
         let found = trace_chunk(box.instance_index, box.instance_custom_data + box.primitive_index, origin, dir, MODE_SHADOW);
         if (found.hit) {
-            return 0.0;
+            return vec3<f32>(0.0);
         }
         optical += found.optical;
     }
-    return exp(-optical);
+    return shadow_tint * exp(-optical);
 }

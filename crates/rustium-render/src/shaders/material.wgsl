@@ -15,13 +15,15 @@ struct ColorEntry {
     albedo: vec3<f32>,
     // Bits 0..16: index of the Color's Material. Bit 16 (COLOR_NO_SHADOW): the Material does not cast shadows.
     // Bit 17 (COLOR_VOLUMETRIC): the Material has a Volume output, so shadow rays are dimmed by its haze instead of
-    // stopped.
+    // stopped. Bit 18 (COLOR_TRANSMISSIVE): see-through glass without a Volume output; shadow rays pass it, dimmed and
+    // tinted.
     graph: u32,
 };
 
 const COLOR_GRAPH_MASK: u32 = 0xffffu;
 const COLOR_NO_SHADOW: u32 = 0x10000u;
 const COLOR_VOLUMETRIC: u32 = 0x20000u;
+const COLOR_TRANSMISSIVE: u32 = 0x40000u;
 
 struct MaterialTable {
     colors: array<ColorEntry, 256>,

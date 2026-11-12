@@ -139,6 +139,11 @@ struct Hit {
 const MODE_NEAREST: u32 = 0u;
 const MODE_INSIDE: u32 = 1u;
 const MODE_SHADOW: u32 = 2u;
+// Colour the sunlight picks up crossing glass on the shadow ray being walked; `shadow_light` resets it.
+var<private> shadow_tint: vec3<f32>;
+// How much of the path a shadow ray travels through glass counts towards its tint: real glass is a pair of surfaces
+// and not a solid dye, so a thick block must not turn black.
+const GLASS_SHADOW_THICKNESS: f32 = 0.3;
 // Optical depth beyond which a shadow ray counts as blocked.
 const OPAQUE_DEPTH: f32 = 12.0;
 
@@ -252,19 +257,27 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, mode: u32
                     flags = 0u;
                 }
                 if ((flags & COLOR_NO_SHADOW) == 0u) {
-                    if ((flags & COLOR_VOLUMETRIC) == 0u) {
+                    if ((flags & (COLOR_VOLUMETRIC | COLOR_TRANSMISSIVE)) == 0u) {
                         return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
                     }
-                    // Haze dims the light by its density over the stretch of the voxel the ray crosses.
                     let t_next = min(t_max.x, min(t_max.y, t_max.z));
                     let centre = vec3<f32>(voxel) + vec3<f32>(0.5);
                     // `centre` is in Shape space; the Material's World-space position is the Scene one.
                     let scene_centre = model.column_x.xyz * centre.x + model.column_y.xyz * centre.y + model.column_z.xyz * centre.z
                         + model.offset.xyz;
-                    optical += evaluate_material(found, scene_centre, vec3<f32>(0.0, 1.0, 0.0), centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
-                        * max(t_next - t_cur, 0.0);
-                    if (optical > OPAQUE_DEPTH) {
-                        return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
+                    let stretch = max(t_next - t_cur, 0.0);
+                    let medium = evaluate_material(found, scene_centre, vec3<f32>(0.0, 1.0, 0.0), centre, vec3<f32>(0.0, 1.0, 0.0));
+                    if ((flags & COLOR_VOLUMETRIC) != 0u) {
+                        // Haze dims the light by its density over the stretch of the voxel the ray crosses.
+                        optical += medium.volume_density * stretch;
+                        if (optical > OPAQUE_DEPTH) {
+                            return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
+                        }
+                    } else {
+                        // Glass lets part of the sunlight through: its transmission, tinted by its color, per voxel of
+                        // path (the ray is not bent, so this is a cheap stand-in for the refracted light).
+                        let tint = clamp(medium.base_color * medium.transmission, vec3<f32>(0.001), vec3<f32>(1.0));
+                        shadow_tint *= pow(tint, vec3<f32>(stretch * GLASS_SHADOW_THICKNESS));
                     }
                 }
             }
@@ -325,8 +338,8 @@ fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside:
     return trace_record(models[index], index, origin, dir, mode, inside);
 }
 
-// `trace_scene_hit` (nearest hit over all visible Models) and `shadow_transmittance` (the fraction of sunlight
-// along a ray: 0 behind a voxel that casts shadows, dimmed by haze, 1 in the open) come from the traversal
+// `trace_scene_hit` (nearest hit over all visible Models) and `shadow_light` (the sunlight that gets along a ray, per
+// colour channel: 0 behind a voxel that casts shadows, dimmed by haze, dimmed and tinted by glass, 1 in the open) come from the traversal
 // variant that is compiled in: trace_dda.wgsl (software) or trace_rq.wgsl (hardware ray query). Both return the same
 // `Hit`, so everything below is shared.
 
@@ -378,8 +391,13 @@ fn schlick(cos_theta: f32, r0: f32) -> f32 {
 }
 
 // Whether `point` can see the sun along `dir`: 1.0 in the open, 0.0 when something is in the way.
-fn sun_visibility(point: vec3<f32>, dir: vec3<f32>) -> f32 {
-    return shadow_transmittance(point, dir);
+fn sun_visibility(point: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    return shadow_light(point, dir);
+}
+
+// `shadow_light` as a single number, for the places that only need how much light arrives.
+fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    return luminance(shadow_light(origin, dir));
 }
 
 fn luminance(color: vec3<f32>) -> f32 {
@@ -474,7 +492,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
                     throughput *= min(haze.volume_color, vec3<f32>(1.0));
                     let sun = sun_sample();
                     color += throughput * params.sun_color.rgb
-                        * (PI * hg_phase(dot(dir, sun), HAZE_G) * shadow_transmittance(at, sun));
+                        * (PI * hg_phase(dot(dir, sun), HAZE_G) * shadow_light(at, sun));
                     dir = sample_hg(dir, HAZE_G);
                     origin = at;
                     bounces += 1u;
@@ -553,7 +571,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             let sun = sun_sample();
             let open_sun = max(sun.y, 0.0) * luminance(params.sun_color.rgb);
             let open_sky = 0.5 * luminance(params.sky_horizon.rgb + params.sky_zenith.rgb);
-            let lit = open_sun * sun_visibility(point + up * EPS, sun)
+            let lit = open_sun * luminance(sun_visibility(point + up * EPS, sun))
                 + open_sky * shadow_transmittance(point + up * EPS, cosine_hemisphere(up));
             let ratio = clamp(lit / max(open_sun + open_sky, 1.0e-4), 0.0, 1.0);
             if (params.options.y == 1u) {

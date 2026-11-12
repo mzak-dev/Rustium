@@ -148,13 +148,13 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
                 .spacing(vec2(8.0, 7.0))
                 .show(ui, |ui| {
                     ui.label(widgets::muted(hud.tr("effects-node-name")));
-                    let mut name = node.name.clone();
-                    let field = ui.add(
-                        egui::TextEdit::singleline(&mut name)
-                            .hint_text(kind_label(hud, node.kind))
-                            .desired_width(f32::INFINITY),
-                    );
-                    if field.lost_focus() && name != node.name {
+                    if let Some(name) = committed_text(
+                        ui,
+                        egui::IdSalt::new(("node-name", node.id.get())),
+                        &node.name,
+                        true,
+                        Some(&kind_label(hud, node.kind)),
+                    ) {
                         edits.push(GraphEdit::RenameNode { node: node.id, name });
                     }
                     ui.end_row();
@@ -544,18 +544,12 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             .spacing(vec2(8.0, 7.0))
             .show(ui, |ui| {
                 ui.label(widgets::muted(hud.tr("material-name")));
-                let mut text = name.clone();
-                let field = ui.add_enabled(
-                    editable,
-                    egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY),
-                );
-                if field.lost_focus() && text != name && !text.trim().is_empty() {
+                if let Some(text) =
+                    committed_text(ui, egui::IdSalt::new(("material-name", index)), &name, editable, None)
+                    && !text.trim().is_empty()
+                {
                     effects::command(hud, &Command::RenameMaterial { index, name: text });
                 }
-                ui.end_row();
-
-                ui.label(widgets::muted(hud.tr("material-shading")));
-                static_field(ui, &hud.tr("material-pbr"));
                 ui.end_row();
 
                 ui.label(widgets::muted(hud.tr("effects-used-by")));
@@ -628,52 +622,82 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     });
 }
 
-fn static_field(ui: &mut Ui, text: &str) {
-    egui::Frame::new()
-        .fill(theme::FIELD)
-        .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
-        .corner_radius(7)
-        .inner_margin(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(text);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
-                    Icon::ChevronDown.paint(ui.painter(), rect, theme::MUTED);
-                });
-            });
-        });
+/// A single-line text field that keeps the typed text in egui memory while it has focus and returns the
+/// new text once editing ends (focus lost or Enter) with a value that differs from `current`.
+fn committed_text(ui: &mut Ui, salt: egui::IdSalt, current: &str, enabled: bool, hint: Option<&str>) -> Option<String> {
+    let id = ui.make_persistent_id(salt);
+    let buffer_id = id.with("buffer");
+    let focused = ui.ctx().memory(|memory| memory.has_focus(id));
+    let mut text = if focused {
+        ui.data(|data| data.get_temp::<String>(buffer_id))
+            .unwrap_or_else(|| current.to_owned())
+    } else {
+        current.to_owned()
+    };
+    let mut edit = egui::TextEdit::singleline(&mut text)
+        .id(id)
+        .desired_width(f32::INFINITY);
+    if let Some(hint) = hint {
+        edit = edit.hint_text(hint);
+    }
+    let response = ui.add_enabled(enabled, edit);
+    if response.has_focus() {
+        ui.data_mut(|data| data.insert_temp(buffer_id, text.clone()));
+    }
+    if response.lost_focus() {
+        ui.data_mut(|data| data.remove_temp::<String>(buffer_id));
+        if text != current {
+            return Some(text);
+        }
+    }
+    None
 }
 
 /// "Assign to more palette colors": the Palette; a click moves a Color to this Material or back to the Default.
+const ASSIGN_COLUMNS: usize = 16;
+const ASSIGN_GAP: f32 = 2.0;
+
 fn assign_grid(ui: &mut Ui, hud: &mut Hud<'_>, graph: u32) {
     padded(ui, 0, |ui| {
         note(ui, hud.tr("material-assign-hint"));
         ui.add_space(4.0);
         let ids: Vec<ColorId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
-        ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
-        ui.horizontal_wrapped(|ui| {
-            for id in ids {
-                let Some(color) = hud.editor.scene.palette().get(id).copied() else {
-                    continue;
-                };
-                let (rect, response) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
-                ui.painter().rect_filled(rect, 2, rgb(color.color));
-                if color.graph == graph {
-                    ui.painter()
-                        .rect_stroke(rect, 2, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
-                }
-                if response.clicked() {
-                    let target = if color.graph == graph { 0 } else { graph };
-                    effects::command(
-                        hud,
-                        &Command::AssignGraphToColors {
-                            ids: vec![id],
-                            graph: target,
-                        },
-                    );
-                }
+        let cell =
+            ((ui.available_width() - ASSIGN_GAP * (ASSIGN_COLUMNS as f32 - 1.0)) / ASSIGN_COLUMNS as f32).floor();
+        let rows = ids.len().div_ceil(ASSIGN_COLUMNS);
+        let (area, _) = ui.allocate_exact_size(
+            vec2(ui.available_width(), rows as f32 * (cell + ASSIGN_GAP) - ASSIGN_GAP),
+            Sense::hover(),
+        );
+        for (slot, id) in ids.into_iter().enumerate() {
+            let Some(color) = hud.editor.scene.palette().get(id).copied() else {
+                continue;
+            };
+            let (column, row) = (slot % ASSIGN_COLUMNS, slot / ASSIGN_COLUMNS);
+            let rect = egui::Rect::from_min_size(
+                area.min + vec2(column as f32 * (cell + ASSIGN_GAP), row as f32 * (cell + ASSIGN_GAP)),
+                vec2(cell, cell),
+            );
+            let response = ui.interact(
+                rect,
+                ui.make_persistent_id(egui::IdSalt::new(("assign", graph, id.get()))),
+                Sense::click(),
+            );
+            ui.painter().rect_filled(rect, 2, rgb(color.color));
+            if color.graph == graph {
+                ui.painter()
+                    .rect_stroke(rect, 2, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
             }
-        });
+            if response.clicked() {
+                let target = if color.graph == graph { 0 } else { graph };
+                effects::command(
+                    hud,
+                    &Command::AssignGraphToColors {
+                        ids: vec![id],
+                        graph: target,
+                    },
+                );
+            }
+        }
     });
 }

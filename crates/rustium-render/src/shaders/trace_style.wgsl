@@ -88,7 +88,7 @@ fn aov_sample(ray: Ray) -> vec4<f32> {
         if (hit.color_index == GROUND_ID) {
             color = params.ground.rgb;
         } else {
-            let surface = evaluate_material(hit.color_index, ray.origin + ray.dir * hit.t, hit.normal);
+            let surface = shade(hit.color_index, hit.model, ray.origin + ray.dir * hit.t, hit.normal);
             let clear = surface.transmission > 0.5 || surface.volume_density > 0.0;
             color = select(surface.base_color, vec3<f32>(1.0), clear);
         }

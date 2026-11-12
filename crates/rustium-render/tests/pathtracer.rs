@@ -1329,3 +1329,35 @@ fn a_material_that_does_not_cast_shadows_leaves_the_floor_lit() {
         "without a shadow the floor stays lit: {dark} against {light}"
     );
 }
+
+#[test]
+fn hardware_matches_software_with_haze_and_shadow_free_glass() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-40, 0, -40), IVec3::new(40, 0, 40), id(8));
+    fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 5, 3), id(1));
+    fill(&mut scene, IVec3::new(30, 1, 30), IVec3::new(33, 6, 33), id(2));
+    make_haze(&mut scene, 1, 0.3, [0.9, 0.95, 1.0]);
+    shade(
+        &mut scene,
+        2,
+        SurfaceConstants {
+            transmission: 1.0,
+            roughness: 0.0,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    let glass = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+    let command = Command::SetCastsShadow {
+        index: glass,
+        casts_shadow: false,
+    };
+    apply(&mut scene, &command).unwrap();
+    let camera = Camera::looking_at(Vec3::new(8.0, 9.0, 18.0), Vec3::new(0.0, 2.0, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 16,
+        ..Setup::default()
+    };
+    assert_backends_agree("rq-haze", &gpu, &scene, &camera, &setup, None);
+}

@@ -324,6 +324,9 @@ impl Running {
     ) -> Result<Self> {
         let logo = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
         let icon = Icon::from_rgba(logo.0.clone(), logo.1.0, logo.1.1).ok();
+        // Before the window's GPU opens: listing creates and drops a second graphics instance, and doing that while
+        // the swapchain exists breaks it on some Vulkan drivers (AMD on Windows), so the first frame fails.
+        list_adapters();
         let window = create_window(event_loop, icon)?;
         let (gpu, startup_notice) = open_gpu(&window, settings)?;
         Ok(Self::assemble(
@@ -1297,10 +1300,14 @@ fn open_gpu(window: &Arc<Window>, settings: &mut Settings) -> Result<(GpuContext
     }
 }
 
-/// Every graphics device on the machine, for the Settings → Performance pickers.
+/// Every graphics device on the machine, for the Settings → Performance pickers. Listed once, at startup before the
+/// window's GPU opens (see `Running::new`); later calls return that list.
 #[cfg(not(target_arch = "wasm32"))]
 fn list_adapters() -> Vec<AdapterChoice> {
-    pollster::block_on(available_adapters())
+    static ADAPTERS: std::sync::OnceLock<Vec<AdapterChoice>> = std::sync::OnceLock::new();
+    ADAPTERS
+        .get_or_init(|| pollster::block_on(available_adapters()))
+        .clone()
 }
 
 /// The browser picks the device itself; there is nothing to choose from.

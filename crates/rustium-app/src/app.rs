@@ -673,6 +673,7 @@ impl Running {
         let (reset, chunks) = self.editor.take_dirty(&placements);
         if reset {
             self.viewport.clear_chunks();
+            self.preview.invalidate();
         }
         for (shape_id, coord) in chunks {
             let Some(shape) = self.editor.scene.shape(shape_id) else {
@@ -701,10 +702,14 @@ impl Running {
         }
         if wanted.is_some() {
             let shape = self.ui.effects.preview;
-            let (id, meshes) = self.preview.meshes(shape, &self.editor.scene);
-            for (coord, mesh) in meshes {
-                self.viewport.upload_chunk(&self.gpu, id, *coord, mesh);
+            // Uploading marks the image as edited (and restarts temporal accumulation), so only do it on a change.
+            if let Some((id, meshes)) = self.preview.take_upload(shape, &self.editor.scene) {
+                for (coord, mesh) in meshes {
+                    self.viewport.upload_chunk(&self.gpu, id, *coord, mesh);
+                }
             }
+        } else {
+            self.preview.invalidate();
         }
         self.viewport.poll_materials(&self.gpu);
         let mode = self.ui.mode;

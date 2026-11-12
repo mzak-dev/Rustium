@@ -4,6 +4,7 @@ use egui::{Align2, Context, DragValue, FontId, RichText, Stroke, vec2};
 
 use super::widgets::{self, Look};
 use super::{Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, island};
+use crate::keymap::Action;
 use crate::render_mode::{LENS_RANGE_MM, OrbitAround, RenderTool};
 use crate::theme;
 
@@ -93,7 +94,7 @@ pub(crate) fn toolbar(ctx: &Context, hud: &mut Hud<'_>) {
                         Look::Plain
                     };
                     let response = widgets::icon_button(ui, tool.icon(), 44.0, look, true);
-                    let key = format!("{:?}", tool.key());
+                    let key = hud.settings.keymap.label(Action::RenderTool(tool));
                     if hud.settings.shortcut_letters {
                         let color = if look == Look::Accent {
                             theme::ON_ACCENT

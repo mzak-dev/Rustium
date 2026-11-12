@@ -22,15 +22,16 @@ pub(crate) mod widgets;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Key, Modifiers, Order, Pos2, Rect, Ui, Vec2};
+use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
 pub(crate) use prompt::Prompt;
 use rustium_core::{Face, NodeId};
 pub(crate) use toast::Toast;
 use winit::window::ResizeDirection;
 
 use crate::camera::OrbitCamera;
-use crate::editor::{Editor, Tool};
+use crate::editor::Editor;
 use crate::i18n::I18n;
+use crate::keymap::{Action, Scope};
 use crate::mcp::McpStatus;
 use crate::recent::RecentItem;
 use crate::render_mode::RenderState;
@@ -85,6 +86,8 @@ pub(crate) struct UiState {
     pub(crate) document_name: String,
     /// Where the maximize button was drawn last frame, in points; Windows shows Snap Layouts over it.
     pub(crate) maximize_button: Option<Rect>,
+    /// Settings → Input: rebinding, search and file dialogs.
+    pub(crate) keymap_ui: crate::settings_input::KeymapUi,
 }
 
 impl UiState {
@@ -109,6 +112,7 @@ impl UiState {
             recent: Vec::new(),
             document_name: String::new(),
             maximize_button: None,
+            keymap_ui: crate::settings_input::KeymapUi::default(),
         }
     }
 
@@ -408,97 +412,69 @@ fn resize_cursor(direction: ResizeDirection) -> egui::CursorIcon {
 
 /// Keyboard shortcuts from Settings → Input.
 fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
-    const SLOT_KEYS: [Key; 10] = [
-        Key::Num1,
-        Key::Num2,
-        Key::Num3,
-        Key::Num4,
-        Key::Num5,
-        Key::Num6,
-        Key::Num7,
-        Key::Num8,
-        Key::Num9,
-        Key::Num0,
-    ];
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let undo = ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Z));
-    let redo = ctx.input_mut(|input| {
-        input.consume_key(Modifiers::COMMAND, Key::Y)
-            || input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
-    });
-    if undo {
-        hud.editor.undo();
-    }
-    if redo {
-        hud.editor.redo();
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::N)) {
-        hud.send(AppCommand::NewScene);
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::O)) {
-        hud.send(AppCommand::Open(None));
-    }
-    // Ctrl Shift S first: Ctrl S would also match while Shift is held.
-    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)) {
-        hud.send(AppCommand::SaveAs);
-    } else if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::S)) {
-        hud.send(AppCommand::Save);
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::COMMAND, Key::Comma)) {
-        hud.ui.settings_section = Some(Section::General);
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Home)) {
-        hud.send(AppCommand::FrameModel);
-    }
-    if hud.ui.mode == Mode::Render {
-        render_viewport::shortcuts(ctx, hud);
-        return;
-    }
-    for tool in Tool::ALL {
-        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
-            hud.editor.tool = tool;
-        }
-    }
-    focus_keys(ctx, hud);
-    for (slot, key) in SLOT_KEYS.into_iter().enumerate() {
-        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, key)) {
-            hud.editor.active_slot = slot;
+    let scope = if hud.ui.mode == Mode::Render {
+        Scope::Render
+    } else {
+        Scope::Model
+    };
+    let pressed = ctx.input_mut(|input| hud.settings.keymap.take_pressed(input, scope));
+    for action in pressed {
+        match action {
+            Action::Undo => hud.editor.undo(),
+            Action::Redo => hud.editor.redo(),
+            Action::NewScene => hud.send(AppCommand::NewScene),
+            Action::OpenFile => hud.send(AppCommand::Open(None)),
+            Action::SaveFile => hud.send(AppCommand::Save),
+            Action::SaveFileAs => hud.send(AppCommand::SaveAs),
+            Action::OpenSettings => hud.ui.settings_section = Some(Section::General),
+            Action::FrameModel => hud.send(AppCommand::FrameModel),
+            Action::Tool(tool) => hud.editor.tool = tool,
+            Action::Slot(slot) => hud.editor.active_slot = usize::from(slot),
+            Action::StepIn | Action::StepOut | Action::DeleteNodes => focus_action(hud, action),
+            Action::RenderTool(_) | Action::RenderStart | Action::ClearRenderRegion => {
+                render_viewport::shortcut(hud, action);
+            }
         }
     }
 }
 
-/// Enter steps into the selected Node, Esc clears the voxel selection and then steps out, Delete removes Nodes.
-fn focus_keys(ctx: &Context, hud: &mut Hud<'_>) {
+/// Step in selects the Node under the selection or cursor, step out clears the voxel selection and then steps
+/// out of the focused Node, and delete removes the selected Nodes.
+fn focus_action(hud: &mut Hud<'_>, action: Action) {
     if hud.ui.renaming.is_some() {
         return;
     }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter)) {
-        let target = hud
-            .editor
-            .node_selection
-            .last()
-            .copied()
-            .or_else(|| hud.editor.hover.and_then(|hit| hit.node))
-            .and_then(|node| hud.editor.scene.child_toward(hud.editor.focus, node).or(Some(node)));
-        if let Some(target) = target {
-            hud.editor.step_in(target);
+    match action {
+        Action::StepIn => {
+            let target = hud
+                .editor
+                .node_selection
+                .last()
+                .copied()
+                .or_else(|| hud.editor.hover.and_then(|hit| hit.node))
+                .and_then(|node| hud.editor.scene.child_toward(hud.editor.focus, node).or(Some(node)));
+            if let Some(target) = target {
+                hud.editor.step_in(target);
+            }
         }
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
-        if !hud.editor.selection.is_empty() {
-            hud.editor.selection = rustium_core::Selection::new();
-        } else if !hud.editor.node_selection.is_empty() && !hud.editor.focus_is_model() {
-            hud.editor.node_selection.clear();
-        } else {
-            hud.editor.step_out();
+        Action::StepOut => {
+            if !hud.editor.selection.is_empty() {
+                hud.editor.selection = rustium_core::Selection::new();
+            } else if !hud.editor.node_selection.is_empty() && !hud.editor.focus_is_model() {
+                hud.editor.node_selection.clear();
+            } else {
+                hud.editor.step_out();
+            }
         }
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Delete)) {
-        for node in hud.editor.node_selection.clone() {
-            hud.editor.execute(&rustium_core::Command::Delete { node });
+        Action::DeleteNodes => {
+            for node in hud.editor.node_selection.clone() {
+                hud.editor.execute(&rustium_core::Command::Delete { node });
+            }
         }
+        _ => {}
     }
 }
 

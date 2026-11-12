@@ -7,6 +7,7 @@ use super::widgets::{self, Look};
 use super::{AppCommand, Hud, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island};
 use crate::camera::Projection;
 use crate::icons::Icon;
+use crate::keymap::Action;
 use crate::theme;
 
 fn pass_key(pass: RenderPass) -> &'static str {
@@ -36,13 +37,13 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 let can_undo = hud.editor.history.can_undo();
                 let can_redo = hud.editor.history.can_redo();
                 if widgets::icon_button(ui, Icon::Undo, 32.0, Look::Plain, can_undo)
-                    .on_hover_text(hud.tr("undo"))
+                    .on_hover_text(format!("{}{}", hud.tr("undo"), hud.settings.keymap.hint(Action::Undo)))
                     .clicked()
                 {
                     hud.editor.undo();
                 }
                 if widgets::icon_button(ui, Icon::Redo, 32.0, Look::Plain, can_redo)
-                    .on_hover_text(hud.tr("redo"))
+                    .on_hover_text(format!("{}{}", hud.tr("redo"), hud.settings.keymap.hint(Action::Redo)))
                     .clicked()
                 {
                     hud.editor.redo();

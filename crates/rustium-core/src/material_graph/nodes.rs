@@ -66,7 +66,7 @@ impl NodeCategory {
             Self::Pattern => "Pattern",
             Self::Color => "Color",
             Self::Math => "Math",
-            Self::Shading => "Shading",
+            Self::Shading => "Surface",
             Self::Output => "Output",
         }
     }

@@ -80,8 +80,12 @@ pub enum EditKind {
     RenameGraphNode,
     /// A node's Bypass was switched.
     BypassGraphNode,
-    /// A frame of a Material graph was added, changed or removed.
+    /// A frame of a Material graph was changed (moved, resized, renamed) or removed.
     GraphFrame,
+    /// A frame was added to a Material graph.
+    AddGraphFrame,
+    /// Nodes of a Material graph were copied.
+    DuplicateGraphNodes,
     /// A batch of voxels was set or erased at explicit positions.
     SetVoxels,
     /// The base color of a Palette entry changed.

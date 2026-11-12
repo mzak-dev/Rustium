@@ -122,7 +122,8 @@ impl GraphEdit {
             Self::SetInput { .. } | Self::SetParam { .. } => EditKind::SetGraphParam,
             Self::RenameNode { .. } => EditKind::RenameGraphNode,
             Self::SetBypass { .. } => EditKind::BypassGraphNode,
-            Self::AddFrame { .. } | Self::SetFrame { .. } | Self::RemoveFrame { .. } => EditKind::GraphFrame,
+            Self::AddFrame { .. } => EditKind::AddGraphFrame,
+            Self::SetFrame { .. } | Self::RemoveFrame { .. } => EditKind::GraphFrame,
         }
     }
 }

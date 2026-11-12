@@ -186,3 +186,22 @@ fn finish(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     textureStore(destination, pixel, color);
 }
+
+// A view pass: `source` is layer 0 of the accumulated passes (albedo, coverage) and `geometry` layer 1 (normal colour,
+// depth grey). They are display-ready already, so there is nothing to denoise and no outline.
+@compute @workgroup_size(8, 8, 1)
+fn finish_pass(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= resolve.image.x || id.y >= resolve.image.y) {
+        return;
+    }
+    let source_pixel = snap(vec2<i32>(id.xy));
+    let first = textureLoad(source, source_pixel, 0);
+    let second = textureLoad(geometry, source_pixel, 0);
+    var color = first;
+    if (resolve.options.w == 2u) {
+        color = vec4<f32>(second.rgb, first.a);
+    } else if (resolve.options.w == 3u) {
+        color = vec4<f32>(vec3<f32>(second.a), first.a);
+    }
+    textureStore(destination, vec2<i32>(id.xy), color);
+}

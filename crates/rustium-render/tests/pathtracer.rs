@@ -118,6 +118,8 @@ struct Setup {
     denoise: bool,
     lens: Option<ThinLens>,
     pass: RenderPass,
+    /// A pass to switch to once the samples are done, without restarting.
+    switch_to: Option<RenderPass>,
     region: Option<[u32; 4]>,
 }
 
@@ -132,6 +134,7 @@ impl Default for Setup {
             denoise: false,
             lens: None,
             pass: RenderPass::Beauty,
+            switch_to: None,
             region: None,
         }
     }
@@ -214,6 +217,23 @@ fn render_with(
         gpu.queue.submit(std::iter::once(encoder.finish()));
     }
     assert_eq!(tracer.progress().samples, setup.samples);
+    if let Some(pass) = setup.switch_to {
+        let generation = tracer.progress().generation;
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        tracer.encode(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &target,
+            &TraceFrame { pass, ..frame },
+        );
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        let progress = tracer.progress();
+        assert_eq!(progress.samples, setup.samples, "switching the pass keeps the samples");
+        assert_eq!(progress.generation, generation, "switching the pass does not restart");
+    }
     tracer.read_image(&gpu.device, &gpu.queue).unwrap()
 }
 
@@ -794,6 +814,41 @@ fn aov_passes_show_albedo_normals_and_depth() {
     let near = luminance(&depth, top_of(&camera, -4.5));
     let sky = luminance(&depth, (2, 2));
     assert!(near > sky + 0.1, "cube depth {near} against sky {sky}");
+}
+
+#[test]
+fn switching_the_view_pass_keeps_the_accumulated_samples() {
+    let gpu = gpu_or_skip!();
+    let (scene, camera) = showpiece();
+    for pass in [RenderPass::Albedo, RenderPass::Normal, RenderPass::Depth] {
+        let direct = render(
+            &gpu,
+            &scene,
+            &camera,
+            &Setup {
+                samples: 4,
+                pass,
+                ..Setup::default()
+            },
+        );
+        let switched = render(
+            &gpu,
+            &scene,
+            &camera,
+            &Setup {
+                samples: 4,
+                switch_to: Some(pass),
+                ..Setup::default()
+            },
+        );
+        assert!(switched.display_ready);
+        assert_eq!(switched.samples, 4);
+        let (mean, _) = difference(&direct, &switched);
+        assert!(
+            mean < 1.0e-4,
+            "{pass:?} after switching differs from a direct render by {mean}"
+        );
+    }
 }
 
 #[test]

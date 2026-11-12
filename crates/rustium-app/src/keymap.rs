@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::editor::Tool;
+use crate::hud::GraphTool;
 use crate::render_mode::RenderTool;
 
 /// A key together with the modifiers that must be held.
@@ -134,11 +135,26 @@ pub(crate) enum Scope {
     Model,
     /// Render mode only.
     Render,
+    /// Effects mode (the Material node editor) only.
+    Effects,
+    /// The 3D view of Model and Render mode, but not the node editor.
+    Viewport,
 }
 
 impl Scope {
+    /// Whether a shortcut with this scope works in `mode` (`Model`, `Render` or `Effects`).
+    pub(crate) fn applies_in(self, mode: Self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Viewport => matches!(mode, Self::Model | Self::Render),
+            other => other == mode,
+        }
+    }
+
     fn overlaps(self, other: Self) -> bool {
-        self == Self::Always || other == Self::Always || self == other
+        [Self::Model, Self::Render, Self::Effects]
+            .into_iter()
+            .any(|mode| self.applies_in(mode) && other.applies_in(mode))
     }
 }
 
@@ -162,6 +178,24 @@ pub(crate) enum Action {
     RenderTool(RenderTool),
     /// Color slot `0..10`; the default keys run 1 – 9 then 0.
     Slot(u8),
+    /// Effects mode: pick the Select, Pan or Cut links Tool.
+    GraphTool(GraphTool),
+    /// Effects mode: open the node search at the pointer.
+    AddNode,
+    /// Effects mode: wrap the selected nodes in a frame.
+    FrameNodes,
+    /// Effects mode: zoom so the whole graph is visible.
+    FitGraph,
+    /// Effects mode: delete the selected nodes or frame.
+    DeleteGraphSelection,
+    /// Effects mode: copy the selected nodes.
+    DuplicateNodes,
+    /// Effects mode: select every node.
+    SelectAllNodes,
+    /// Effects mode: clear the selection.
+    ClearNodeSelection,
+    /// Effects mode: edit Material `0..10`; the default keys run 1 – 9 then 0.
+    MaterialSlot(u8),
 }
 
 const SLOT_KEYS: [Key; 10] = [
@@ -177,6 +211,19 @@ const SLOT_KEYS: [Key; 10] = [
     Key::Num0,
 ];
 
+const MATERIAL_IDS: [&str; 10] = [
+    "material-1",
+    "material-2",
+    "material-3",
+    "material-4",
+    "material-5",
+    "material-6",
+    "material-7",
+    "material-8",
+    "material-9",
+    "material-10",
+];
+
 const SLOT_IDS: [&str; 10] = [
     "slot-1", "slot-2", "slot-3", "slot-4", "slot-5", "slot-6", "slot-7", "slot-8", "slot-9", "slot-10",
 ];
@@ -188,10 +235,17 @@ pub(crate) enum Group {
     Tools,
     ColorSlots,
     Render,
+    Effects,
 }
 
 impl Group {
-    pub(crate) const ALL: [Self; 4] = [Self::General, Self::Tools, Self::ColorSlots, Self::Render];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::General,
+        Self::Tools,
+        Self::ColorSlots,
+        Self::Render,
+        Self::Effects,
+    ];
 
     pub(crate) fn message_key(self) -> &'static str {
         match self {
@@ -199,6 +253,7 @@ impl Group {
             Self::Tools => "binding-group-tools",
             Self::ColorSlots => "binding-color-slots",
             Self::Render => "binding-group-render",
+            Self::Effects => "binding-group-effects",
         }
     }
 }
@@ -224,6 +279,17 @@ impl Action {
             all.extend((0..10).map(Action::Slot));
             all.extend(RenderTool::ALL.map(Action::RenderTool));
             all.extend([Action::RenderStart, Action::ClearRenderRegion]);
+            all.extend(GraphTool::ALL.map(Action::GraphTool));
+            all.extend([
+                Action::AddNode,
+                Action::FrameNodes,
+                Action::FitGraph,
+                Action::DeleteGraphSelection,
+                Action::DuplicateNodes,
+                Action::SelectAllNodes,
+                Action::ClearNodeSelection,
+            ]);
+            all.extend((0..10).map(Action::MaterialSlot));
             all
         });
         &ALL
@@ -248,6 +314,15 @@ impl Action {
             Self::Tool(tool) => tool.message_key(),
             Self::RenderTool(tool) => tool.message_key(),
             Self::Slot(slot) => SLOT_IDS.get(usize::from(slot)).copied().unwrap_or("slot-1"),
+            Self::GraphTool(tool) => tool.action_id(),
+            Self::AddNode => "graph-add-node",
+            Self::FrameNodes => "graph-frame-nodes",
+            Self::FitGraph => "graph-fit",
+            Self::DeleteGraphSelection => "graph-delete",
+            Self::DuplicateNodes => "graph-duplicate",
+            Self::SelectAllNodes => "graph-select-all",
+            Self::ClearNodeSelection => "graph-deselect",
+            Self::MaterialSlot(slot) => MATERIAL_IDS.get(usize::from(slot)).copied().unwrap_or("material-1"),
         }
     }
 
@@ -263,8 +338,17 @@ impl Action {
             | Self::OpenFile
             | Self::SaveFile
             | Self::SaveFileAs
-            | Self::OpenSettings
-            | Self::FrameModel => Scope::Always,
+            | Self::OpenSettings => Scope::Always,
+            Self::FrameModel => Scope::Viewport,
+            Self::GraphTool(_)
+            | Self::AddNode
+            | Self::FrameNodes
+            | Self::FitGraph
+            | Self::DeleteGraphSelection
+            | Self::DuplicateNodes
+            | Self::SelectAllNodes
+            | Self::ClearNodeSelection
+            | Self::MaterialSlot(_) => Scope::Effects,
             Self::StepIn | Self::StepOut | Self::DeleteNodes | Self::Tool(_) | Self::Slot(_) => Scope::Model,
             Self::RenderStart | Self::ClearRenderRegion | Self::RenderTool(_) => Scope::Render,
         }
@@ -284,8 +368,16 @@ impl Action {
             | Self::StepOut
             | Self::DeleteNodes => Group::General,
             Self::Tool(_) => Group::Tools,
-            Self::Slot(_) => Group::ColorSlots,
+            Self::Slot(_) | Self::MaterialSlot(_) => Group::ColorSlots,
             Self::RenderStart | Self::ClearRenderRegion | Self::RenderTool(_) => Group::Render,
+            Self::GraphTool(_)
+            | Self::AddNode
+            | Self::FrameNodes
+            | Self::FitGraph
+            | Self::DeleteGraphSelection
+            | Self::DuplicateNodes
+            | Self::SelectAllNodes
+            | Self::ClearNodeSelection => Group::Effects,
         }
     }
 
@@ -308,13 +400,22 @@ impl Action {
             Self::Tool(tool) => tool.message_key(),
             Self::RenderTool(tool) => tool.message_key(),
             Self::Slot(_) => "binding-slot",
+            Self::GraphTool(tool) => tool.message_key(),
+            Self::AddNode => "gt-add",
+            Self::FrameNodes => "gt-frame",
+            Self::FitGraph => "gt-fit",
+            Self::DeleteGraphSelection => "action-graph-delete",
+            Self::DuplicateNodes => "action-graph-duplicate",
+            Self::SelectAllNodes => "action-graph-select-all",
+            Self::ClearNodeSelection => "action-graph-deselect",
+            Self::MaterialSlot(_) => "binding-material",
         }
     }
 
     /// The slot number shown to the user (1 – 10), for [`Action::Slot`].
     pub(crate) fn slot_number(self) -> Option<u8> {
         match self {
-            Self::Slot(slot) => Some(slot + 1),
+            Self::Slot(slot) | Self::MaterialSlot(slot) => Some(slot + 1),
             _ => None,
         }
     }
@@ -331,14 +432,19 @@ impl Action {
                 ..Chord::command(Key::S)
             },
             Self::OpenSettings => Chord::command(Key::Comma),
-            Self::FrameModel => Chord::plain(Key::Home),
+            Self::FrameModel | Self::FitGraph => Chord::plain(Key::Home),
             Self::StepIn => Chord::plain(Key::Enter),
-            Self::StepOut | Self::ClearRenderRegion => Chord::plain(Key::Escape),
-            Self::DeleteNodes => Chord::plain(Key::Delete),
+            Self::StepOut | Self::ClearRenderRegion | Self::ClearNodeSelection => Chord::plain(Key::Escape),
+            Self::DeleteNodes | Self::DeleteGraphSelection => Chord::plain(Key::Delete),
             Self::RenderStart => Chord::plain(Key::F5),
             Self::Tool(tool) => Chord::plain(tool.key()),
             Self::RenderTool(tool) => Chord::plain(tool.key()),
-            Self::Slot(slot) => Chord::plain(*SLOT_KEYS.get(usize::from(slot))?),
+            Self::Slot(slot) | Self::MaterialSlot(slot) => Chord::plain(*SLOT_KEYS.get(usize::from(slot))?),
+            Self::GraphTool(tool) => Chord::plain(tool.key()),
+            Self::AddNode => Chord::plain(Key::Tab),
+            Self::FrameNodes => Chord::plain(Key::N),
+            Self::DuplicateNodes => Chord::command(Key::D),
+            Self::SelectAllNodes => Chord::command(Key::A),
         })
     }
 }
@@ -456,7 +562,7 @@ impl Keymap {
         let mut bindings: Vec<(Chord, Action)> = Action::all()
             .iter()
             .copied()
-            .filter(|action| action.scope() == Scope::Always || action.scope() == mode)
+            .filter(|action| action.scope().applies_in(mode))
             .filter_map(|action| self.chord(action).map(|chord| (chord, action)))
             .collect();
         // Ctrl+Shift+Z has always redone; keep it unless the user gave it to something else.

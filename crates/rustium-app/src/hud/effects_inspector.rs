@@ -1,0 +1,679 @@
+//! The Effects-mode inspector: Node, Library and Material tabs. It is drawn inside the shared inspector island.
+
+use egui::{Align2, Color32, DragValue, Grid, Id, Order, RichText, Sense, Slider, Stroke, StrokeKind, Ui, vec2};
+use fluent_bundle::FluentValue;
+use rustium_core::{
+    ColorId, Command, GraphEdit, GraphNode, GraphNodeId, GraphNodeKind, InputValue, NodeCategory, ParamKind,
+    ParamValue, RAMP_STOPS, RampStop,
+};
+
+use super::effects::{
+    self, EffectsTab, category_label, core_text, current, graph_edit, kind_description, kind_label, locked, rgb,
+};
+use super::effects_bars::delete_material;
+use super::effects_canvas::paint_ramp;
+use super::widgets::{self, Look};
+use super::{Hud, effects_canvas};
+use crate::icons::Icon;
+use crate::theme;
+
+const TABS: [(EffectsTab, &str); 3] = [
+    (EffectsTab::Node, "tab-node"),
+    (EffectsTab::Library, "tab-library"),
+    (EffectsTab::Material, "tab-material"),
+];
+
+/// The tab row with the collapse button.
+pub(crate) fn tabs(ui: &mut Ui, hud: &mut Hud<'_>) {
+    egui::Frame::new().inner_margin(4).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, key) in TABS {
+                let look = if hud.ui.effects.tab == tab {
+                    Look::On
+                } else {
+                    Look::Plain
+                };
+                if widgets::text_button(ui, &hud.tr(key), 32.0, look, true).clicked() {
+                    hud.ui.effects.tab = tab;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::icon_button(ui, Icon::ChevronRight, 32.0, Look::Plain, true)
+                    .on_hover_text(hud.tr("inspector-collapse"))
+                    .clicked()
+                {
+                    hud.ui.inspector_open = false;
+                }
+            });
+        });
+    });
+    let rect = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, theme::BORDER));
+}
+
+/// The body of the selected tab.
+pub(crate) fn content(ui: &mut Ui, hud: &mut Hud<'_>) {
+    match hud.ui.effects.tab {
+        EffectsTab::Node => node_tab(ui, hud),
+        EffectsTab::Library => library_tab(ui, hud),
+        EffectsTab::Material => material_tab(ui, hud),
+    }
+}
+
+fn note(ui: &mut Ui, text: String) {
+    ui.label(RichText::new(text).color(theme::SUBTLE).size(11.0));
+}
+
+fn padded<R>(ui: &mut Ui, top: i8, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 12,
+            right: 12,
+            top,
+            bottom: 8,
+        })
+        .show(ui, add)
+        .inner
+}
+
+// ---- Node tab ----------------------------------------------------------------------------------------------
+
+fn node_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
+    let selection = hud.ui.effects.selection.clone();
+    match selection.as_slice() {
+        [] => {
+            padded(ui, 14, |ui| {
+                note(ui, hud.tr("effects-no-selection"));
+            });
+        }
+        [single] => {
+            let Some(node) = current(hud).and_then(|graph| graph.node(*single)).cloned() else {
+                return;
+            };
+            single_node(ui, hud, &node);
+        }
+        many => {
+            padded(ui, 14, |ui| {
+                let count = hud.i18n.tr_args(
+                    "effects-selected-count",
+                    &[("count", FluentValue::from(i64::try_from(many.len()).unwrap_or(0)))],
+                );
+                ui.label(RichText::new(count).font(theme::bold(13.0)).color(theme::TEXT));
+            });
+            node_actions(ui, hud, None);
+        }
+    }
+}
+
+fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
+    let spec = node.kind.spec();
+    let editable = !locked(hud);
+    padded(ui, 14, |ui| {
+        ui.horizontal(|ui| {
+            let color = if node.kind == GraphNodeKind::SurfaceOutput {
+                hud.accent()
+            } else {
+                rgb(spec.category.dot_color())
+            };
+            let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+            ui.painter().rect_filled(dot, 2, color);
+            ui.label(
+                RichText::new(node.display_name())
+                    .font(theme::bold(15.0))
+                    .color(theme::TEXT),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(category_label(hud, spec.category))
+                        .color(theme::SUBTLE)
+                        .size(11.0),
+                );
+            });
+        });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(kind_description(hud, node.kind))
+                .color(theme::MUTED)
+                .size(11.0),
+        );
+    });
+    ui.add_enabled_ui(editable, |ui| {
+        padded(ui, 0, |ui| {
+            let mut edits: Vec<GraphEdit> = Vec::new();
+            Grid::new(("node-grid", node.id.get()))
+                .num_columns(2)
+                .min_col_width(82.0)
+                .spacing(vec2(8.0, 7.0))
+                .show(ui, |ui| {
+                    ui.label(widgets::muted(hud.tr("effects-node-name")));
+                    let mut name = node.name.clone();
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut name)
+                            .hint_text(kind_label(hud, node.kind))
+                            .desired_width(f32::INFINITY),
+                    );
+                    if field.lost_focus() && name != node.name {
+                        edits.push(GraphEdit::RenameNode { node: node.id, name });
+                    }
+                    ui.end_row();
+                    for (index, input) in spec.inputs.iter().enumerate() {
+                        let linked = current(hud)
+                            .and_then(|graph| {
+                                graph.link_to(rustium_core::InputRef {
+                                    node: node.id,
+                                    socket: u8::try_from(index).unwrap_or(0),
+                                })
+                            })
+                            .is_some();
+                        let Some(value) = node.inputs.get(index) else {
+                            continue;
+                        };
+                        if let Some(edit) = input_row(ui, hud, node.id, index, input.name, input.range, value, linked) {
+                            edits.push(edit);
+                        }
+                    }
+                    for (index, param) in spec.params.iter().enumerate() {
+                        let Some(value) = node.params.get(index) else {
+                            continue;
+                        };
+                        if let Some(edit) = param_row(ui, hud, node.id, index, param.name, &param.kind, value) {
+                            edits.push(edit);
+                        }
+                    }
+                });
+            for edit in edits {
+                let merge = !matches!(edit, GraphEdit::RenameNode { .. });
+                graph_edit(hud, edit, merge);
+            }
+        });
+    });
+    node_actions(ui, hud, Some(node));
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one row of the node grid needs the whole socket description"
+)]
+fn input_row(
+    ui: &mut Ui,
+    hud: &Hud<'_>,
+    node: GraphNodeId,
+    index: usize,
+    name: &str,
+    range: (f32, f32),
+    value: &InputValue,
+    linked: bool,
+) -> Option<GraphEdit> {
+    let input = u8::try_from(index).unwrap_or(0);
+    let label = core_text(hud, name);
+    match value {
+        InputValue::Float(current) if !linked => {
+            ui.label(widgets::muted(label));
+            let mut number = *current;
+            ui.spacing_mut().slider_width = 110.0;
+            let changed = ui
+                .add(Slider::new(&mut number, range.0..=range.1).max_decimals(2))
+                .changed();
+            ui.end_row();
+            changed.then_some(GraphEdit::SetInput {
+                node,
+                input,
+                value: InputValue::Float(number),
+            })
+        }
+        InputValue::Color(current) if !linked => {
+            ui.label(widgets::muted(label));
+            let mut rgb8 = effects::unit_to_bytes(*current);
+            let changed = egui::color_picker::color_edit_button_srgb(ui, &mut rgb8).changed();
+            ui.end_row();
+            changed.then_some(GraphEdit::SetInput {
+                node,
+                input,
+                value: InputValue::Color(effects::bytes_to_unit(rgb8)),
+            })
+        }
+        _ => {
+            ui.label(widgets::muted(label));
+            let text = if linked {
+                hud.tr("effects-linked")
+            } else {
+                hud.tr("effects-auto")
+            };
+            ui.label(RichText::new(text).color(theme::SUBTLE).size(11.0));
+            ui.end_row();
+            None
+        }
+    }
+}
+
+fn param_row(
+    ui: &mut Ui,
+    hud: &Hud<'_>,
+    node: GraphNodeId,
+    index: usize,
+    name: &str,
+    kind: &ParamKind,
+    value: &ParamValue,
+) -> Option<GraphEdit> {
+    let param = u8::try_from(index).unwrap_or(0);
+    ui.label(widgets::muted(core_text(hud, name)));
+    let new = match (kind, value) {
+        (ParamKind::Float { min, max, .. }, ParamValue::Float(current)) => {
+            let mut number = *current;
+            ui.spacing_mut().slider_width = 110.0;
+            ui.add(Slider::new(&mut number, *min..=*max).max_decimals(2))
+                .changed()
+                .then_some(ParamValue::Float(number))
+        }
+        (ParamKind::Int { min, max, .. }, ParamValue::Int(current)) => {
+            let mut number = *current;
+            ui.add(DragValue::new(&mut number).range(*min..=*max).speed(0.2))
+                .changed()
+                .then_some(ParamValue::Int(number))
+        }
+        (ParamKind::Bool { .. }, ParamValue::Bool(current)) => {
+            let mut on = *current;
+            widgets::switch(ui, &mut on, true)
+                .changed()
+                .then_some(ParamValue::Bool(on))
+        }
+        (ParamKind::Choice { options, .. }, ParamValue::Choice(current)) => {
+            let mut chosen = *current;
+            let labels: Vec<(u32, String)> = options
+                .iter()
+                .enumerate()
+                .map(|(i, option)| (u32::try_from(i).unwrap_or(0), core_text(hud, option)))
+                .collect();
+            if labels.len() <= 4 {
+                widgets::segmented(ui, &mut chosen, &labels, true).then_some(ParamValue::Choice(chosen))
+            } else {
+                let selected = labels
+                    .get(usize::try_from(*current).unwrap_or(0))
+                    .map_or_else(String::new, |(_, label)| label.clone());
+                let mut changed = false;
+                egui::ComboBox::from_id_salt(("choice", node.get(), index))
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        for (id, label) in &labels {
+                            changed |= ui.selectable_value(&mut chosen, *id, label).changed();
+                        }
+                    });
+                changed.then_some(ParamValue::Choice(chosen))
+            }
+        }
+        (ParamKind::Range { min, max, .. }, ParamValue::Range([low, high])) => {
+            let (mut a, mut b) = (*low, *high);
+            let changed = ui
+                .horizontal(|ui| {
+                    let first = ui.add(DragValue::new(&mut a).range(*min..=*max).speed(0.01).max_decimals(2));
+                    let second = ui.add(DragValue::new(&mut b).range(*min..=*max).speed(0.01).max_decimals(2));
+                    first.changed() || second.changed()
+                })
+                .inner;
+            changed.then_some(ParamValue::Range([a, b]))
+        }
+        (ParamKind::Color { .. }, ParamValue::Color(current)) => {
+            let mut rgb8 = effects::unit_to_bytes(*current);
+            egui::color_picker::color_edit_button_srgb(ui, &mut rgb8)
+                .changed()
+                .then(|| ParamValue::Color(effects::bytes_to_unit(rgb8)))
+        }
+        (ParamKind::Stops, ParamValue::Stops(stops)) => {
+            let edited = ramp_editor(ui, hud, stops);
+            ui.end_row();
+            return edited.map(|stops| GraphEdit::SetParam {
+                node,
+                param,
+                value: ParamValue::Stops(stops),
+            });
+        }
+        _ => None,
+    };
+    ui.end_row();
+    new.map(|value| GraphEdit::SetParam { node, param, value })
+}
+
+/// Edits the stops of a Color ramp: a strip, then a row per stop (position, color, remove) and an add button.
+fn ramp_editor(ui: &mut Ui, hud: &Hud<'_>, stops: &[RampStop]) -> Option<Vec<RampStop>> {
+    let mut edited = stops.to_vec();
+    let mut changed = false;
+    ui.vertical(|ui| {
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width().max(120.0), 16.0), Sense::hover());
+        paint_ramp(ui.painter(), bar, stops, 1.0);
+        let mut remove = None;
+        let count = edited.len();
+        for (index, stop) in edited.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut stop.position)
+                            .range(0.0..=1.0)
+                            .speed(0.005)
+                            .max_decimals(2),
+                    )
+                    .changed();
+                let mut rgb8 = effects::unit_to_bytes(stop.color);
+                if egui::color_picker::color_edit_button_srgb(ui, &mut rgb8).changed() {
+                    stop.color = effects::bytes_to_unit(rgb8);
+                    changed = true;
+                }
+                let can_remove = count > *RAMP_STOPS.start();
+                if widgets::icon_button(ui, Icon::Close, 24.0, Look::Plain, can_remove)
+                    .on_hover_text(hud.tr("effects-stop-remove"))
+                    .clicked()
+                {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = remove {
+            edited.remove(index);
+            changed = true;
+        }
+        let can_add = edited.len() < *RAMP_STOPS.end();
+        if widgets::text_button(ui, &hud.tr("effects-stop-add"), 24.0, Look::On, can_add).clicked() {
+            let color = effects_canvas::ramp_color(&edited, 0.5);
+            edited.push(RampStop {
+                position: 0.5,
+                color: [color.r(), color.g(), color.b()].map(|c| f32::from(c) / 255.0),
+            });
+            edited.sort_by(|a, b| a.position.total_cmp(&b.position));
+            changed = true;
+        }
+    });
+    changed.then_some(edited)
+}
+
+/// Bypass, Duplicate and Delete.
+fn node_actions(ui: &mut Ui, hud: &mut Hud<'_>, node: Option<&GraphNode>) {
+    let editable = !locked(hud);
+    let output = node.is_some_and(|node| node.kind.is_output());
+    let surface = node.is_some_and(|node| node.kind == GraphNodeKind::SurfaceOutput);
+    padded(ui, 4, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = (ui.available_width() - 8.0) / 3.0;
+            if let Some(node) = node {
+                let look = if node.bypass { Look::Accent } else { Look::On };
+                let can = editable && !output;
+                if sized_button(ui, &hud.tr("effects-bypass"), width, look, can).clicked() {
+                    graph_edit(
+                        hud,
+                        GraphEdit::SetBypass {
+                            node: node.id,
+                            bypass: !node.bypass,
+                        },
+                        false,
+                    );
+                }
+            }
+            if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, editable && !surface).clicked() {
+                effects::duplicate_selection(hud);
+            }
+            let response = sized_button(ui, &hud.tr("effects-delete"), width, Look::On, editable && !surface);
+            if response.clicked() {
+                effects::delete_selection(hud);
+            }
+        });
+        if surface {
+            note(ui, hud.tr("effects-surface-protected"));
+        }
+        if !editable {
+            note(ui, hud.tr("material-default-locked"));
+        }
+    });
+}
+
+fn sized_button(ui: &mut Ui, text: &str, width: f32, look: Look, enabled: bool) -> egui::Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), sense);
+    let (fill, foreground) = match (enabled, look) {
+        (false, _) => (Color32::TRANSPARENT, theme::DISABLED),
+        (true, Look::Accent) => (ui.visuals().selection.bg_fill, theme::ON_ACCENT),
+        (true, _) if response.hovered() => (theme::ACTIVE, Color32::WHITE),
+        (true, _) => (theme::HOVER, Color32::WHITE),
+    };
+    ui.painter().rect_filled(rect, 7, fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(12.0),
+        foreground,
+    );
+    response
+}
+
+// ---- Library tab -------------------------------------------------------------------------------------------
+
+fn library_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
+    padded(ui, 10, |ui| {
+        let hint = hud.tr("search-nodes");
+        ui.add(
+            egui::TextEdit::singleline(&mut hud.ui.effects.library_query)
+                .hint_text(hint)
+                .desired_width(f32::INFINITY),
+        );
+    });
+    let query = hud.ui.effects.library_query.clone();
+    let kinds = effects::matching_kinds(hud, &query);
+    let inspector = ui.clip_rect();
+    for category in NodeCategory::ALL {
+        let in_category: Vec<GraphNodeKind> = kinds
+            .iter()
+            .copied()
+            .filter(|kind| kind.spec().category == category)
+            .collect();
+        if in_category.is_empty() {
+            continue;
+        }
+        ui.add_space(6.0);
+        padded(ui, 0, |ui| {
+            ui.label(
+                RichText::new(category_label(hud, category).to_uppercase())
+                    .color(theme::SUBTLE)
+                    .size(10.0),
+            );
+        });
+        for kind in in_category {
+            let response = effects::library_row(ui, hud, kind);
+            if response.drag_started() {
+                hud.ui.effects.library_drag = Some(kind);
+            }
+            if response.clicked() && !locked(hud) {
+                let screen = ui.ctx().content_rect();
+                let free = effects::free_area(screen, hud.ui.inspector_open);
+                let count = current(hud).map_or(0.0, |graph| graph.nodes().len() as f32);
+                let at = effects::to_graph(hud, free.center()) + vec2(count % 5.0 * 20.0, count % 5.0 * 20.0);
+                effects::add_node(hud, kind, at);
+            }
+        }
+    }
+    drag_ghost(ui, hud, inspector);
+}
+
+/// Shows the node kind being dragged out of the Library and drops it on the canvas when released.
+fn drag_ghost(ui: &mut Ui, hud: &mut Hud<'_>, inspector: egui::Rect) {
+    let Some(kind) = hud.ui.effects.library_drag else {
+        return;
+    };
+    let ctx = ui.ctx().clone();
+    let pointer = ctx.input(|input| input.pointer.interact_pos());
+    if ctx.input(|input| input.pointer.any_down()) {
+        if let Some(pointer) = pointer {
+            egui::Area::new(Id::unique("library-ghost"))
+                .order(Order::Tooltip)
+                .fixed_pos(pointer + vec2(12.0, 8.0))
+                .interactable(false)
+                .show(&ctx, |ui| {
+                    theme::island().inner_margin(6).show(ui, |ui| {
+                        ui.label(RichText::new(kind_label(hud, kind)).color(theme::TEXT));
+                    });
+                });
+        }
+    } else {
+        hud.ui.effects.library_drag = None;
+        if let Some(pointer) = pointer
+            && !inspector.contains(pointer)
+            && !locked(hud)
+        {
+            let at = effects::to_graph(hud, pointer);
+            effects::add_node(hud, kind, at);
+        }
+    }
+}
+
+// ---- Material tab ------------------------------------------------------------------------------------------
+
+fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
+    let Some(graph) = current(hud) else {
+        return;
+    };
+    let index = u32::try_from(hud.ui.effects.graph).unwrap_or(0);
+    let name = graph.name.clone();
+    let casts = graph.casts_shadow;
+    let editable = !locked(hud);
+    let users = hud.editor.scene.colors_using(index);
+
+    padded(ui, 12, |ui| {
+        Grid::new("material-grid")
+            .num_columns(2)
+            .min_col_width(82.0)
+            .spacing(vec2(8.0, 7.0))
+            .show(ui, |ui| {
+                ui.label(widgets::muted(hud.tr("material-name")));
+                let mut text = name.clone();
+                let field = ui.add_enabled(
+                    editable,
+                    egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY),
+                );
+                if field.lost_focus() && text != name && !text.trim().is_empty() {
+                    effects::command(hud, &Command::RenameMaterial { index, name: text });
+                }
+                ui.end_row();
+
+                ui.label(widgets::muted(hud.tr("material-shading")));
+                static_field(ui, &hud.tr("material-pbr"));
+                ui.end_row();
+
+                ui.label(widgets::muted(hud.tr("effects-used-by")));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for id in users.iter().take(8) {
+                        if let Some(color) = hud.editor.scene.palette().get(*id) {
+                            let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                            ui.painter().rect(
+                                rect,
+                                6,
+                                rgb(color.color),
+                                Stroke::new(1.0, Color32::from_black_alpha(128)),
+                                StrokeKind::Inside,
+                            );
+                            response.on_hover_text(format!(
+                                "#{:02X}{:02X}{:02X}",
+                                color.color[0], color.color[1], color.color[2]
+                            ));
+                        }
+                    }
+                    let assign = widgets::icon_button(ui, Icon::Plus, 24.0, Look::Plain, true)
+                        .on_hover_text(hud.tr("material-assign-more"));
+                    if assign.clicked() {
+                        hud.ui.effects.assign_open = !hud.ui.effects.assign_open;
+                    }
+                });
+                ui.end_row();
+
+                ui.label(widgets::muted(hud.tr("material-casts-shadow")));
+                let mut on = casts;
+                if widgets::switch(ui, &mut on, editable).changed() {
+                    effects::command(
+                        hud,
+                        &Command::SetCastsShadow {
+                            index,
+                            casts_shadow: on,
+                        },
+                    );
+                }
+                ui.end_row();
+            });
+    });
+    if hud.ui.effects.assign_open {
+        assign_grid(ui, hud, index);
+    }
+    padded(ui, 0, |ui| {
+        note(ui, hud.tr("material-hint"));
+    });
+    padded(ui, 4, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let width = (ui.available_width() - 8.0) / 3.0;
+            if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, true).clicked()
+                && effects::command(hud, &Command::DuplicateMaterial { index })
+            {
+                let last = hud.editor.scene.material_graphs().len().saturating_sub(1);
+                hud.ui.effects.select_graph(last);
+            }
+            if sized_button(ui, &hud.tr("material-delete"), width, Look::On, editable).clicked() {
+                delete_material(hud, hud.ui.effects.graph);
+            }
+            sized_button(ui, &hud.tr("effects-bake"), width, Look::Plain, false);
+        });
+        if editable {
+            note(ui, hud.tr("effects-bake-planned"));
+        } else {
+            note(ui, hud.tr("material-default-locked"));
+        }
+    });
+}
+
+fn static_field(ui: &mut Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(text);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (rect, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
+                    Icon::ChevronDown.paint(ui.painter(), rect, theme::MUTED);
+                });
+            });
+        });
+}
+
+/// "Assign to more palette colors": the Palette; a click moves a Color to this Material or back to the Default.
+fn assign_grid(ui: &mut Ui, hud: &mut Hud<'_>, graph: u32) {
+    padded(ui, 0, |ui| {
+        note(ui, hud.tr("material-assign-hint"));
+        ui.add_space(4.0);
+        let ids: Vec<ColorId> = hud.editor.scene.palette().iter().map(|(id, _)| id).collect();
+        ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
+        ui.horizontal_wrapped(|ui| {
+            for id in ids {
+                let Some(color) = hud.editor.scene.palette().get(id).copied() else {
+                    continue;
+                };
+                let (rect, response) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
+                ui.painter().rect_filled(rect, 2, rgb(color.color));
+                if color.graph == graph {
+                    ui.painter()
+                        .rect_stroke(rect, 2, Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+                }
+                if response.clicked() {
+                    let target = if color.graph == graph { 0 } else { graph };
+                    effects::command(
+                        hud,
+                        &Command::AssignGraphToColors {
+                            ids: vec![id],
+                            graph: target,
+                        },
+                    );
+                }
+            }
+        });
+    });
+}

@@ -48,6 +48,9 @@ pub(crate) enum Icon {
     Pause,
     Plus,
     Guides,
+    Pointer,
+    AddNode,
+    Fit,
 }
 
 impl Icon {
@@ -97,6 +100,9 @@ impl Icon {
             Self::Pause => "M8 5v14 M16 5v14",
             Self::Plus => "M12 5v14 M5 12h14",
             Self::Guides => "M4 4h16v16H4z M4 9.5h16 M4 14.5h16 M9.5 4v16 M14.5 4v16",
+            Self::Pointer => "M5 3l14 8-6 2-2 6z",
+            Self::AddNode => "M4 4h16v16H4z M12 8v8 M8 12h8",
+            Self::Fit => "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
             Self::Unlock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 7.5-2",
         }
     }

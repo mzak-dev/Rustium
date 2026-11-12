@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use glam::{IVec3, Vec3};
 use rustium_core::{
-    Brush, BrushKind, ChunkCoord, ColorId, Command, Edit, Face, FillMode, History, HitTarget, Mirror, NodeId,
-    Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, SurfaceConstants, Volume, VoxelTool, apply,
-    brush_bounds, pick_scene, select_box, select_by_color,
+    Brush, BrushKind, ChunkCoord, ColorId, Command, Edit, Face, FillMode, GraphEdit, History, HitTarget, Mirror,
+    NodeId, Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, Volume, VoxelTool, apply, brush_bounds,
+    pick_scene, select_box, select_by_color,
 };
 use tracing::warn;
 
@@ -949,42 +949,34 @@ impl Editor {
         }
     }
 
-    /// Changes the Surface constants of material graph `index`; consecutive calls (a slider drag) merge into one
-    /// History step until [`Editor::finish_material_edit`].
-    pub(crate) fn edit_graph(&mut self, index: u32, surface: SurfaceConstants) {
-        self.apply_material_command(&Command::EditGraph { index, surface });
-    }
-
-    /// Creates a matte material graph and returns its index.
-    pub(crate) fn create_graph(&mut self) -> u32 {
-        self.finish_material_edit();
-        let index = u32::try_from(self.scene.material_graphs().len()).unwrap_or(u32::MAX);
-        let command = Command::CreateGraph {
-            name: format!("Material {index}"),
-            surface: SurfaceConstants::MATTE,
-        };
-        self.apply_material_command(&command);
-        self.finish_material_edit();
-        index
-    }
-
-    /// Points the active Color slot's Palette entry at material graph `graph`.
-    pub(crate) fn assign_graph(&mut self, graph: u32) {
-        self.finish_material_edit();
-        self.apply_material_command(&Command::AssignGraph {
-            id: self.color(),
-            graph,
-        });
-        self.finish_material_edit();
-    }
-
-    fn apply_material_command(&mut self, command: &Command) {
-        if let Some(edit) = self.apply_command(command) {
-            self.material_edit = Some(match self.material_edit.take() {
-                Some(pending) => pending.merge(edit),
-                None => edit,
-            });
+    /// Applies an edit inside Material `index`. With `merge` it joins the History step of the gesture in progress
+    /// (a drag or slider), which [`Editor::finish_material_edit`] closes; without it the edit is a step of its own.
+    /// Returns whether anything changed.
+    ///
+    /// # Errors
+    ///
+    /// The graph rejects the edit (a cycle, a locked Default material, a limit).
+    pub(crate) fn edit_material(
+        &mut self,
+        index: u32,
+        edit: GraphEdit,
+        merge: bool,
+    ) -> Result<bool, rustium_core::Error> {
+        if !merge {
+            self.finish_material_edit();
         }
+        let applied = self.apply_checked(&Command::EditMaterial { index, edit })?;
+        let Some(applied) = applied else {
+            return Ok(false);
+        };
+        self.material_edit = Some(match self.material_edit.take() {
+            Some(pending) => pending.merge(applied),
+            None => applied,
+        });
+        if !merge {
+            self.finish_material_edit();
+        }
+        Ok(true)
     }
 
     /// Whether Colors or material graphs changed since the last call, so the GPU copy needs uploading.
@@ -1238,46 +1230,41 @@ mod tests {
     }
 
     #[test]
-    fn a_slider_drag_is_one_history_step_and_flags_the_colors() {
+    fn a_graph_drag_is_one_history_step_and_flags_the_colors() {
         let mut editor = Editor::new(0.25, 50);
         assert!(editor.take_palette_dirty(), "a new editor uploads its colors once");
         assert!(!editor.take_palette_dirty());
-        let index = editor.create_graph();
-        assert_eq!(index, 1);
+        editor
+            .execute_checked(&Command::AddMaterial {
+                graph: Box::new(rustium_core::MaterialGraph::blank("Test")),
+            })
+            .unwrap();
         assert_eq!(editor.history.done().count(), 1);
-        for step in 1..=4_u8 {
-            let surface = SurfaceConstants {
-                roughness: f32::from(step) / 8.0,
-                ..SurfaceConstants::MATTE
+        let surface = editor.scene.material_graphs()[1].surface_output().unwrap().id;
+        for _ in 0..4 {
+            let edit = GraphEdit::MoveNodes {
+                nodes: vec![surface],
+                frames: Vec::new(),
+                delta: [10.0, 0.0],
             };
-            editor.edit_graph(index, surface);
+            editor.edit_material(1, edit, true).unwrap();
         }
-        assert!(editor.take_palette_dirty());
         editor.finish_material_edit();
         assert_eq!(editor.history.done().count(), 2);
         editor.undo();
-        assert_eq!(
-            editor.scene.material_graphs()[1].surface_constants(),
-            SurfaceConstants::MATTE
-        );
-        assert!(editor.take_palette_dirty(), "undo changes the colors too");
+        assert_eq!(editor.history.done().count(), 1);
+        assert!(editor.take_palette_dirty());
     }
 
     #[test]
-    fn assigning_a_graph_changes_the_active_color_only() {
+    fn the_default_material_rejects_graph_edits() {
         let mut editor = Editor::new(0.25, 50);
-        let index = editor.create_graph();
-        let active = editor.color();
-        editor.assign_graph(index);
-        assert_eq!(editor.scene.palette().get(active).unwrap().graph, index);
-        let users = editor
-            .scene
-            .palette()
-            .iter()
-            .filter(|(_, color)| color.graph == index)
-            .count();
-        assert_eq!(users, 1);
-        assert_eq!(editor.history.done().count(), 2);
+        let edit = GraphEdit::AddFrame {
+            label: String::new(),
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+        };
+        assert!(editor.edit_material(0, edit, false).is_err());
     }
 
     #[test]

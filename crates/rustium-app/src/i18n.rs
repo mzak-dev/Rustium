@@ -40,6 +40,20 @@ impl I18n {
         self.format(key, None)
     }
 
+    /// Like [`I18n::tr`], but returns `fallback` without a warning when no language defines `key`. For texts that
+    /// come from `rustium-core` (node and socket names) and only some of which are translated.
+    pub(crate) fn tr_or(&self, key: &str, fallback: &str) -> String {
+        let primary = match self.language {
+            Language::English => &self.english,
+            Language::Polish => &self.polish,
+        };
+        if primary.has_message(key) || self.english.has_message(key) {
+            self.format(key, None)
+        } else {
+            fallback.to_owned()
+        }
+    }
+
     /// Like [`I18n::tr`] with Fluent arguments such as `{ $slot }`.
     pub(crate) fn tr_args(&self, key: &str, args: &[(&str, FluentValue<'_>)]) -> String {
         let mut fluent_args = FluentArgs::new();

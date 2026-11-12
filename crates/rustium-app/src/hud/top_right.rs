@@ -65,6 +65,14 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                             ui.selectable_value(&mut hud.ui.render.pass, pass, hud.i18n.tr(pass_key(pass)));
                         }
                     });
+                } else if hud.ui.mode == Mode::Effects {
+                    let look = if hud.ui.effects.snap { Look::On } else { Look::Plain };
+                    if widgets::icon_button(ui, Icon::Grid, 32.0, look, true)
+                        .on_hover_text(hud.tr("snap-nodes"))
+                        .clicked()
+                    {
+                        hud.ui.effects.snap = !hud.ui.effects.snap;
+                    }
                 } else {
                     let grid_look = if hud.settings.show_grid { Look::On } else { Look::Plain };
                     if widgets::icon_button(ui, Icon::Grid, 32.0, grid_look, true)

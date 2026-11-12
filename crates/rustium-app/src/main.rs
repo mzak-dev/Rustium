@@ -8,6 +8,7 @@ mod app;
 mod automation;
 mod camera;
 mod editor;
+mod effects_preview;
 mod files;
 mod hud;
 mod i18n;

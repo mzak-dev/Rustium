@@ -41,6 +41,13 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 ui.set_width(INSPECTOR_WIDTH);
                 ui.set_height(height);
                 ui.vertical(|ui| {
+                    if hud.ui.mode == Mode::Effects {
+                        super::effects_inspector::tabs(ui, hud);
+                        ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| super::effects_inspector::content(ui, hud));
+                        return;
+                    }
                     if hud.ui.mode == Mode::Render {
                         render_tabs(ui, hud);
                         ScrollArea::vertical()

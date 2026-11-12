@@ -11,13 +11,25 @@ use crate::settings::Motion;
 use crate::theme;
 
 const CARD: egui::Vec2 = vec2(760.0, 460.0);
-const STEPS: [&str; 4] = [
+/// The startup steps, in order; the last one is shown once the editor is ready.
+pub(crate) const STEPS: [&str; 5] = [
     "splash-step-gpu",
-    "splash-step-palettes",
+    "splash-step-materials",
+    "splash-step-devices",
     "splash-step-workspace",
     "splash-step-ready",
 ];
-const LOAD_SECONDS: f32 = 2.8;
+
+/// How far the startup is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Loading {
+    /// The step in progress, an index into [`STEPS`].
+    pub(crate) step: usize,
+    /// Share of the work done, 0 to 1.
+    pub(crate) done: f32,
+    /// Whether the start screen stays open once the editor is ready.
+    pub(crate) keep_open: bool,
+}
 /// Space kept between the card and the window edge.
 const CARD_GAP: f32 = 12.0;
 /// Width of the art on the left; without room for it the card shows only the actions.
@@ -53,12 +65,15 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     let opened = *hud.ui.splash_opened_at.get_or_insert(now);
     let elapsed = crate::hud::seconds_between(opened, now);
     let animate = hud.settings.motion == Motion::Full;
+    let loading = hud.ui.loading;
+    // The bar follows the real progress, eased so a step that finishes at once does not jump.
+    let target = loading.map_or(1.0, |loading| loading.done);
     let load = if animate {
-        (elapsed / LOAD_SECONDS).clamp(0.0, 1.0)
+        ctx.animate_value_with_time(Id::unique("splash-load"), target, 0.25)
     } else {
-        1.0
+        target
     };
-    if animate {
+    if animate || loading.is_some() {
         ctx.request_repaint();
     }
 
@@ -74,7 +89,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
         .show(ctx, |ui| {
             let (_, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(screen, 0, theme::SCRIM);
-            if backdrop.clicked() || ui.input(|input| input.key_pressed(Key::Escape)) {
+            if loading.is_none() && (backdrop.clicked() || ui.input(|input| input.key_pressed(Key::Escape))) {
                 hud.ui.splash_open = false;
             }
             ui.painter().rect(
@@ -236,16 +251,21 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
     let left = if has_art(card) { ART_WIDTH + 12.0 } else { 36.0 };
     let top = if card.height() >= 420.0 { 40.0 } else { 26.0 };
     let content = Rect::from_min_max(card.min + vec2(left, top), card.max - vec2(36.0, 18.0));
-    let close = Rect::from_min_size(pos2(card.right() - 40.0, card.top() + 12.0), vec2(28.0, 28.0));
-    let close_response = ui.interact(close, Id::unique("splash-close"), Sense::click());
-    let close_color = if close_response.hovered() {
-        Color32::WHITE
-    } else {
-        theme::MUTED
-    };
-    Icon::Close.paint(ui.painter(), close.shrink(6.0), close_color);
-    if close_response.on_hover_text(hud.tr("splash-close")).clicked() {
-        hud.ui.splash_open = false;
+    // While the editor starts nothing here works yet: no close button, every control disabled.
+    let loading = hud.ui.loading;
+    let ready = loading.is_none();
+    if ready {
+        let close = Rect::from_min_size(pos2(card.right() - 40.0, card.top() + 12.0), vec2(28.0, 28.0));
+        let close_response = ui.interact(close, Id::unique("splash-close"), Sense::click());
+        let close_color = if close_response.hovered() {
+            Color32::WHITE
+        } else {
+            theme::MUTED
+        };
+        Icon::Close.paint(ui.painter(), close.shrink(6.0), close_color);
+        if close_response.on_hover_text(hud.tr("splash-close")).clicked() {
+            hud.ui.splash_open = false;
+        }
     }
 
     ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
@@ -280,14 +300,15 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 &hud.settings.keymap.label(Action::NewScene),
                 width,
                 Look::Accent,
-                true,
+                ready,
             )
             .clicked()
-                || hud
-                    .settings
-                    .keymap
-                    .chord(Action::NewScene)
-                    .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
+                || ready
+                    && hud
+                        .settings
+                        .keymap
+                        .chord(Action::NewScene)
+                        .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
             {
                 hud.send(AppCommand::NewScene);
                 hud.ui.splash_open = false;
@@ -299,14 +320,15 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 &hud.settings.keymap.label(Action::OpenFile),
                 width,
                 Look::Plain,
-                true,
+                ready,
             )
             .clicked()
-                || hud
-                    .settings
-                    .keymap
-                    .chord(Action::OpenFile)
-                    .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
+                || ready
+                    && hud
+                        .settings
+                        .keymap
+                        .chord(Action::OpenFile)
+                        .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
             {
                 hud.send(AppCommand::Open(None));
             }
@@ -326,7 +348,7 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
             });
         ui.add_space(4.0);
         let list_height = (content.bottom() - 40.0 - ui.cursor().top()).max(0.0);
-        recent_list(ui, hud, list_height);
+        ui.add_enabled_ui(ready, |ui| recent_list(ui, hud, list_height));
     });
 
     // Startup progress and the start-screen preference along the bottom.
@@ -340,14 +362,8 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
         1,
         hud.accent(),
     );
-    // Thresholds follow the mockup keyframes (30 %, 55 %, 88 %).
-    let step = STEPS[match load {
-        l if l >= 0.88 => 3,
-        l if l >= 0.55 => 2,
-        l if l >= 0.3 => 1,
-        _ => 0,
-    }];
-    let status_color = if load >= 1.0 { theme::TEXT } else { theme::MUTED };
+    let step = STEPS[loading.map_or(STEPS.len() - 1, |loading| loading.step.min(STEPS.len() - 1))];
+    let status_color = if ready { theme::TEXT } else { theme::MUTED };
     ui.painter().text(
         pos2(content.left(), content.bottom() - 10.0),
         Align2::LEFT_CENTER,
@@ -365,7 +381,12 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
             .layout(egui::Layout::right_to_left(egui::Align::Center)),
         |ui| {
             let text = hud.tr("splash-show-at-startup");
-            if widgets::checkbox(ui, &mut hud.settings.show_start_screen, &text).changed() {
+            let changed = ui
+                .add_enabled_ui(ready, |ui| {
+                    widgets::checkbox(ui, &mut hud.settings.show_start_screen, &text).changed()
+                })
+                .inner;
+            if changed {
                 hud.send(AppCommand::SettingsChanged);
             }
         },

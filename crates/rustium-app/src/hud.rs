@@ -82,6 +82,8 @@ pub(crate) struct UiState {
     pub(crate) palette_open: bool,
     pub(crate) splash_open: bool,
     pub(crate) splash_opened_at: Option<f64>,
+    /// The editor is still starting: the start screen stays open and locked until this is `None`.
+    pub(crate) loading: Option<crate::splash::Loading>,
     pub(crate) settings_section: Option<Section>,
     pub(crate) settings_search: String,
     /// The Interface scale shown while its slider is dragged; applied on release.
@@ -130,8 +132,14 @@ impl UiState {
             inspector_open: true,
             inspector_tab: InspectorTab::Scene,
             palette_open: false,
-            splash_open: show_splash,
+            // The start screen shows the startup progress, then closes unless the user wants it at startup.
+            splash_open: true,
             splash_opened_at: None,
+            loading: Some(crate::splash::Loading {
+                step: 0,
+                done: 0.0,
+                keep_open: show_splash,
+            }),
             settings_section: None,
             settings_search: String::new(),
             scale_draft: None,

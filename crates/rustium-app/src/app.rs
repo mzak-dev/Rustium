@@ -182,6 +182,10 @@ struct Running {
     adapter_name: String,
     /// Every graphics device on the machine, for the Settings → Performance pickers.
     adapters: Vec<AdapterChoice>,
+    /// The listing of `adapters` while it runs.
+    adapters_job: Option<std::thread::JoinHandle<Vec<AdapterChoice>>>,
+    /// Frames presented so far; the startup steps after the first one finish on the GPU.
+    frames_drawn: u64,
     next_frame: Option<Instant>,
     /// Mode and Editor revision the path tracer's scene upload matches.
     last_mode: Mode,
@@ -207,7 +211,14 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match Running::new(event_loop, &mut self.settings, &self.proxy, self.open_path.take()) {
-            Ok(running) => self.running = Some(running),
+            Ok(mut running) => {
+                // The window stays hidden until it shows the start screen, so it never flashes white.
+                if let Err(report) = running.redraw(&mut self.settings) {
+                    return self.fail(event_loop, report);
+                }
+                running.window.set_visible(true);
+                self.running = Some(running);
+            }
             Err(report) => self.fail(event_loop, report),
         }
     }
@@ -324,20 +335,13 @@ impl Running {
     ) -> Result<Self> {
         let logo = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
         let icon = Icon::from_rgba(logo.0.clone(), logo.1.0, logo.1.1).ok();
-        // Before the window's GPU opens: listing creates and drops a second graphics instance, and doing that while
-        // the swapchain exists breaks it on some Vulkan drivers (AMD on Windows), so the first frame fails.
-        list_adapters();
+        // Listing takes most of a second, so it runs beside the startup and the start screen shows it as a step.
+        let adapters_job = std::thread::spawn(list_adapters);
         let window = create_window(event_loop, icon)?;
         let (gpu, startup_notice) = open_gpu(&window, settings)?;
-        Ok(Self::assemble(
-            window,
-            gpu,
-            &logo,
-            startup_notice,
-            settings,
-            proxy,
-            open_path,
-        ))
+        let mut running = Self::assemble(window, gpu, &logo, startup_notice, settings, proxy, open_path);
+        running.adapters_job = Some(adapters_job);
+        Ok(running)
     }
 
     /// Builds the editor around an open window and GPU. `logo` is the decoded [`LOGO_PNG`]; `startup_notice` is
@@ -363,7 +367,6 @@ impl Running {
         let mut viewport = ViewportRenderer::new(&gpu, samples);
         viewport.set_ray_tracing(&gpu, ray_tracing(settings.ray_tracing));
         let adapter_name = gpu.adapter_info().name;
-        let adapters = list_adapters();
         info!(samples, "viewport ready");
 
         let egui_ctx = egui::Context::default();
@@ -434,7 +437,9 @@ impl Running {
             preview: Preview::default(),
             sample_counts,
             adapter_name,
-            adapters,
+            adapters: Vec::new(),
+            adapters_job: None,
+            frames_drawn: 0,
             next_frame: None,
             last_mode: Mode::Model,
             trace_revision: None,
@@ -517,6 +522,7 @@ impl Running {
         if (self.egui_ctx.zoom_factor() - zoom).abs() > 1e-3 {
             self.egui_ctx.set_zoom_factor(zoom);
         }
+        self.advance_loading();
         let mut raw_input = self.egui_state.take_egui_input(&self.window);
         self.show_maximize_hover(&mut raw_input);
         let ctx = self.egui_ctx.clone();
@@ -564,8 +570,9 @@ impl Running {
             .viewport_output
             .get(&ViewportId::ROOT)
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
-        let compiling =
-            *self.viewport.material_status() == rustium_render::CompileStatus::Compiling || self.animator.is_moving();
+        let compiling = *self.viewport.material_status() == rustium_render::CompileStatus::Compiling
+            || self.animator.is_moving()
+            || self.ui.loading.is_some();
         let settling = self.ui.mode != Mode::Render && self.viewport.is_settling();
         let repaint_delay =
             if compiling || settling || (self.ui.mode == Mode::Render && self.ui.render.is_accumulating()) {
@@ -689,6 +696,7 @@ impl Running {
             .queue()
             .submit(user_buffers.into_iter().chain(std::iter::once(encoder.finish())));
         self.gpu.queue().present(frame);
+        self.frames_drawn += 1;
         for id in &freed {
             self.egui_renderer.free_texture(id);
         }
@@ -820,6 +828,44 @@ impl Running {
             }
         };
         self.ui.toast = Some(toast);
+    }
+
+    /// Moves the start screen's progress on as the startup work finishes: the GPU is open already, the Materials
+    /// compile after the first frame, and the device list comes from its own thread. Once all is done the start
+    /// screen unlocks, or closes when the user did not ask for it.
+    fn advance_loading(&mut self) {
+        let Some(loading) = self.ui.loading else {
+            return;
+        };
+        if self
+            .adapters_job
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+            && let Some(job) = self.adapters_job.take()
+        {
+            self.adapters = job.join().unwrap_or_default();
+        }
+        let compiling = *self.viewport.material_status() == rustium_render::CompileStatus::Compiling;
+        let done = [
+            true,
+            self.frames_drawn > 0 && !compiling,
+            self.adapters_job.is_none(),
+            true,
+        ];
+        let finished = done.iter().filter(|step| **step).count();
+        let step = done.iter().position(|step| !step).unwrap_or(done.len());
+        if step == done.len() {
+            self.ui.loading = None;
+            if !loading.keep_open {
+                self.ui.splash_open = false;
+            }
+            return;
+        }
+        self.ui.loading = Some(crate::splash::Loading {
+            step,
+            done: finished as f32 / done.len() as f32,
+            ..loading
+        });
     }
 
     /// Feeds the Editor's changes to the edit animations and remeshes chunks whose animated cells settled.
@@ -1252,6 +1298,7 @@ fn create_window(event_loop: &ActiveEventLoop, icon: Option<Icon>) -> Result<Arc
         .with_window_icon(icon);
     #[cfg(not(target_arch = "wasm32"))]
     let attributes = attributes
+        .with_visible(false)
         .with_inner_size(LogicalSize::new(1440.0, 900.0))
         .with_min_inner_size(LogicalSize::new(960.0, 640.0));
     #[cfg(windows)]
@@ -1300,20 +1347,10 @@ fn open_gpu(window: &Arc<Window>, settings: &mut Settings) -> Result<(GpuContext
     }
 }
 
-/// Every graphics device on the machine, for the Settings → Performance pickers. Listed once, at startup before the
-/// window's GPU opens (see `Running::new`); later calls return that list.
+/// Every graphics device on the machine, for the Settings → Performance pickers.
 #[cfg(not(target_arch = "wasm32"))]
 fn list_adapters() -> Vec<AdapterChoice> {
-    static ADAPTERS: std::sync::OnceLock<Vec<AdapterChoice>> = std::sync::OnceLock::new();
-    ADAPTERS
-        .get_or_init(|| pollster::block_on(available_adapters()))
-        .clone()
-}
-
-/// The browser picks the device itself; there is nothing to choose from.
-#[cfg(target_arch = "wasm32")]
-fn list_adapters() -> Vec<AdapterChoice> {
-    Vec::new()
+    pollster::block_on(available_adapters())
 }
 
 /// Minimum time between frames when vertical sync is off and a frame limit is set.

@@ -143,6 +143,8 @@ pub(crate) enum IoOutcome {
         operation: Operation,
         path: PathBuf,
         message: String,
+        /// The document a failed save belonged to.
+        document: Option<u64>,
     },
 }
 
@@ -453,6 +455,9 @@ pub(crate) struct Document {
     last_autosave: Instant,
     /// A save is running; a second autosave or save waits for it.
     pub(crate) saving: bool,
+    /// What the user asked for (answering "Save" in the unsaved-changes prompt) while a save was already running;
+    /// it continues when that save has finished.
+    pub(crate) after_save: Option<Pending>,
 }
 
 impl Document {
@@ -466,6 +471,7 @@ impl Document {
             autosaved_revision: None,
             last_autosave: Instant::now(),
             saving: false,
+            after_save: None,
         }
     }
 
@@ -490,6 +496,15 @@ impl Document {
 
     pub(crate) fn is_dirty(&self, revision: u64) -> bool {
         self.saved_revision != Some(revision)
+    }
+
+    /// A save, or the dialog of one, ended without writing the file. Only the document it belonged to is affected, and
+    /// what was waiting for the save is dropped.
+    pub(crate) fn save_ended(&mut self, document: Option<u64>) {
+        if document == Some(self.id) {
+            self.saving = false;
+            self.after_save = None;
+        }
     }
 
     pub(crate) fn mark_saved(&mut self, path: PathBuf, revision: u64) {
@@ -576,6 +591,7 @@ fn failure(operation: Operation, path: &Path, error: impl std::fmt::Display) -> 
         operation,
         path: path.to_path_buf(),
         message: error.to_string(),
+        document: None,
     }
 }
 
@@ -655,7 +671,23 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                     then,
                 }
             }
-            Err(error) => failure(Operation::Save, &path, error),
+            Err(error) => {
+                let outcome = failure(Operation::Save, &path, error);
+                match outcome {
+                    IoOutcome::Failed {
+                        operation,
+                        path,
+                        message,
+                        ..
+                    } => IoOutcome::Failed {
+                        operation,
+                        path,
+                        message,
+                        document: Some(document),
+                    },
+                    other => other,
+                }
+            }
         },
         IoJob::Autosave { path, scene, revision } => match encode_ruv(&scene)
             .map_err(|error| error.to_string())
@@ -804,6 +836,22 @@ mod tests {
         assert_eq!(origin, Origin::File);
         assert_eq!(root_name(&scene), "Hut");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_that_ends_unwritten_only_concerns_its_own_document() {
+        let mut document = Document::new(1);
+        let other = Document::new(1).id();
+        document.saving = true;
+        document.after_save = Some(Pending::New);
+        document.save_ended(Some(other));
+        assert!(document.saving, "another document's failed save changes nothing here");
+        assert_eq!(document.after_save, Some(Pending::New));
+        document.save_ended(None);
+        assert!(document.saving);
+        document.save_ended(Some(document.id()));
+        assert!(!document.saving);
+        assert_eq!(document.after_save, None, "a failed save cancels what waited for it");
     }
 
     #[test]

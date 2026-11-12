@@ -11,7 +11,7 @@ use std::sync::Arc;
 use glam::IVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::chunk::{CHUNK_VOLUME, Chunk, ChunkCoord};
+use crate::chunk::{CHUNK_SIZE, CHUNK_VOLUME, Chunk, ChunkCoord};
 use crate::file_error::FileError;
 use crate::ids::{NodeId, ShapeId};
 use crate::material_graph::MaterialGraph;
@@ -33,6 +33,12 @@ pub const VERSION: u32 = 2;
 const MAX_BODY: usize = 1 << 30;
 
 /// lz4 never expands data by more than this factor, which bounds a believable length field.
+/// Largest absolute offset of one Node, and of one chunk in voxels, accepted from a file.
+const MAX_EXTENT: i32 = 1 << 20;
+
+/// Largest sum of the absolute offsets of all Nodes, so no chain of nested Nodes can overflow a position.
+const MAX_TOTAL_OFFSET: i64 = 1 << 28;
+
 const LZ4_MAX_RATIO: usize = 255;
 
 #[derive(Serialize, Deserialize)]
@@ -80,10 +86,19 @@ struct ColorDto {
 /// Encodes `scene` as the bytes of a `.ruv` file.
 ///
 /// # Errors
-/// Fails only when the Scene is too large for 32-bit ids or the serializer rejects it.
+/// Fails when the Scene is too large for 32-bit ids, when its encoded body exceeds the 1 GiB the format can
+/// read back, or when the serializer rejects it.
 pub fn encode_ruv(scene: &Scene) -> Result<Vec<u8>, FileError> {
-    let dto = to_dto(scene)?;
-    let body = postcard::to_allocvec(&dto).map_err(|error| FileError::TooLarge(error.to_string()))?;
+    encode_dto(&to_dto(scene)?)
+}
+
+fn encode_dto(dto: &SceneDto) -> Result<Vec<u8>, FileError> {
+    let body = postcard::to_allocvec(dto).map_err(|error| FileError::TooLarge(error.to_string()))?;
+    if body.len() > MAX_BODY {
+        return Err(FileError::TooLarge(
+            "its data exceeds 1 GiB, which the file format cannot hold".to_owned(),
+        ));
+    }
     let packed = lz4_flex::block::compress_prepend_size(&body);
     let mut bytes = Vec::with_capacity(MAGIC.len() + 4 + packed.len());
     bytes.extend_from_slice(&MAGIC);
@@ -250,6 +265,13 @@ fn from_dto(dto: SceneDto) -> Result<Scene, FileError> {
             if chunk.voxels.iter().any(|byte| usize::from(*byte) > palette_len) {
                 return corrupt("a voxel uses a color the palette does not have");
             }
+            if chunk
+                .coord
+                .iter()
+                .any(|axis| axis.unsigned_abs() > (MAX_EXTENT / CHUNK_SIZE).unsigned_abs())
+            {
+                return corrupt("a chunk lies outside the supported coordinate range");
+            }
             let Some(parsed) = Chunk::from_raw(&chunk.voxels) else {
                 return corrupt("a chunk cannot be rebuilt");
             };
@@ -259,6 +281,18 @@ fn from_dto(dto: SceneDto) -> Result<Scene, FileError> {
     }
 
     let node_count = dto.nodes.len();
+    let mut total_offset = 0_i64;
+    for node in &dto.nodes {
+        for axis in node.offset {
+            if axis.unsigned_abs() > MAX_EXTENT.unsigned_abs() {
+                return corrupt("a node is placed outside the supported coordinate range");
+            }
+            total_offset += i64::from(axis.unsigned_abs());
+        }
+    }
+    if total_offset > MAX_TOTAL_OFFSET {
+        return corrupt("the node offsets add up beyond the supported coordinate range");
+    }
     let mut nodes = Vec::with_capacity(node_count);
     let mut parents: Vec<Option<NodeId>> = vec![None; node_count];
     for (index, node) in dto.nodes.iter().enumerate() {
@@ -347,6 +381,19 @@ mod tests {
             crate::apply(&mut scene, &add).unwrap();
         }
         scene
+    }
+
+    #[test]
+    fn out_of_range_chunks_and_offsets_are_corrupt_not_overflows() {
+        let mut dto = to_dto(&sample()).unwrap();
+        dto.shapes[0].chunks[0].coord = [i32::MAX, 0, 0];
+        let result = decode_ruv(&encode_dto(&dto).unwrap());
+        assert!(matches!(result, Err(FileError::Corrupt(_))), "{result:?}");
+
+        let mut dto = to_dto(&sample()).unwrap();
+        dto.nodes[1].offset = [i32::MAX, 0, 0];
+        let result = decode_ruv(&encode_dto(&dto).unwrap());
+        assert!(matches!(result, Err(FileError::Corrupt(_))), "{result:?}");
     }
 
     #[test]

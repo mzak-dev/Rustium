@@ -78,6 +78,7 @@ impl Running {
         self.editor
             .new_scene(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
         self.viewport.clear_chunks();
+        self.preview.invalidate();
         self.trace_revision = None;
         self.camera.frame(None);
         self.ui.collapsed.clear();
@@ -338,6 +339,7 @@ impl Running {
             .map_or_else(String::new, |root| root.name().to_owned());
         self.editor.replace_scene(scene, settings.undo_steps as usize);
         self.viewport.clear_chunks();
+        self.preview.invalidate();
         self.trace_revision = None;
         self.camera.frame(self.editor.scene.world_volume(NodeId::ROOT));
         self.ui.collapsed.clear();

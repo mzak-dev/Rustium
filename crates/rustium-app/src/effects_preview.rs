@@ -25,6 +25,8 @@ const PREVIEW_COLOR_NUMBER: usize = 96;
 pub(crate) struct Preview {
     shape: Option<PreviewShape>,
     meshes: Vec<(ChunkCoord, ChunkMesh)>,
+    /// The shape whose meshes the GPU holds now, so they are uploaded once rather than every frame.
+    uploaded: Option<PreviewShape>,
     /// The Material the GPU Palette points the preview Color at, while a Cube or Ball shows.
     pub(crate) applied_graph: Option<usize>,
 }
@@ -66,6 +68,24 @@ impl Preview {
             self.shape = Some(shape);
         }
         (ShapeId::from_raw(PREVIEW_SHAPE), &self.meshes)
+    }
+
+    /// The meshes of `shape` when they still have to go to the GPU; `None` once they are there.
+    pub(crate) fn take_upload(
+        &mut self,
+        shape: PreviewShape,
+        scene: &Scene,
+    ) -> Option<(ShapeId, &[(ChunkCoord, ChunkMesh)])> {
+        if self.uploaded == Some(shape) {
+            return None;
+        }
+        self.uploaded = Some(shape);
+        Some(self.meshes(shape, scene))
+    }
+
+    /// Forgets what the GPU holds (its chunks were cleared, or the preview went away).
+    pub(crate) fn invalidate(&mut self) {
+        self.uploaded = None;
     }
 
     /// The single Model draw of a Cube or Ball preview.
@@ -177,5 +197,21 @@ pub(crate) fn uniform(camera: &OrbitCamera, rect: egui::Rect, screen: egui::Vec2
         eye: camera.eye().extend(1.0).to_array(),
         sun: Vec3::new(0.45, 0.8, 0.35).normalize().extend(0.0).to_array(),
         grid: [1.0, 1.0, 0.0, 0.0],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_shape_is_uploaded_once_until_invalidated() {
+        let scene = Scene::new();
+        let mut preview = Preview::default();
+        assert!(preview.take_upload(PreviewShape::Cube, &scene).is_some());
+        assert!(preview.take_upload(PreviewShape::Cube, &scene).is_none());
+        assert!(preview.take_upload(PreviewShape::Ball, &scene).is_some());
+        preview.invalidate();
+        assert!(preview.take_upload(PreviewShape::Ball, &scene).is_some());
     }
 }

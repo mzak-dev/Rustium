@@ -17,7 +17,7 @@ struct Params {
     sky_horizon: vec4<f32>,
     // x: image width, y: image height, z: samples already accumulated, w: max bounces.
     image: vec4<u32>,
-    // Pixels outside [xy, zw) are not rendered.
+    // Pixels outside [xy, zw) get no new samples: they keep what they held.
     region: vec4<u32>,
     // x: ground (0 none, 1 studio, 2 shadow catcher), y: 1 = transparent background, z: samples this pass,
     // w: number of Models.
@@ -28,6 +28,11 @@ struct Params {
     style: vec4<u32>,
     // x: lens radius in voxels, y: focus distance in voxels, z: 1 = depth of field is on.
     lens: vec4<f32>,
+    // x: first row traced by this dispatch, y: one past the last row (the other rows were copied beforehand).
+    band: vec4<u32>,
+    // x: view pass (0 = beauty, 1 = albedo, 2 = normal, 3 = depth), y/z: nearest and farthest distance of the Models
+    // along the view direction, for the depth pass.
+    aov: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -62,6 +67,7 @@ const WORDS_PER_CHUNK: u32 = 8192u;
 const GROUND_ID: u32 = 256u;
 const PI: f32 = 3.14159265;
 const EPS: f32 = 0.002;
+const GROUND_SLACK: f32 = 4.0 * EPS;
 const FAR: f32 = 1.0e30;
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -236,7 +242,11 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, mode: u32
             }
         } else if (mode == MODE_SHADOW) {
             if (found != 0u) {
-                let flags = color_flags(found);
+                var flags = color_flags(found);
+                if (params.style.x == STYLE_CLAY || params.style.x == STYLE_TOON) {
+                    // These styles draw glass and haze as solid, so they shade like solids.
+                    flags = 0u;
+                }
                 if ((flags & COLOR_NO_SHADOW) == 0u) {
                     if ((flags & COLOR_VOLUMETRIC) == 0u) {
                         return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
@@ -307,8 +317,11 @@ fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside:
 // through glass or haze (`inside` = Material index + 1) only looks at the Model it is in. Where Models overlap, the earlier one wins.
 fn trace(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> Hit {
     var result = trace_scene_hit(origin, dir, inside, inside_model);
-    if (inside == 0u && params.options.x != 0u && params.style.x != STYLE_WIRE && dir.y < -1.0e-5 && origin.y > params.ground.w) {
-        let t_ground = (params.ground.w - origin.y) / dir.y;
+    // A ray that has just left the underside of a Model (or glass resting on the ground) starts a hair below the
+    // ground, so the plane counts from `GROUND_SLACK` under it; such a ray meets it at once.
+    if (inside == 0u && params.options.x != 0u && params.style.x != STYLE_WIRE && dir.y < -1.0e-5
+        && origin.y > params.ground.w - GROUND_SLACK) {
+        let t_ground = max((params.ground.w - origin.y) / dir.y, 0.0);
         if (t_ground < result.t) {
             result = Hit(true, t_ground, vec3<f32>(0.0, 1.0, 0.0), GROUND_ID, 0u, 0.0);
         }
@@ -493,10 +506,18 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
         }
         let normal = surface.normal;
 
-        if (bounces == 0u && (params.style.x == STYLE_TOON || params.style.x == STYLE_WIRE)
+        // Toon sees through glass and haze: the ray passes straight, tinted, and the first opaque surface behind is shaded.
+        let toon_clear = params.style.x == STYLE_TOON
+            && (air || (hit.color_index != GROUND_ID && (surface.transmission > 0.5 || surface.volume_density > 0.0)));
+        if (toon_clear) {
+            surface.ior = 1.0;
+            surface.roughness = 0.0;
+            surface.transmission = 1.0;
+        }
+        if (bounces == 0u && !toon_clear && (params.style.x == STYLE_TOON || params.style.x == STYLE_WIRE)
             && !(hit.color_index == GROUND_ID && params.options.x == 2u)) {
             // Non-photographic styles shade the first hit only.
-            color = select(toon_shade(point, hit, surface), wire_shade(point, hit, surface), params.style.x == STYLE_WIRE);
+            color = throughput * select(toon_shade(point, hit, surface), wire_shade(point, hit, surface), params.style.x == STYLE_WIRE);
             break;
         }
 
@@ -616,18 +637,26 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    // The dispatch covers the rows of this pass's band only.
+    let id = vec3<u32>(global_id.x, global_id.y + params.band.x, global_id.z);
     let width = params.image.x;
     let height = params.image.y;
-    if (id.x >= width || id.y >= height) {
+    if (id.x >= width || id.y >= height || id.y >= params.band.y) {
         return;
     }
+    let previous = textureLoad(history, vec2<i32>(id.xy), 0);
     var result = vec4<f32>(0.0);
     let in_region = id.x >= params.region.x && id.y >= params.region.y && id.x < params.region.z && id.y < params.region.w;
+    if (!in_region) {
+        // Outside the region nothing new is traced: the picture there stays as it was.
+        textureStore(output, vec2<i32>(id.xy), previous);
+        return;
+    }
     let block = max(params.style.y, 1u);
     let pixelated = params.style.x == STYLE_PIXEL;
     // The Pixel style traces one pixel per block; the resolve pass copies it over the rest of the block.
-    let traced = in_region && (!pixelated || (id.x % block == 0u && id.y % block == 0u));
+    let traced = !pixelated || (id.x % block == 0u && id.y % block == 0u);
     if (traced) {
         let done = params.image.z;
         let count = params.options.z;
@@ -638,9 +667,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             let position = vec2<f32>(id.xy) + vec2<f32>(rand(), rand()) * spread;
             var ray = primary_ray(position);
             ray = thin_lens(ray);
-            sum += radiance(ray.origin, ray.dir);
+            if (params.aov.x > 0.5) {
+                sum += aov_sample(ray);
+            } else {
+                sum += radiance(ray.origin, ray.dir);
+            }
         }
-        let previous = textureLoad(history, vec2<i32>(id.xy), 0);
         result = mix(previous, sum / f32(count), f32(count) / f32(done + count));
         if (params.style.z == 1u) {
             write_gbuffer(id.xy, pixel_centre(id.xy));

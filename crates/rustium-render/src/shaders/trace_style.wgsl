@@ -75,6 +75,38 @@ fn write_gbuffer(pixel: vec2<u32>, centre: vec2<f32>) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// View passes: albedo, normal and depth of the first surface, traced per sample like the beauty pass so the
+// accumulation anti-aliases them and depth of field blurs them. Premultiplied, display-ready colour; the sky is empty.
+
+fn aov_sample(ray: Ray) -> vec4<f32> {
+    let hit = trace(ray.origin, ray.dir, 0u, 0u);
+    if (!hit.hit) {
+        return vec4<f32>(0.0, 0.0, 0.0, select(1.0, 0.0, params.options.y == 1u));
+    }
+    var color = vec3<f32>(0.0);
+    if (params.aov.x < 1.5) {
+        if (hit.color_index == GROUND_ID) {
+            color = params.ground.rgb;
+        } else {
+            let surface = evaluate_material(hit.color_index, ray.origin + ray.dir * hit.t, hit.normal);
+            let clear = surface.transmission > 0.5 || surface.volume_density > 0.0;
+            color = select(surface.base_color, vec3<f32>(1.0), clear);
+        }
+    } else if (params.aov.x < 2.5) {
+        color = hit.normal * 0.5 + vec3<f32>(0.5);
+    } else {
+        // Distance along the view direction, mapped so the nearest part of the Models is white and the farthest black.
+        let near = params.inv_view_proj * vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        let far = params.inv_view_proj * vec4<f32>(0.0, 0.0, 1.0, 1.0);
+        let forward = normalize(far.xyz / far.w - near.xyz / near.w);
+        let depth = dot(ray.origin + ray.dir * hit.t - near.xyz / near.w, forward);
+        let span = max(params.aov.z - params.aov.y, 1.0e-3);
+        color = vec3<f32>(1.0 - clamp((depth - params.aov.y) / span, 0.0, 1.0));
+    }
+    return vec4<f32>(color, 1.0);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Clay: every surface becomes the same matte grey.
 
 fn clay_surface(surface: Surface) -> Surface {

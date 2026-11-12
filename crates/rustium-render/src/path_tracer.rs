@@ -2,10 +2,11 @@
 //! accumulates samples into an `Rgba32Float` texture and tonemaps the result into the viewport.
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
-use rustium_core::MaterialGraph;
+use glam::{Mat4, Vec3};
+use rustium_core::{MaterialGraph, NodeId};
 use tracing::warn;
 
 use crate::error::Error;
@@ -215,6 +216,7 @@ struct TraceKey {
     region: Option<[u32; 4]>,
     style: RenderStyle,
     lens: Option<ThinLens>,
+    pass: RenderPass,
 }
 
 impl TraceFrame {
@@ -230,6 +232,7 @@ impl TraceFrame {
             region: self.region,
             style: self.style,
             lens: self.lens,
+            pass: self.pass,
         }
     }
 
@@ -241,17 +244,20 @@ impl TraceFrame {
             denoise: self.denoise,
             pass: self.pass,
             samples,
+            defocus: self.lens.is_some_and(|lens| lens.radius > 0.0),
         }
     }
 }
 
 /// How far accumulation has come.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TraceProgress {
     /// Samples per pixel accumulated so far.
     pub samples: u32,
     /// Samples per pixel the current frame asks for.
     pub target: u32,
+    /// How much of the next sample the band-by-band sweep has traced, `0.0..1.0`.
+    pub partial: f32,
     /// Increases every time accumulation restarts.
     pub generation: u64,
 }
@@ -287,9 +293,11 @@ struct Params {
     ground: [f32; 4],
     style: [u32; 4],
     lens: [f32; 4],
+    band: [u32; 4],
+    aov: [f32; 4],
 }
 
-const _: () = assert!(size_of::<Params>() == 64 + 11 * 16);
+const _: () = assert!(size_of::<Params>() == 64 + 13 * 16);
 
 /// Uniform block of `shaders/present.wgsl`.
 #[repr(C)]
@@ -354,8 +362,104 @@ pub struct PathTracer {
     /// Index of the texture holding the latest result.
     current: usize,
     samples_done: u32,
+    /// First row of the sample the viewport is tracing band by band; `0` between samples.
+    sweep_row: u32,
+    budget: BandBudget,
+    /// When the viewport last encoded a frame that traced, to time the frames.
+    last_traced: Option<Instant>,
+    /// Corners of the visible Models, for the depth pass.
+    bounds: Option<(Vec3, Vec3)>,
     target_samples: u32,
     generation: u64,
+}
+
+/// How long one interface frame may take while the viewport traces; the sweep adapts its band to stay near it.
+const FRAME_BUDGET: Duration = Duration::from_millis(33);
+/// The first band of a sweep, in rows, before any frame time is known.
+const FIRST_BAND_ROWS: u32 = 128;
+
+/// Decides how many rows of the picture one interface frame traces, so a slow GPU keeps the interface responsive: the
+/// band shrinks when frames take too long and grows back when there is time to spare. A full sweep of all bands adds
+/// one sample per pixel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BandBudget {
+    rows: u32,
+    /// Whether frames are timed; off, every frame traces the whole picture.
+    timed: bool,
+}
+
+impl BandBudget {
+    const fn new() -> Self {
+        Self {
+            rows: FIRST_BAND_ROWS,
+            timed: true,
+        }
+    }
+
+    /// Adapts to the time the last frame took (interface and trace together) and returns the rows for the next one,
+    /// at least one workgroup row and at most `height`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the scaled row count is positive and at most twice a u32 that was an image height"
+    )]
+    fn next_rows(&mut self, last_frame: Option<Duration>, height: u32) -> u32 {
+        if !self.timed {
+            return height;
+        }
+        let minimum = WORKGROUP.min(height.max(1));
+        if let Some(took) = last_frame {
+            let ratio = FRAME_BUDGET.as_secs_f64() / took.as_secs_f64().max(1.0e-4);
+            // Inside a 25% window around the budget the band stays; outside it moves by at most a factor of two.
+            if !(0.8..=1.25).contains(&ratio) {
+                let scaled = f64::from(self.rows) * ratio.clamp(0.5, 2.0);
+                self.rows = (scaled as u32).max(minimum);
+            }
+        }
+        self.rows = self.rows.clamp(minimum, height.max(minimum));
+        // Whole workgroup rows, except that the last band may end at the image edge.
+        if self.rows < height {
+            self.rows = (self.rows / WORKGROUP * WORKGROUP).max(minimum);
+        }
+        self.rows
+    }
+}
+
+/// Bytes of GPU memory one pixel of a [`PathTracer`] image takes: two accumulation textures, two G-buffer textures, two
+/// denoiser scratch textures and the resolved image, 16 bytes each.
+const BYTES_PER_PIXEL: u64 = 7 * 16;
+/// The most video memory one tracer's images may take (3 GiB). `wgpu` reports no memory size, so this is a
+/// conservative stand-in for a GPU with 8 GB, leaving room for the viewport tracer that runs beside an offline one.
+const MAX_IMAGE_BYTES: u64 = 3 << 30;
+
+/// GPU memory the textures of a `size` image take.
+pub fn trace_image_bytes(size: (u32, u32)) -> u64 {
+    u64::from(size.0) * u64::from(size.1) * BYTES_PER_PIXEL
+}
+
+/// The largest side in pixels and the most bytes an image on `device` may have.
+pub fn trace_image_limits(device: &wgpu::Device) -> (u32, u64) {
+    (device.limits().max_texture_dimension_2d, MAX_IMAGE_BYTES)
+}
+
+/// Whether an image of `size` fits the device's texture size limit and the memory budget.
+///
+/// # Errors
+///
+/// [`Error::ImageTooLarge`] with what the image needs and what is allowed.
+pub fn check_image_size(device: &wgpu::Device, size: (u32, u32)) -> Result<(), Error> {
+    let (max_side, max_bytes) = trace_image_limits(device);
+    let needed = trace_image_bytes(size);
+    if size.0 > max_side || size.1 > max_side || needed > max_bytes {
+        return Err(Error::ImageTooLarge {
+            width: size.0,
+            height: size.1,
+            needed,
+            allowed: max_bytes,
+            max_side,
+        });
+    }
+    Ok(())
 }
 
 /// How many rows of `padded` bytes one read-back staging buffer holds: a quarter of the device's buffer limit, at
@@ -539,6 +643,10 @@ impl PathTracer {
             key: None,
             current: 0,
             samples_done: 0,
+            sweep_row: 0,
+            budget: BandBudget::new(),
+            last_traced: None,
+            bounds: None,
             target_samples: 0,
             generation: 0,
         }
@@ -548,10 +656,20 @@ impl PathTracer {
     /// consume the same chunk data.
     pub fn upload_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &rustium_core::Scene) {
         self.scene.upload(device, queue, scene);
+        self.bounds = scene
+            .world_volume(NodeId::ROOT)
+            .map(|volume| (volume.min.as_vec3(), (volume.max + 1).as_vec3()));
         if let Some(rays) = &mut self.rays {
             rays.update(device, queue, &self.scene);
         }
         self.restart();
+    }
+
+    /// Turns the frame-time budget of [`PathTracer::encode`] on (the default) or off. On, a frame traces only as many
+    /// rows as keep the interface responsive; off, every frame traces the whole picture, which tests and tools that
+    /// count samples per frame rely on.
+    pub fn set_time_budget(&mut self, timed: bool) {
+        self.budget.timed = timed;
     }
 
     /// The traversal this tracer runs.
@@ -616,21 +734,28 @@ impl PathTracer {
     /// Throws away accumulated samples; call after the Palette changed.
     pub fn restart(&mut self) {
         self.samples_done = 0;
+        self.sweep_row = 0;
         self.key = None;
         self.generation += 1;
     }
 
     /// How far accumulation has come.
     pub fn progress(&self) -> TraceProgress {
+        let height = self
+            .accumulation
+            .as_ref()
+            .map_or(1, |accumulation| accumulation.size.1.max(1));
         TraceProgress {
             samples: self.samples_done,
             target: self.target_samples,
+            partial: self.sweep_row as f32 / height as f32,
             generation: self.generation,
         }
     }
 
     // HOT PATH: runs every frame while Render mode is open. Everything else in this file runs on change only.
-    /// Accumulates at most one pass of samples and draws the resolved image into `target`.
+    /// Traces a band of rows of the next sample (the whole picture when the GPU is fast enough, see [`BandBudget`])
+    /// and draws the resolved image into `target`.
     pub fn encode(
         &mut self,
         device: &wgpu::Device,
@@ -641,10 +766,28 @@ impl PathTracer {
     ) {
         let frame = self.prepare(device, frame);
         let passes = (frame.running || self.samples_done == 0) && self.samples_done < self.target_samples;
-        let count = u32::from(passes);
-        self.write_params(queue, &frame, count);
+        let now = Instant::now();
         if passes {
-            self.encode_trace_pass(encoder, frame.size, count);
+            // The time since the last traced frame is what this GPU needs for a frame; a long gap was an idle
+            // interface, not a slow GPU.
+            let took = self
+                .last_traced
+                .map(|then| now.saturating_duration_since(then))
+                .filter(|took| *took < Duration::from_secs(1));
+            let rows = self.budget.next_rows(took, frame.size.1);
+            let end = (self.sweep_row + rows).min(frame.size.1);
+            self.write_params(queue, &frame, 1, self.sweep_row..end);
+            self.encode_trace_pass(encoder, frame.size, self.sweep_row..end);
+            self.last_traced = Some(now);
+            if end >= frame.size.1 {
+                self.sweep_row = 0;
+                self.samples_done += 1;
+            } else {
+                self.sweep_row = end;
+            }
+        } else {
+            self.last_traced = None;
+            self.write_params(queue, &frame, 0, 0..frame.size.1);
         }
         self.encode_resolve(queue, encoder, &frame, passes);
         let Some(accumulation) = &self.accumulation else {
@@ -689,18 +832,26 @@ impl PathTracer {
     ) -> Result<Option<TraceImage>, Error> {
         /// Samples traced per submission: a few at a time keeps one GPU job short.
         const BATCH: u32 = 4;
+        check_image_size(device, frame.size)?;
+        let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let prepared = self.prepare(device, frame);
+        if pollster::block_on(scope.pop()).is_some() {
+            self.accumulation = None;
+            return Err(Error::OutOfMemory);
+        }
         let frame = TraceFrame {
             running: true,
-            ..self.prepare(device, frame)
+            ..prepared
         };
         self.samples_done = 0;
         while self.samples_done < self.target_samples {
             let count = BATCH.min(self.target_samples - self.samples_done);
-            self.write_params(queue, &frame, count);
+            self.write_params(queue, &frame, count, 0..frame.size.1);
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("path tracer offline encoder"),
             });
-            self.encode_trace_pass(&mut encoder, frame.size, count);
+            self.encode_trace_pass(&mut encoder, frame.size, 0..frame.size.1);
+            self.samples_done += count;
             queue.submit(std::iter::once(encoder.finish()));
             if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
                 warn!(%error, "waiting for the GPU failed");
@@ -743,6 +894,7 @@ impl PathTracer {
         if self.key != Some(key) {
             self.key = Some(key);
             self.samples_done = 0;
+            self.sweep_row = 0;
             self.generation += 1;
         }
         self.target_samples = frame.samples.max(1);
@@ -750,7 +902,7 @@ impl PathTracer {
     }
 
     /// Uploads the uniforms of the trace pass (`count` samples) and of the present pass.
-    fn write_params(&self, queue: &wgpu::Queue, frame: &TraceFrame, count: u32) {
+    fn write_params(&self, queue: &wgpu::Queue, frame: &TraceFrame, count: u32, rows: std::ops::Range<u32>) {
         let size = frame.size;
         let region = frame.region.map_or([0, 0, size.0, size.1], |region| {
             [
@@ -767,6 +919,7 @@ impl PathTracer {
             radius: 0.0,
             focus_distance: 1.0,
         });
+        let depth = self.depth_range(&frame.inv_view_proj);
         let params = Params {
             inv_view_proj: frame.inv_view_proj,
             eye: [lens.eye[0], lens.eye[1], lens.eye[2], 0.0],
@@ -799,6 +952,17 @@ impl PathTracer {
                 f32::from(u8::from(frame.lens.is_some_and(|lens| lens.radius > 0.0))),
                 0.0,
             ],
+            band: [rows.start, rows.end, 0, 0],
+            aov: [
+                if frame.pass == RenderPass::Beauty {
+                    0.0
+                } else {
+                    frame.pass.index() as f32
+                },
+                depth.0,
+                depth.1,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         let present = PresentParams {
@@ -815,21 +979,55 @@ impl PathTracer {
         queue.write_buffer(&self.present_buffer, 0, bytemuck::bytes_of(&present));
     }
 
-    /// Adds `count` samples per pixel to the accumulation.
-    fn encode_trace_pass(&mut self, encoder: &mut wgpu::CommandEncoder, size: (u32, u32), count: u32) {
+    /// Nearest and farthest distance of the Models' bounding box along the view direction, measured like the depth pass
+    /// does from the near-plane centre of the camera.
+    fn depth_range(&self, inv_view_proj: &[[f32; 4]; 4]) -> (f32, f32) {
+        let Some((min, max)) = self.bounds else {
+            return (0.0, 1.0);
+        };
+        let inverse = Mat4::from_cols_array_2d(inv_view_proj);
+        let origin = inverse.project_point3(Vec3::ZERO);
+        let forward = (inverse.project_point3(Vec3::Z) - origin).normalize_or_zero();
+        let depths = (0..8).map(|corner| {
+            let point = Vec3::new(
+                if corner & 1 == 0 { min.x } else { max.x },
+                if corner & 2 == 0 { min.y } else { max.y },
+                if corner & 4 == 0 { min.z } else { max.z },
+            );
+            (point - origin).dot(forward)
+        });
+        depths.fold((f32::MAX, f32::MIN), |(near, far), depth| {
+            (near.min(depth), far.max(depth))
+        })
+    }
+
+    /// Traces one sample per pixel for the rows in `rows`; the other rows keep what they held.
+    fn encode_trace_pass(&mut self, encoder: &mut wgpu::CommandEncoder, size: (u32, u32), rows: std::ops::Range<u32>) {
         let Some(accumulation) = &self.accumulation else {
             return;
         };
+        if rows.len() < size.1 as usize {
+            // The shader writes the band only; the other texture of the ping-pong pair gets the rest first.
+            encoder.copy_texture_to_texture(
+                accumulation.textures[self.current].as_image_copy(),
+                accumulation.textures[1 - self.current].as_image_copy(),
+                wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("path tracer pass"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.compute_pipeline);
         pass.set_bind_group(0, &accumulation.compute_groups[self.current], &[]);
-        pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), size.1.div_ceil(WORKGROUP), 1);
+        let band_rows = u32::try_from(rows.len()).unwrap_or(size.1);
+        pass.dispatch_workgroups(size.0.div_ceil(WORKGROUP), band_rows.div_ceil(WORKGROUP), 1);
         drop(pass);
         self.current = 1 - self.current;
-        self.samples_done += count;
     }
 
     /// Refreshes the resolved image when new samples arrived or the style or denoise setting changed.
@@ -949,7 +1147,8 @@ impl PathTracer {
                 format: ACCUM_FORMAT,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
         };
@@ -1147,6 +1346,29 @@ mod tests {
     }
 
     #[test]
+    fn the_band_shrinks_on_slow_frames_and_grows_on_fast_ones() {
+        let mut budget = BandBudget::new();
+        let first = budget.next_rows(None, 1080);
+        assert_eq!(first, FIRST_BAND_ROWS);
+        let slow = budget.next_rows(Some(Duration::from_millis(400)), 1080);
+        assert!(slow < first, "a 400 ms frame halves the band: {slow}");
+        let mut rows = slow;
+        for _ in 0..20 {
+            rows = budget.next_rows(Some(Duration::from_secs(2)), 1080);
+        }
+        assert_eq!(rows, WORKGROUP, "never below one workgroup row");
+        for _ in 0..20 {
+            rows = budget.next_rows(Some(Duration::from_millis(5)), 1080);
+        }
+        assert_eq!(rows, 1080, "a fast GPU traces the whole picture in one frame");
+        let steady = budget.next_rows(Some(FRAME_BUDGET), 1080);
+        assert_eq!(steady, 1080, "frames near the budget leave the band alone");
+        assert_eq!(budget.next_rows(None, 40) % 8, 0, "bands are whole workgroup rows");
+        budget.timed = false;
+        assert_eq!(budget.next_rows(Some(Duration::from_secs(9)), 700), 700);
+    }
+
+    #[test]
     fn only_rendering_inputs_restart_accumulation() {
         let frame = TraceFrame {
             inv_view_proj: [[0.0; 4]; 4],
@@ -1187,5 +1409,10 @@ mod tests {
             ..frame
         };
         assert_ne!(frame.key(), clay.key());
+        let albedo = TraceFrame {
+            pass: RenderPass::Albedo,
+            ..frame
+        };
+        assert_ne!(frame.key(), albedo.key(), "view passes are traced, so they restart");
     }
 }

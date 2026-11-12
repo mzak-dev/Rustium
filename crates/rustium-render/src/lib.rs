@@ -29,6 +29,6 @@ pub use materials::{GpuColor, GpuMaterialTable, MaterialBuffers};
 pub use offline::OfflineRenderer;
 pub use path_tracer::{
     Ground, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame, TraceImage,
-    TraceProgress,
+    TraceProgress, check_image_size, trace_image_bytes, trace_image_limits,
 };
 pub use viewport_renderer::{CameraUniform, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};

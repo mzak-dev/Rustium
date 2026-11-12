@@ -242,6 +242,7 @@ impl RenderState {
             progress: TraceProgress {
                 samples: 0,
                 target: 1,
+                partial: 0.0,
                 generation: 0,
             },
             message: None,
@@ -580,6 +581,7 @@ mod tests {
             TraceProgress {
                 samples: 0,
                 target: 100,
+                partial: 0.0,
                 generation: 1,
             },
             start,
@@ -589,6 +591,7 @@ mod tests {
             TraceProgress {
                 samples: 25,
                 target: 100,
+                partial: 0.0,
                 generation: 1,
             },
             start,

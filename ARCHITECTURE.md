@@ -30,19 +30,28 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 ## Path tracer (Render mode)
 
 Render mode swaps the raster pass for a progressive compute-shader path tracer ([ADR 0001](docs/adr/0001-hybrid-renderer.md)).
-Scene upload and traversal are separate so a ray-query backend can reuse the upload.
+Scene upload and traversal are separate: the software DDA and the hardware ray-query backend ([ADR 0013](docs/adr/0013-ray-query-backend.md)) share the upload and all shading.
 
 - **Upload** (`trace_scene.rs`): every Shape of a visible Model is uploaded once into a pooled storage buffer
   (chunks packed to one byte per voxel, `Arc` pointer equality skips unchanged ones), however many Instances show
   it. Each Shape gets a dense chunk-index grid, and a Model list records, per visible Model, its Transform
   (the same axis images and offset the raster uses) and its Shape's grid. Hidden Models are left out and the
-  Focus dim is ignored. `PathTracer::upload_scene(&Scene)` is the single entry point a ray-query backend would
-  reuse.
-- **Traversal** (`shaders/pathtracer.wgsl`, `trace_model` / `trace_voxels`): the ray is moved into each Model's
+  Focus dim is ignored. `PathTracer::upload_scene(&Scene)` is the single entry point; it also updates the
+  acceleration structures when the hardware engine is on.
+- **Traversal** (`shaders/pathtracer.wgsl`, `trace_model` / `trace_voxels`; software loop in `trace_dda.wgsl`): the ray is moved into each Model's
   Shape space and walked with a two-level DDA. Empty chunks are skipped in one jump, occupied ones are walked
   voxel by voxel; the nearest hit over all Models wins, earlier Models first where they overlap. With `inside` set, the same walk travels through glass or haze voxels
   and stops at the first different voxel. Hot paths are marked `HOT PATH` in the shader and in
   `PathTracer::encode`.
+- **Ray-query backend** (`ray_scene.rs`, `shaders/trace_rq.wgsl`): `pathtracer.wgsl` calls `trace_scene_hit()` and
+  `occluded()`, which come from `trace_dda.wgsl` (software) or `trace_rq.wgsl` (hardware); the shader module is
+  composed from the shared body plus one of them. Hardware builds one BLAS per Shape of procedural boxes, one per
+  occupied chunk, and a TLAS with one instance per visible Model (Transform as the instance matrix, instance index
+  = Model index, custom data = where the Shape's boxes start). A candidate box runs the same `trace_voxels` on a
+  one-cell view of the chunk grid, so hits are identical. BLASes are rebuilt only when a Shape's chunk set
+  changes. `RayTracing` (Auto, Software, Hardware) is the preference, `TraceEngine` the result; `GpuContext`
+  requests `EXPERIMENTAL_RAY_QUERY` only when the adapter has it. Rays inside glass use the DDA in both engines.
+  Settings → Performance sets it, the Render inspector's Engine row shows the active one.
 - **Shading**: next-event sun sampling (soft cone), cosine-weighted diffuse bounces, metal, clear-coat, glass
   (Fresnel + refraction, tinted by the base color), emission found by path hits, an analytic sky with presets, and
   a ground of None, Studio or Shadow catcher.

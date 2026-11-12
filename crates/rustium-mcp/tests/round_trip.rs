@@ -127,6 +127,18 @@ fn a_client_lists_tools_and_reads_the_model_through_the_ui_thread() {
         "{reply}"
     );
 
+    // The retired `material` key must be an error, not a silent erase.
+    let reply = call(
+        &url,
+        5,
+        "set_voxels",
+        &json!({"voxels": [{"x": 1, "y": 2, "z": 3, "material": 5}]}),
+    );
+    assert!(
+        reply["result"]["isError"] == json!(true) || reply.get("error").is_some(),
+        "{reply}"
+    );
+
     let wakes = fixture.wakes.load(Ordering::SeqCst);
     assert_eq!(wakes, 2, "one wake per request that reached the UI thread");
     drop(fixture.server);

@@ -31,6 +31,8 @@ pub(crate) struct ResolveInput {
     pub(crate) samples: u32,
     /// Whether depth of field is on.
     pub(crate) defocus: bool,
+    /// Edge length in pixels of one block of the Pixel style.
+    pub(crate) block: u32,
 }
 
 impl ResolveInput {
@@ -251,12 +253,7 @@ impl Resolver {
         let denoise = input.denoises();
         let params = Params {
             inv_view_proj: input.inv_view_proj,
-            image: [
-                input.size.0,
-                input.size.1,
-                input.style.index(),
-                pixel_block(input.size.1),
-            ],
+            image: [input.size.0, input.size.1, input.style.index(), input.block],
             options: [
                 u32::from(denoise),
                 outline_width(input.size.1),
@@ -312,6 +309,7 @@ mod tests {
             pass: RenderPass::Beauty,
             samples: 1,
             defocus: false,
+            block: 2,
         };
         assert!(!input.denoises());
         assert!(

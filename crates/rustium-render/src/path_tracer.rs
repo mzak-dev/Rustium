@@ -236,7 +236,7 @@ impl TraceFrame {
         }
     }
 
-    fn resolve_input(&self, samples: u32) -> ResolveInput {
+    fn resolve_input(&self, samples: u32, block: u32) -> ResolveInput {
         ResolveInput {
             inv_view_proj: self.inv_view_proj,
             size: self.size,
@@ -245,6 +245,7 @@ impl TraceFrame {
             pass: self.pass,
             samples,
             defocus: self.lens.is_some_and(|lens| lens.radius > 0.0),
+            block,
         }
     }
 }
@@ -336,6 +337,7 @@ struct ResolveKey {
     style: RenderStyle,
     denoise: bool,
     pass: RenderPass,
+    block: u32,
 }
 
 /// The compute pipeline, its accumulation textures and the GPU scene it walks.
@@ -365,6 +367,13 @@ pub struct PathTracer {
     /// First row of the sample the viewport is tracing band by band; `0` between samples.
     sweep_row: u32,
     budget: BandBudget,
+    /// Whether the view (or anything else that restarts accumulation) changed since the previous frame.
+    changed: bool,
+    /// Block size of the coarse picture shown until the first sample of the current view is complete; `None` once
+    /// the picture is fine everywhere.
+    coarse: Option<u32>,
+    /// Frames since the displayed picture was last resolved.
+    since_resolve: u32,
     /// When the viewport last encoded a frame that traced, to time the frames.
     last_traced: Option<Instant>,
     /// Corners of the visible Models, for the depth pass.
@@ -377,6 +386,33 @@ pub struct PathTracer {
 const FRAME_BUDGET: Duration = Duration::from_millis(33);
 /// The first band of a sweep, in rows, before any frame time is known.
 const FIRST_BAND_ROWS: u32 = 128;
+/// The most frames one sweep of the picture may be spread over.
+const MAX_SWEEP_FRAMES: u32 = 32;
+/// The coarsest block of the preview picture shown while the view changes.
+const MAX_PREVIEW_BLOCK: u32 = 16;
+/// While a sweep is running the displayed picture is re-resolved (and denoised) at least this often, in frames; it is
+/// always resolved when a sweep completes.
+const RESOLVE_EVERY: u32 = 8;
+
+/// The frame as the coarse picture shows it: the Pixel style (one traced pixel per block, copied over the block)
+/// without denoising.
+fn coarse_frame(frame: &TraceFrame) -> TraceFrame {
+    TraceFrame {
+        style: RenderStyle::Pixel,
+        denoise: false,
+        ..*frame
+    }
+}
+
+/// The block of the coarse picture: at least `wanted`, and a whole number of the Pixel style's own blocks when that
+/// style is on, so the pixels the sweep traces are the ones the coarse picture reads.
+fn coarse_block(wanted: u32, style: RenderStyle, style_block: u32) -> u32 {
+    if style == RenderStyle::Pixel {
+        wanted.max(style_block).div_ceil(style_block) * style_block
+    } else {
+        wanted
+    }
+}
 
 /// Decides how many rows of the picture one interface frame traces, so a slow GPU keeps the interface responsive: the
 /// band shrinks when frames take too long and grows back when there is time to spare. A full sweep of all bands adds
@@ -396,8 +432,17 @@ impl BandBudget {
         }
     }
 
+    /// The fewest rows a band may have: one workgroup row, but never so few that a sweep takes more than
+    /// [`MAX_SWEEP_FRAMES`] frames. Frame time that does not scale with the band (interface, present, copies) would
+    /// otherwise shrink the band without making the frame any shorter.
+    fn minimum_rows(height: u32) -> u32 {
+        (height.div_ceil(MAX_SWEEP_FRAMES).div_ceil(WORKGROUP) * WORKGROUP)
+            .max(WORKGROUP)
+            .min(height.max(1))
+    }
+
     /// Adapts to the time the last frame took (interface and trace together) and returns the rows for the next one,
-    /// at least one workgroup row and at most `height`.
+    /// at least [`BandBudget::minimum_rows`] and at most `height`.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -407,7 +452,7 @@ impl BandBudget {
         if !self.timed {
             return height;
         }
-        let minimum = WORKGROUP.min(height.max(1));
+        let minimum = Self::minimum_rows(height);
         if let Some(took) = last_frame {
             let ratio = FRAME_BUDGET.as_secs_f64() / took.as_secs_f64().max(1.0e-4);
             // Inside a 25% window around the budget the band stays; outside it moves by at most a factor of two.
@@ -422,6 +467,21 @@ impl BandBudget {
             self.rows = (self.rows / WORKGROUP * WORKGROUP).max(minimum);
         }
         self.rows
+    }
+
+    /// Edge length of the blocks of the coarse picture that covers the whole image while a new view has no complete
+    /// sample yet; `None` when the GPU traces the whole picture within the budget anyway. A block costs one ray, so
+    /// the picture takes about `1 / block²` of a full sample.
+    fn preview_block(self, height: u32) -> Option<u32> {
+        if !self.timed || self.rows >= height {
+            return None;
+        }
+        let ratio = f64::from(height) / f64::from(self.rows.max(1));
+        let mut block = 2;
+        while f64::from(block * block) < ratio && block < MAX_PREVIEW_BLOCK {
+            block *= 2;
+        }
+        Some(block)
     }
 }
 
@@ -645,6 +705,9 @@ impl PathTracer {
             samples_done: 0,
             sweep_row: 0,
             budget: BandBudget::new(),
+            changed: false,
+            coarse: None,
+            since_resolve: 0,
             last_traced: None,
             bounds: None,
             target_samples: 0,
@@ -765,31 +828,66 @@ impl PathTracer {
         frame: &TraceFrame,
     ) {
         let frame = self.prepare(device, frame);
+        let height = frame.size.1;
         let passes = (frame.running || self.samples_done == 0) && self.samples_done < self.target_samples;
         let now = Instant::now();
+        let mut refresh = false;
         if passes {
-            // The time since the last traced frame is what this GPU needs for a frame; a long gap was an idle
-            // interface, not a slow GPU.
-            let took = self
-                .last_traced
-                .map(|then| now.saturating_duration_since(then))
-                .filter(|took| *took < Duration::from_secs(1));
-            let rows = self.budget.next_rows(took, frame.size.1);
-            let end = (self.sweep_row + rows).min(frame.size.1);
-            self.write_params(queue, &frame, 1, self.sweep_row..end);
-            self.encode_trace_pass(encoder, frame.size, self.sweep_row..end);
-            self.last_traced = Some(now);
-            if end >= frame.size.1 {
-                self.sweep_row = 0;
-                self.samples_done += 1;
-            } else {
-                self.sweep_row = end;
+            if self.changed {
+                // The picture of the old view is stale.
+                self.coarse = None;
+            }
+            if self.samples_done == 0 && self.sweep_row == 0 && self.coarse.is_none() {
+                self.coarse = self
+                    .budget
+                    .preview_block(height)
+                    .map(|block| coarse_block(block, frame.style, resolve::pixel_block(height)));
+                if let Some(block) = self.coarse {
+                    // A new view that the GPU cannot trace within the frame budget: show the whole picture at low
+                    // resolution now, never a mix of the new view in some rows and the old one in the rest.
+                    let coarse = coarse_frame(&frame);
+                    self.write_params(queue, &coarse, 1, 0..height, block);
+                    self.encode_trace_pass(encoder, frame.size, 0..height);
+                    self.last_traced = None;
+                    refresh = true;
+                }
+            }
+            if !refresh {
+                // The time since the last traced frame is what this GPU needs for a frame; a long gap was an idle
+                // interface, not a slow GPU.
+                let took = self
+                    .last_traced
+                    .map(|then| now.saturating_duration_since(then))
+                    .filter(|took| *took < Duration::from_secs(10));
+                let rows = self.budget.next_rows(took, height);
+                let end = (self.sweep_row + rows).min(height);
+                self.write_params(queue, &frame, 1, self.sweep_row..end, resolve::pixel_block(height));
+                self.encode_trace_pass(encoder, frame.size, self.sweep_row..end);
+                self.last_traced = Some(now);
+                if end >= height {
+                    self.sweep_row = 0;
+                    self.samples_done += 1;
+                    self.coarse = None;
+                    refresh = true;
+                } else {
+                    self.sweep_row = end;
+                }
             }
         } else {
             self.last_traced = None;
-            self.write_params(queue, &frame, 0, 0..frame.size.1);
+            self.write_params(queue, &frame, 0, 0..height, resolve::pixel_block(height));
         }
-        self.encode_resolve(queue, encoder, &frame, passes);
+        // The coarse picture is cheap to resolve (no denoising); the fine one only when a sweep completed or every
+        // few frames, so the full-image resolve is not a fixed cost of every band.
+        self.since_resolve += 1;
+        let fresh = passes && (refresh || self.coarse.is_some() || self.since_resolve >= RESOLVE_EVERY);
+        if fresh {
+            self.since_resolve = 0;
+        }
+        match self.coarse {
+            Some(block) => self.encode_resolve(queue, encoder, &coarse_frame(&frame), block, fresh),
+            None => self.encode_resolve(queue, encoder, &frame, resolve::pixel_block(height), fresh),
+        }
         let Some(accumulation) = &self.accumulation else {
             return;
         };
@@ -846,7 +944,13 @@ impl PathTracer {
         self.samples_done = 0;
         while self.samples_done < self.target_samples {
             let count = BATCH.min(self.target_samples - self.samples_done);
-            self.write_params(queue, &frame, count, 0..frame.size.1);
+            self.write_params(
+                queue,
+                &frame,
+                count,
+                0..frame.size.1,
+                resolve::pixel_block(frame.size.1),
+            );
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("path tracer offline encoder"),
             });
@@ -864,7 +968,7 @@ impl PathTracer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("path tracer resolve encoder"),
         });
-        self.encode_resolve(queue, &mut encoder, &frame, true);
+        self.encode_resolve(queue, &mut encoder, &frame, resolve::pixel_block(frame.size.1), true);
         queue.submit(std::iter::once(encoder.finish()));
         self.read_image(device, queue).map(Some)
     }
@@ -891,7 +995,8 @@ impl PathTracer {
             self.rebuild_groups(device);
         }
         let key = frame.key();
-        if self.key != Some(key) {
+        self.changed = self.key != Some(key);
+        if self.changed {
             self.key = Some(key);
             self.samples_done = 0;
             self.sweep_row = 0;
@@ -902,7 +1007,14 @@ impl PathTracer {
     }
 
     /// Uploads the uniforms of the trace pass (`count` samples) and of the present pass.
-    fn write_params(&self, queue: &wgpu::Queue, frame: &TraceFrame, count: u32, rows: std::ops::Range<u32>) {
+    fn write_params(
+        &self,
+        queue: &wgpu::Queue,
+        frame: &TraceFrame,
+        count: u32,
+        rows: std::ops::Range<u32>,
+        block: u32,
+    ) {
         let size = frame.size;
         let region = frame.region.map_or([0, 0, size.0, size.1], |region| {
             [
@@ -940,12 +1052,7 @@ impl PathTracer {
                 self.scene.model_count(),
             ],
             ground: [0.45, 0.45, 0.44, 0.0],
-            style: [
-                frame.style.index(),
-                resolve::pixel_block(size.1),
-                u32::from(self.samples_done == 0),
-                0,
-            ],
+            style: [frame.style.index(), block, u32::from(self.samples_done == 0), 0],
             lens: [
                 lens.radius,
                 lens.focus_distance,
@@ -1036,6 +1143,7 @@ impl PathTracer {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &TraceFrame,
+        block: u32,
         fresh: bool,
     ) {
         let key = ResolveKey {
@@ -1043,13 +1151,18 @@ impl PathTracer {
             style: frame.style,
             denoise: frame.denoise,
             pass: frame.pass,
+            block,
         };
         if !fresh && self.resolved_for == Some(key) {
             return;
         }
         self.resolved_for = Some(key);
-        self.resolver
-            .encode(queue, encoder, self.current, &frame.resolve_input(self.samples_done));
+        self.resolver.encode(
+            queue,
+            encoder,
+            self.current,
+            &frame.resolve_input(self.samples_done, block),
+        );
     }
 
     /// Copies the resolved image (denoised and styled as the last frame asked) to the CPU, blocking until the GPU has
@@ -1356,7 +1469,12 @@ mod tests {
         for _ in 0..20 {
             rows = budget.next_rows(Some(Duration::from_secs(2)), 1080);
         }
-        assert_eq!(rows, WORKGROUP, "never below one workgroup row");
+        assert_eq!(
+            rows,
+            BandBudget::minimum_rows(1080),
+            "never below the floor, however slow the frames are"
+        );
+        assert!(rows >= WORKGROUP);
         for _ in 0..20 {
             rows = budget.next_rows(Some(Duration::from_millis(5)), 1080);
         }
@@ -1366,6 +1484,47 @@ mod tests {
         assert_eq!(budget.next_rows(None, 40) % 8, 0, "bands are whole workgroup rows");
         budget.timed = false;
         assert_eq!(budget.next_rows(Some(Duration::from_secs(9)), 700), 700);
+    }
+
+    #[test]
+    fn frames_that_are_slow_for_other_reasons_do_not_collapse_the_band() {
+        let mut budget = BandBudget::new();
+        let mut rows = 0;
+        for _ in 0..40 {
+            rows = budget.next_rows(Some(Duration::from_millis(300)), 1080);
+        }
+        assert!(
+            1080_u32.div_ceil(rows) <= MAX_SWEEP_FRAMES,
+            "a sweep takes at most {MAX_SWEEP_FRAMES} frames: {rows} rows"
+        );
+        assert_eq!(BandBudget::minimum_rows(16), WORKGROUP);
+        assert_eq!(BandBudget::minimum_rows(4), 4);
+        // Frames longer than a second still adapt the band.
+        let mut budget = BandBudget::new();
+        budget.rows = 2000;
+        assert_eq!(budget.next_rows(Some(Duration::from_secs(5)), 4000), 1000);
+    }
+
+    #[test]
+    fn the_preview_picture_gets_coarser_the_more_the_gpu_lacks() {
+        let mut budget = BandBudget::new();
+        budget.rows = 1080;
+        assert_eq!(budget.preview_block(1080), None, "a fast GPU traces the whole picture");
+        budget.rows = 540;
+        assert_eq!(budget.preview_block(1080), Some(2));
+        budget.rows = 128;
+        assert_eq!(budget.preview_block(1080), Some(4));
+        budget.rows = 8;
+        assert_eq!(budget.preview_block(2160), Some(MAX_PREVIEW_BLOCK));
+        budget.timed = false;
+        assert_eq!(budget.preview_block(1080), None, "untimed frames trace everything");
+    }
+
+    #[test]
+    fn the_coarse_block_keeps_to_the_pixel_styles_own_blocks() {
+        assert_eq!(coarse_block(4, RenderStyle::Clay, 3), 4);
+        assert_eq!(coarse_block(4, RenderStyle::Pixel, 3), 6);
+        assert_eq!(coarse_block(2, RenderStyle::Pixel, 5), 5);
     }
 
     #[test]

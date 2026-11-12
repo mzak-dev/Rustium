@@ -348,7 +348,24 @@ fn paint_graph(painter: &egui::Painter, hud: &Hud<'_>, pointer: Option<Pos2>) {
         let bypassed = from_node.bypass || to_node.bypass;
         let color = if bypassed { color.gamma_multiply(0.45) } else { color };
         let points = wire_points(view.point(from), view.point(to), view.zoom);
-        painter.add(Shape::line(points, Stroke::new((2.0 * view.zoom).max(1.2), color)));
+        painter.add(Shape::line(
+            points.clone(),
+            Stroke::new((2.0 * view.zoom).max(1.2), color),
+        ));
+        // The links of the selected nodes carry flowing dashes, in the direction the values travel.
+        if !bypassed && (state.selection.contains(&link.from.node) || state.selection.contains(&link.to.node)) {
+            let time = super::seconds_between(0.0, painter.ctx().input(|input| input.time));
+            let dash = 6.0 * view.zoom;
+            let flow = Stroke::new((2.0 * view.zoom).max(1.2), Color32::from_white_alpha(170));
+            painter.extend(Shape::dashed_line_with_offset(
+                &points,
+                flow,
+                &[dash],
+                &[dash * 2.0],
+                (-time * 36.0 * view.zoom).rem_euclid(dash * 3.0),
+            ));
+            painter.ctx().request_repaint();
+        }
     }
     for node in graph.nodes() {
         paint_node(painter, hud, graph, view, node, pointer);
@@ -469,6 +486,12 @@ fn paint_node(
     } else {
         node.name.clone()
     };
+    let title_end = header.left()
+        + 25.0 * zoom
+        + painter
+            .layout_no_wrap(title.clone(), text_font(12.0, zoom, true), Color32::WHITE)
+            .size()
+            .x;
     painter.text(
         header.left_center() + vec2(25.0 * zoom, 0.0),
         Align2::LEFT_CENTER,
@@ -482,6 +505,18 @@ fn paint_node(
         effects::category_label(hud, spec.category)
     };
     let tag_color = if node.bypass { accent } else { theme::SUBTLE };
+    let tag_start = header.right()
+        - 10.0 * zoom
+        - painter
+            .layout_no_wrap(tag.clone(), text_font(10.0, zoom, false), Color32::WHITE)
+            .size()
+            .x;
+    // A long title keeps the header to itself: the category is already shown by the dot's color.
+    let tag = if tag_start - title_end < 8.0 * zoom && !node.bypass {
+        String::new()
+    } else {
+        tag
+    };
     painter.text(
         header.right_center() - vec2(10.0 * zoom, 0.0),
         Align2::RIGHT_CENTER,
@@ -1406,5 +1441,27 @@ fn click_widget(hud: &mut Hud<'_>, node: GraphNodeId, target: Target, widget: Wi
             hud.ui.effects.color_age = 0;
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustium_core::{GraphNodeKind, SampleMaterial};
+
+    use super::*;
+
+    #[test]
+    fn the_roof_slate_frame_encloses_the_nodes_it_groups() {
+        let graph = SampleMaterial::RoofSlate.build();
+        let frame = graph.frames().first().expect("the sample has a frame");
+        let frame = frame_rect(frame);
+        for node in graph.nodes() {
+            if matches!(
+                node.kind,
+                GraphNodeKind::Noise | GraphNodeKind::Mix | GraphNodeKind::Remap
+            ) {
+                assert!(frame.contains_rect(geometry(node).rect), "{:?} sticks out", node.kind);
+            }
+        }
     }
 }

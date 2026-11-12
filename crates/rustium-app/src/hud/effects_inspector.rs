@@ -1,10 +1,10 @@
 //! The Effects-mode inspector: Node, Library and Material tabs. It is drawn inside the shared inspector island.
 
-use egui::{Align2, Color32, DragValue, Grid, Id, Order, RichText, Sense, Slider, Stroke, StrokeKind, Ui, vec2};
+use egui::{Align2, Color32, DragValue, Grid, Id, Order, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 use fluent_bundle::FluentValue;
 use rustium_core::{
-    ColorId, Command, GraphEdit, GraphNode, GraphNodeId, GraphNodeKind, InputValue, NodeCategory, ParamKind,
-    ParamValue, RAMP_STOPS, RampStop,
+    ColorId, Command, GraphEdit, GraphNode, GraphNodeId, GraphNodeKind, InputValue, ParamKind, ParamValue, RAMP_STOPS,
+    RampStop,
 };
 
 use super::effects::{
@@ -120,9 +120,13 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
             let (dot, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
             ui.painter().rect_filled(dot, 2, color);
             ui.label(
-                RichText::new(node.display_name())
-                    .font(theme::bold(15.0))
-                    .color(theme::TEXT),
+                RichText::new(if node.name.is_empty() {
+                    kind_label(hud, node.kind)
+                } else {
+                    node.name.clone()
+                })
+                .font(theme::bold(15.0))
+                .color(theme::TEXT),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
@@ -148,12 +152,13 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
                 .spacing(vec2(8.0, 7.0))
                 .show(ui, |ui| {
                     ui.label(widgets::muted(hud.tr("effects-node-name")));
-                    if let Some(name) = committed_text(
+                    if let Some(name) = widgets::text_field(
                         ui,
                         egui::IdSalt::new(("node-name", node.id.get())),
                         &node.name,
                         true,
                         Some(&kind_label(hud, node.kind)),
+                        f32::INFINITY,
                     ) {
                         edits.push(GraphEdit::RenameNode { node: node.id, name });
                     }
@@ -183,6 +188,9 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
                         }
                     }
                 });
+            if node.kind == GraphNodeKind::Noise {
+                note(ui, hud.tr("effects-per-voxel-hint"));
+            }
             for edit in edits {
                 let merge = !matches!(edit, GraphEdit::RenameNode { .. });
                 graph_edit(hud, edit, merge);
@@ -212,10 +220,7 @@ fn input_row(
         InputValue::Float(current) if !linked => {
             ui.label(widgets::muted(label));
             let mut number = *current;
-            ui.spacing_mut().slider_width = 110.0;
-            let changed = ui
-                .add(Slider::new(&mut number, range.0..=range.1).max_decimals(2))
-                .changed();
+            let changed = number_field(ui, &mut number, range, 2);
             ui.end_row();
             changed.then_some(GraphEdit::SetInput {
                 node,
@@ -262,16 +267,17 @@ fn param_row(
     let new = match (kind, value) {
         (ParamKind::Float { min, max, .. }, ParamValue::Float(current)) => {
             let mut number = *current;
-            ui.spacing_mut().slider_width = 110.0;
-            ui.add(Slider::new(&mut number, *min..=*max).max_decimals(2))
-                .changed()
-                .then_some(ParamValue::Float(number))
+            number_field(ui, &mut number, (*min, *max), 2).then_some(ParamValue::Float(number))
         }
         (ParamKind::Int { min, max, .. }, ParamValue::Int(current)) => {
-            let mut number = *current;
-            ui.add(DragValue::new(&mut number).range(*min..=*max).speed(0.2))
-                .changed()
-                .then_some(ParamValue::Int(number))
+            let mut number = f64::from(*current);
+            let changed = number_box(ui, &mut number, (f64::from(*min), f64::from(*max)), 0, 0.2);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the field is clamped to the parameter's i32 range"
+            )]
+            let int = number.round() as i32;
+            changed.then_some(ParamValue::Int(int))
         }
         (ParamKind::Bool { .. }, ParamValue::Bool(current)) => {
             let mut on = *current;
@@ -286,7 +292,7 @@ fn param_row(
                 .enumerate()
                 .map(|(i, option)| (u32::try_from(i).unwrap_or(0), core_text(hud, option)))
                 .collect();
-            if labels.len() <= 4 {
+            if labels.len() <= 3 {
                 widgets::segmented(ui, &mut chosen, &labels, true).then_some(ParamValue::Choice(chosen))
             } else {
                 let selected = labels
@@ -458,17 +464,9 @@ fn library_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         );
     });
     let query = hud.ui.effects.library_query.clone();
-    let kinds = effects::matching_kinds(hud, &query);
+    let kinds = effects::matching_kinds(hud, &query, true);
     let inspector = ui.clip_rect();
-    for category in NodeCategory::ALL {
-        let in_category: Vec<GraphNodeKind> = kinds
-            .iter()
-            .copied()
-            .filter(|kind| kind.spec().category == category)
-            .collect();
-        if in_category.is_empty() {
-            continue;
-        }
+    for (category, in_category) in effects::library_groups(&kinds) {
         ui.add_space(6.0);
         padded(ui, 0, |ui| {
             ui.label(
@@ -532,7 +530,7 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         return;
     };
     let index = u32::try_from(hud.ui.effects.graph).unwrap_or(0);
-    let name = graph.name.clone();
+    let name = effects::material_name(hud, hud.ui.effects.graph, graph);
     let casts = graph.casts_shadow;
     let editable = !locked(hud);
     let users = hud.editor.scene.colors_using(index);
@@ -544,9 +542,14 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             .spacing(vec2(8.0, 7.0))
             .show(ui, |ui| {
                 ui.label(widgets::muted(hud.tr("material-name")));
-                if let Some(text) =
-                    committed_text(ui, egui::IdSalt::new(("material-name", index)), &name, editable, None)
-                    && !text.trim().is_empty()
+                if let Some(text) = widgets::text_field(
+                    ui,
+                    egui::IdSalt::new(("material-name", index)),
+                    &name,
+                    editable,
+                    None,
+                    f32::INFINITY,
+                ) && !text.trim().is_empty()
                 {
                     effects::command(hud, &Command::RenameMaterial { index, name: text });
                 }
@@ -602,7 +605,7 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     padded(ui, 4, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let width = (ui.available_width() - 8.0) / 3.0;
+            let width = (ui.available_width() - 4.0) / 2.0;
             if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, true).clicked()
                 && effects::command(hud, &Command::DuplicateMaterial { index })
             {
@@ -612,8 +615,10 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             if sized_button(ui, &hud.tr("material-delete"), width, Look::On, editable).clicked() {
                 delete_material(hud, hud.ui.effects.graph);
             }
-            sized_button(ui, &hud.tr("effects-bake"), width, Look::Plain, false);
         });
+        ui.add_space(2.0);
+        let width = ui.available_width();
+        sized_button(ui, &hud.tr("effects-bake"), width, Look::Plain, false);
         if editable {
             note(ui, hud.tr("effects-bake-planned"));
         } else {
@@ -622,35 +627,49 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     });
 }
 
-/// A single-line text field that keeps the typed text in egui memory while it has focus and returns the
-/// new text once editing ends (focus lost or Enter) with a value that differs from `current`.
-fn committed_text(ui: &mut Ui, salt: egui::IdSalt, current: &str, enabled: bool, hint: Option<&str>) -> Option<String> {
-    let id = ui.make_persistent_id(salt);
-    let buffer_id = id.with("buffer");
-    let focused = ui.ctx().memory(|memory| memory.has_focus(id));
-    let mut text = if focused {
-        ui.data(|data| data.get_temp::<String>(buffer_id))
-            .unwrap_or_else(|| current.to_owned())
-    } else {
-        current.to_owned()
-    };
-    let mut edit = egui::TextEdit::singleline(&mut text)
-        .id(id)
-        .desired_width(f32::INFINITY);
-    if let Some(hint) = hint {
-        edit = edit.hint_text(hint);
+/// A boxed monospace number field: drag to scrub, click to type.
+fn number_field(ui: &mut Ui, value: &mut f32, range: (f32, f32), decimals: usize) -> bool {
+    let mut wide = f64::from(*value);
+    let speed = f64::from(range.1 - range.0).max(0.01) / 200.0;
+    let changed = number_box(ui, &mut wide, (f64::from(range.0), f64::from(range.1)), decimals, speed);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the value came from an f32 and stays in its range"
+    )]
+    {
+        *value = wide as f32;
     }
-    let response = ui.add_enabled(enabled, edit);
-    if response.has_focus() {
-        ui.data_mut(|data| data.insert_temp(buffer_id, text.clone()));
-    }
-    if response.lost_focus() {
-        ui.data_mut(|data| data.remove_temp::<String>(buffer_id));
-        if text != current {
-            return Some(text);
-        }
-    }
-    None
+    changed
+}
+
+fn number_box(ui: &mut Ui, value: &mut f64, range: (f64, f64), decimals: usize, speed: f64) -> bool {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            let visuals = ui.visuals_mut();
+            for state in [
+                &mut visuals.widgets.inactive,
+                &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active,
+            ] {
+                state.weak_bg_fill = Color32::TRANSPARENT;
+                state.bg_fill = Color32::TRANSPARENT;
+                state.bg_stroke = Stroke::NONE;
+            }
+            ui.style_mut().override_font_id = Some(egui::FontId::monospace(12.0));
+            ui.add_sized(
+                vec2(ui.available_width().max(40.0), 18.0),
+                DragValue::new(value)
+                    .range(range.0..=range.1)
+                    .speed(speed)
+                    .fixed_decimals(decimals),
+            )
+            .changed()
+        })
+        .inner
 }
 
 /// "Assign to more palette colors": the Palette; a click moves a Color to this Material or back to the Default.

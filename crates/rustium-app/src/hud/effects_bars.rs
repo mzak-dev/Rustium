@@ -11,7 +11,7 @@ use rustium_render::CompileStatus;
 
 use super::effects::{self, EffectsTab, GraphTool, PreviewShape, rgb};
 use super::widgets::{self, Look};
-use super::{Glass, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, corner, island};
+use super::{Glass, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, corner, fit_key, fit_level, island};
 use crate::icons::Icon;
 use crate::theme;
 
@@ -37,7 +37,27 @@ pub(crate) fn preview_view_rect(screen: Rect) -> Rect {
     Rect::from_min_max(pos2(island.left(), island.top() + PREVIEW_HEADER), island.max)
 }
 
+/// The most compact layouts of the islands that share the window's centre.
+const TOP_MAX_LEVEL: u8 = 3;
+const HOTBAR_MAX_LEVEL: u8 = 3;
+
 pub(crate) fn top_centre(ctx: &Context, hud: &mut Hud<'_>) {
+    let budget = centre_budget(ctx, hud, "top-left", "top-right");
+    let name = effects::current(hud).map(|graph| graph.name.clone());
+    let users = hud
+        .editor
+        .scene
+        .colors_using(u32::try_from(hud.ui.effects.graph).unwrap_or(0))
+        .len();
+    let key = fit_key(&[
+        &hud.settings.language,
+        &hud.settings.ui_scale_percent,
+        &hud.ui.effects.graph,
+        &name,
+        &users,
+    ]);
+    // 0: everything. 1: no "Used by". 2: also no inactive tab names. 3: only the Material.
+    let level = fit_level(ctx, hud, "effects-top", budget, key, TOP_MAX_LEVEL);
     island(
         ctx,
         hud,
@@ -57,31 +77,40 @@ pub(crate) fn top_centre(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(TOP_BAR_HEIGHT - 8.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                widgets::text_button(ui, &hud.tr("effects-materials"), 32.0, Look::On, true);
-                widgets::text_button(ui, &hud.tr("effects-textures"), 32.0, Look::Plain, false)
-                    .on_hover_text(hud.tr("planned"));
-                widgets::text_button(ui, &hud.tr("effects-scripts"), 32.0, Look::Plain, false)
-                    .on_hover_text(hud.tr("planned"));
-                widgets::divider(ui, 32.0);
+                if level < 3 {
+                    widgets::text_button(ui, &hud.tr("effects-materials"), 32.0, Look::On, true);
+                }
+                if level < 2 {
+                    widgets::text_button(ui, &hud.tr("effects-textures"), 32.0, Look::Plain, false)
+                        .on_hover_text(hud.tr("planned"));
+                    widgets::text_button(ui, &hud.tr("effects-scripts"), 32.0, Look::Plain, false)
+                        .on_hover_text(hud.tr("planned"));
+                }
+                if level < 3 {
+                    widgets::divider(ui, 32.0);
+                }
                 material_menu(ui, hud);
-                widgets::divider(ui, 32.0);
-                used_by(ui, hud, 18.0, 6);
+                if level < 1 {
+                    widgets::divider(ui, 32.0);
+                    used_by(ui, hud, 18.0, 6);
+                }
             });
         },
     );
 }
 
 fn material_menu(ui: &mut Ui, hud: &mut Hud<'_>) {
-    let name = effects::current(hud).map_or_else(String::new, |graph| graph.name.clone());
+    let selected = hud.ui.effects.graph;
+    let name = effects::current(hud).map_or_else(String::new, |graph| effects::material_name(hud, selected, graph));
     let button = widgets::dropdown_button(ui, &name);
     let names: Vec<String> = hud
         .editor
         .scene
         .material_graphs()
         .iter()
-        .map(|graph| graph.name.clone())
+        .enumerate()
+        .map(|(index, graph)| effects::material_name(hud, index, graph))
         .collect();
-    let selected = hud.ui.effects.graph;
     egui::Popup::menu(&button).show(|ui| {
         ui.set_min_width(180.0);
         for (index, name) in names.iter().enumerate() {
@@ -182,12 +211,23 @@ const TOOLS: [ToolInfo; 6] = [
     },
 ];
 
+/// The tools sit at the middle of the left edge, moved up when the window is too short to clear the Preview island
+/// (but never into the top islands).
+fn tools_place(ctx: &Context, hud: &Hud<'_>) -> Place {
+    let screen = ctx.content_rect();
+    let height = hud.ui.island_rects.get("graph-tools").map_or(300.0, egui::Rect::height);
+    let highest = screen.top() + MARGIN + TOP_BAR_HEIGHT + 8.0;
+    let lowest = preview_island_rect(screen).top() - 8.0 - height;
+    let centred = screen.center().y - height / 2.0;
+    Place::Fixed(pos2(screen.left() + MARGIN, centred.min(lowest).max(highest)))
+}
+
 pub(crate) fn tools(ctx: &Context, hud: &mut Hud<'_>) {
     island(
         ctx,
         hud,
         "graph-tools",
-        Place::Anchor(Align2::LEFT_CENTER, vec2(MARGIN, 0.0)),
+        tools_place(ctx, hud),
         Intro {
             delay: 0.18,
             from: vec2(-16.0, 0.0),
@@ -220,14 +260,7 @@ pub(crate) fn tools(ctx: &Context, hud: &mut Hud<'_>) {
                     }
                     let name = hud.tr(info.key);
                     let description = hud.tr(&format!("{}-desc", info.key));
-                    let response = response.on_hover_ui(|ui| {
-                        ui.set_max_width(236.0);
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(name).font(theme::bold(12.0)));
-                            ui.label(widgets::mono(info.key_label, 10.0).color(theme::MUTED));
-                        });
-                        ui.label(widgets::muted(description).size(11.0));
-                    });
+                    widgets::side_tip(&response, &name, info.key_label, &description);
                     if response.clicked() {
                         run_tool(ui.ctx(), hud, info);
                     }
@@ -246,7 +279,11 @@ fn run_tool(ctx: &Context, hud: &mut Hud<'_>, info: &ToolInfo) {
         "gt-add" => {
             let screen = ctx.content_rect();
             let free = effects::free_area(screen, hud.ui.inspector_open);
+            if effects::locked(hud) {
+                return;
+            }
             hud.ui.effects.add_popup = Some(effects::AddPopup {
+                selected: 0,
                 at: free.center(),
                 query: String::new(),
                 fresh: true,
@@ -264,6 +301,9 @@ fn run_tool(ctx: &Context, hud: &mut Hud<'_>, info: &ToolInfo) {
 pub(crate) fn preview(ctx: &Context, hud: &mut Hud<'_>) {
     let screen = ctx.content_rect();
     let rect = preview_island_rect(screen);
+    let empty =
+        hud.ui.effects.preview == PreviewShape::Model && hud.editor.scene.used_voxels(rustium_core::NodeId::ROOT) == 0;
+    let hint = hud.tr("preview-empty");
     egui::Area::new(Id::unique("effects-preview"))
         .order(Order::Middle)
         .fixed_pos(rect.min)
@@ -320,6 +360,12 @@ pub(crate) fn preview(ctx: &Context, hud: &mut Hud<'_>) {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             widgets::segmented(&mut inner, &mut hud.ui.effects.preview, &options, true);
+            if empty {
+                let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
+                let painter = ui.painter_at(body);
+                let galley = painter.layout(hint, FontId::proportional(11.0), theme::MUTED, body.width() - 32.0);
+                painter.galley(body.center() - galley.size() / 2.0, galley, theme::MUTED);
+            }
         });
     // Only the header blurs what is behind it; the body is the live 3D view.
     hud.glass.push(Glass {
@@ -345,21 +391,35 @@ fn corner_patch(painter: &egui::Painter, corner_point: Pos2, radius: f32, x_sign
     ));
 }
 
-/// Highlight, mid and shadow colours of the ball that stands for Material `index` in the hotbar.
+/// Light, mid and dark colours of the ball that stands for Material `index` in the hotbar, derived from the graph's
+/// Surface constants and the first Palette Color that uses it (so renaming a Material changes nothing).
 fn swatch(hud: &Hud<'_>, index: usize, graph: &MaterialGraph) -> [Color32; 3] {
-    if let Some(sample) = SampleMaterial::ALL
-        .into_iter()
-        .find(|sample| sample.label().eq_ignore_ascii_case(&graph.name))
-    {
-        return sample.swatch().map(rgb);
-    }
+    let surface = graph.surface_constants();
     let used = hud
         .editor
         .scene
         .colors_using(u32::try_from(index).unwrap_or(0))
         .into_iter()
         .find_map(|id| hud.editor.scene.palette().get(id).map(|color| color.color));
-    let mid = used.unwrap_or([0x9a, 0xa1, 0xab]);
+    let mut mid = used.unwrap_or([0x9a, 0xa1, 0xab]).map(f32::from);
+    let mut light = 1.35_f32;
+    let mut dark = 0.45_f32;
+    if surface.metallic > 0.5 {
+        light = 1.7;
+        dark = 0.3;
+    }
+    if surface.transmission > 0.0 {
+        // Glass reads pale and bluish.
+        let pale = [0xb8_u8, 0xd4, 0xe0].map(f32::from);
+        for (channel, target) in mid.iter_mut().zip(pale) {
+            *channel += (target - *channel) * surface.transmission * 0.7;
+        }
+    }
+    if surface.emission_strength > 0.0 {
+        mid = surface.emission_color.map(f32::from);
+        light = 1.25;
+        dark = 0.75;
+    }
     let scale = |factor: f32| {
         mid.map(|channel| {
             #[expect(
@@ -367,16 +427,31 @@ fn swatch(hud: &Hud<'_>, index: usize, graph: &MaterialGraph) -> [Color32; 3] {
                 clippy::cast_sign_loss,
                 reason = "the result is clamped to a byte"
             )]
-            let value = (f32::from(channel) * factor).clamp(0.0, 255.0) as u8;
+            let value = (channel * factor).clamp(0.0, 255.0) as u8;
             value
         })
     };
-    [rgb(scale(1.35)), rgb(mid), rgb(scale(0.45))]
+    [rgb(scale(light)), rgb(scale(1.0)), rgb(scale(dark))]
 }
 
 const HOTBAR_VISIBLE: usize = 12;
 
 pub(crate) fn hotbar(ctx: &Context, hud: &mut Hud<'_>) {
+    let budget = centre_budget(ctx, hud, "effects-hints", "effects-readout");
+    let count = hud.editor.scene.material_graphs().len();
+    let key = fit_key(&[
+        &hud.settings.language,
+        &hud.settings.ui_scale_percent,
+        &count,
+        &hud.ui.effects.graph,
+    ]);
+    // 0: everything. 1: no Material info. 2: at most six Materials. 3: at most three.
+    let level = fit_level(ctx, hud, "materials-hotbar", budget, key, HOTBAR_MAX_LEVEL);
+    let visible = match level {
+        0 | 1 => HOTBAR_VISIBLE,
+        2 => 6,
+        _ => 3,
+    };
     island(
         ctx,
         hud,
@@ -389,23 +464,24 @@ pub(crate) fn hotbar(ctx: &Context, hud: &mut Hud<'_>) {
         theme::island().inner_margin(egui::Margin::symmetric(8, 6)),
         |ui, hud| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                info_block(ui, hud);
-                let count = hud.editor.scene.material_graphs().len();
-                for index in 0..count.min(HOTBAR_VISIBLE) {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if level == 0 {
+                    info_block(ui, hud);
+                    widgets::divider(ui, 38.0);
+                }
+                for index in 0..count.min(visible) {
                     material_button(ui, hud, index);
                 }
-                if count > HOTBAR_VISIBLE {
-                    let more =
-                        widgets::text_button(ui, &format!("+{}", count - HOTBAR_VISIBLE), 38.0, Look::Plain, true);
+                if count > visible {
+                    let more = widgets::text_button(ui, &format!("+{}", count - visible), 38.0, Look::Plain, true);
                     egui::Popup::menu(&more).show(|ui| {
-                        for index in HOTBAR_VISIBLE..count {
+                        for index in visible..count {
                             let name = hud
                                 .editor
                                 .scene
                                 .material_graphs()
                                 .get(index)
-                                .map_or_else(String::new, |graph| graph.name.clone());
+                                .map_or_else(String::new, |graph| effects::material_name(hud, index, graph));
                             if ui.selectable_label(index == hud.ui.effects.graph, name).clicked() {
                                 hud.ui.effects.select_graph(index);
                             }
@@ -423,14 +499,11 @@ fn info_block(ui: &mut Ui, hud: &Hud<'_>) {
     let Some(graph) = effects::current(hud) else {
         return;
     };
-    ui.allocate_ui(vec2(104.0, 38.0), |ui| {
+    let name = effects::material_name(hud, hud.ui.effects.graph, graph);
+    ui.allocate_ui(vec2(112.0, 38.0), |ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(
-                egui::RichText::new(&graph.name)
-                    .font(theme::bold(12.0))
-                    .color(theme::TEXT),
-            );
+            ui.label(egui::RichText::new(name).font(theme::bold(12.0)).color(theme::TEXT));
             let info = hud.i18n.tr_args(
                 "effects-material-info",
                 &[(
@@ -465,14 +538,17 @@ fn material_button(ui: &mut Ui, hud: &mut Hud<'_>, index: usize) {
     painter.circle_filled(center - vec2(1.5, 1.5), 15.0, mid);
     painter.circle_filled(center - vec2(5.0, 5.5), 8.0, light);
     painter.circle_stroke(center, 19.0, Stroke::new(1.0, Color32::from_black_alpha(150)));
+    let number = ((index + 1) % 10).to_string();
+    let corner = rect.left_top() + vec2(1.0, 1.0);
+    painter.circle_filled(corner + vec2(4.0, 5.0), 7.0, Color32::from_black_alpha(170));
     painter.text(
-        rect.left_top() + vec2(0.0, 0.0),
-        Align2::LEFT_TOP,
-        ((index + 1) % 10).to_string(),
+        corner + vec2(4.0, 5.0),
+        Align2::CENTER_CENTER,
+        number,
         FontId::monospace(9.0),
         Color32::WHITE,
     );
-    let label = graph.name.clone();
+    let label = effects::material_name(hud, index, &graph);
     let response = response.on_hover_text(label);
     if response.clicked() {
         hud.ui.effects.select_graph(index);
@@ -549,8 +625,11 @@ fn new_button(ui: &mut Ui, hud: &mut Hud<'_>) {
         ui.separator();
         ui.label(widgets::muted(hud.tr("effects-new-sample")).size(11.0));
         for sample in SampleMaterial::ALL {
-            if ui.add_enabled(!full, egui::Button::new(sample.label())).clicked() {
-                add_material(hud, sample.build());
+            let label = effects::core_text(hud, sample.label());
+            if ui.add_enabled(!full, egui::Button::new(&label)).clicked() {
+                let mut graph = sample.build();
+                graph.name = label;
+                add_material(hud, graph);
                 ui.close();
             }
         }

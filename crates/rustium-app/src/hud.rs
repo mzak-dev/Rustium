@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 pub(crate) use effects::{EffectsState, GraphTool, PreviewShape};
 pub(crate) use effects_bars::preview_view_rect;
-use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
+use egui::{Align2, Color32, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
 pub(crate) use prompt::Prompt;
 use rustium_core::{Face, NodeId};
 use rustium_render::TraceEngine;
@@ -268,6 +268,13 @@ pub(crate) fn island<R>(
     add_contents: impl FnOnce(&mut Ui, &mut Hud<'_>) -> R,
 ) -> InnerResponse<R> {
     let progress = intro_progress(ctx, hud, intro.delay);
+    // The backdrop blur only samples the 3D view; over the node canvas (drawn by egui) glass would let node text
+    // show through, so Effects islands are nearly opaque.
+    let frame = if hud.ui.mode == Mode::Effects && frame.fill == crate::theme::PANEL {
+        frame.fill(Color32::from_rgba_unmultiplied(17, 19, 23, 242))
+    } else {
+        frame
+    };
     let offset = match hud.settings.motion {
         Motion::Full => intro.from * (1.0 - ease_out(progress)),
         Motion::Reduced | Motion::Off => Vec2::ZERO,

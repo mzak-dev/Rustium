@@ -198,6 +198,8 @@ fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
         EditKind::RenameGraphNode => "rename-graph-node",
         EditKind::BypassGraphNode => "bypass-graph-node",
         EditKind::GraphFrame => "graph-frame",
+        EditKind::RenameGraphFrame => "rename-graph-frame",
+        EditKind::ResizeGraphFrame => "resize-graph-frame",
         EditKind::AddGraphFrame => "add-graph-frame",
         EditKind::DuplicateGraphNodes => "duplicate-graph-nodes",
         EditKind::SetVoxels => "edit-set-voxels",

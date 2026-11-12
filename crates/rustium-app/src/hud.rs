@@ -281,9 +281,9 @@ pub(crate) fn island<R>(
 ) -> InnerResponse<R> {
     let progress = intro_progress(ctx, hud, intro.delay);
     // The backdrop blur only samples the 3D view; over the node canvas (drawn by egui) glass would let node text
-    // show through, so Effects islands are nearly opaque.
+    // show through, so Effects islands are fully opaque.
     let frame = if hud.ui.mode == Mode::Effects && frame.fill == crate::theme::PANEL {
-        frame.fill(Color32::from_rgba_unmultiplied(17, 19, 23, 242))
+        frame.fill(Color32::from_rgba_unmultiplied(17, 19, 23, 255))
     } else {
         frame
     };
@@ -439,7 +439,10 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     // egui hands keyboard focus to the first widget on Tab while the frame is built; remember whether the key was
     // meant for a shortcut before that happens.
     // Escape already took focus off a text field when the frame starts, so the previous frame's state counts too.
-    let text_focus = ctx.egui_wants_keyboard_input() || hud.ui.text_focus_before;
+    // The Add node popup takes the keys typed right after Tab, before its search field has focus.
+    let text_focus = ctx.egui_wants_keyboard_input()
+        || hud.ui.text_focus_before
+        || (hud.ui.mode == Mode::Effects && hud.ui.effects.add_popup.is_some());
     let tab_shortcut =
         hud.ui.mode == Mode::Effects && !text_focus && ctx.input(|input| input.key_pressed(egui::Key::Tab));
     // A popup, menu, the Tool wheel or a text field that is open when the frame starts owns the Escape key.

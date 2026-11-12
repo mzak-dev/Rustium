@@ -191,10 +191,12 @@ pub enum Command {
         /// The Material to add.
         graph: Box<MaterialGraph>,
     },
-    /// Copies a Material (the copy is named "NAME copy") and appends it.
+    /// Copies a Material and appends it.
     DuplicateMaterial {
         /// Index of the Material to copy.
         index: u32,
+        /// Name of the copy; empty names it "NAME copy" after the original.
+        name: String,
     },
     /// Deletes a Material. Colors that used it fall back to the Default material and later indices shift down by
     /// one.
@@ -305,7 +307,7 @@ pub fn apply(scene: &mut Scene, command: &Command) -> Result<Option<Edit>, Error
         Command::EditGraph { index, surface } => edit_graph(scene, *index, *surface),
         Command::AssignGraph { id, graph } => assign_graph(scene, *id, *graph),
         Command::AddMaterial { graph } => add_material(scene, graph),
-        Command::DuplicateMaterial { index } => duplicate_material(scene, *index),
+        Command::DuplicateMaterial { index, name } => duplicate_material(scene, *index, name),
         Command::DeleteMaterial { index } => delete_material(scene, *index),
         Command::RenameMaterial { index, name } => rename_material(scene, *index, name),
         Command::SetCastsShadow { index, casts_shadow } => set_casts_shadow(scene, *index, *casts_shadow),
@@ -374,9 +376,13 @@ fn add_material(scene: &mut Scene, graph: &MaterialGraph) -> Result<Option<Edit>
     Ok(Some(Edit::materials_change(EditKind::CreateGraph, scene, before)))
 }
 
-fn duplicate_material(scene: &mut Scene, index: u32) -> Result<Option<Edit>, Error> {
+fn duplicate_material(scene: &mut Scene, index: u32, name: &str) -> Result<Option<Edit>, Error> {
     let mut copy = graph_at(scene, index)?.clone();
-    copy.name = format!("{} copy", copy.name);
+    copy.name = if name.is_empty() {
+        format!("{} copy", copy.name)
+    } else {
+        name.chars().take(64).collect()
+    };
     add_material(scene, &copy).map(|edit| edit.map(|e| e.with_kind(EditKind::DuplicateGraph)))
 }
 
@@ -423,10 +429,23 @@ fn set_casts_shadow(scene: &mut Scene, index: u32, casts_shadow: bool) -> Result
 fn edit_material(scene: &mut Scene, index: u32, edit: &GraphEdit) -> Result<Option<Edit>, Error> {
     let before = snapshot(scene);
     let graph = unlocked_graph(scene, index)?;
+    let kind = match edit {
+        // One edit moves, renames and resizes a frame; the History names what actually changed.
+        GraphEdit::SetFrame { frame, label, size, .. } => graph.frame(*frame).map_or(edit.kind(), |found| {
+            if found.label != *label {
+                EditKind::RenameGraphFrame
+            } else if found.size.iter().zip(size).any(|(a, b)| (a - b).abs() > f32::EPSILON) {
+                EditKind::ResizeGraphFrame
+            } else {
+                edit.kind()
+            }
+        }),
+        _ => edit.kind(),
+    };
     if !graph.apply_edit(edit)? {
         return Ok(None);
     }
-    Ok(Some(Edit::materials_change(edit.kind(), scene, before)))
+    Ok(Some(Edit::materials_change(kind, scene, before)))
 }
 
 fn assign_graph_to_colors(scene: &mut Scene, ids: &[ColorId], graph: u32) -> Result<Option<Edit>, Error> {
@@ -1175,7 +1194,13 @@ mod material_graph_tests {
             EditKind::CastsShadow
         );
         assert_eq!(
-            run(&mut scene, Command::DuplicateMaterial { index: 1 }),
+            run(
+                &mut scene,
+                Command::DuplicateMaterial {
+                    index: 1,
+                    name: String::new()
+                }
+            ),
             EditKind::DuplicateGraph
         );
         assert_eq!(scene.material_graphs()[2].name, "Slate copy");
@@ -1230,7 +1255,13 @@ mod material_graph_tests {
             Err(Error::DefaultMaterialLocked)
         ));
         assert!(matches!(
-            apply(&mut scene, &Command::DuplicateMaterial { index: 4 }),
+            apply(
+                &mut scene,
+                &Command::DuplicateMaterial {
+                    index: 4,
+                    name: String::new()
+                }
+            ),
             Err(Error::UnknownGraph(4))
         ));
         apply(

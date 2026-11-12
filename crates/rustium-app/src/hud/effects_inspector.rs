@@ -152,10 +152,10 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
             let mut edits: Vec<GraphEdit> = Vec::new();
             Grid::new(("node-grid", node.id.get()))
                 .num_columns(2)
-                .min_col_width(82.0)
+                .min_col_width(ROW_LABEL_WIDTH)
                 .spacing(vec2(8.0, 7.0))
                 .show(ui, |ui| {
-                    ui.label(widgets::muted(hud.tr("effects-node-name")));
+                    row_label(ui, hud.tr("effects-node-name"));
                     if let Some(name) = widgets::text_field(
                         ui,
                         egui::IdSalt::new(("node-name", node.id.get())),
@@ -222,7 +222,7 @@ fn input_row(
     let label = core_text(hud, name);
     match value {
         InputValue::Float(current) if !linked => {
-            ui.label(widgets::muted(label));
+            row_label(ui, label);
             let mut number = *current;
             let changed = number_field(ui, &mut number, range, 2);
             ui.end_row();
@@ -233,9 +233,9 @@ fn input_row(
             })
         }
         InputValue::Color(current) if !linked => {
-            ui.label(widgets::muted(label));
+            row_label(ui, label);
             let mut rgb8 = effects::unit_to_bytes(*current);
-            let changed = egui::color_picker::color_edit_button_srgb(ui, &mut rgb8).changed();
+            let changed = color_button(ui, &mut rgb8);
             ui.end_row();
             changed.then_some(GraphEdit::SetInput {
                 node,
@@ -244,7 +244,7 @@ fn input_row(
             })
         }
         _ => {
-            ui.label(widgets::muted(label));
+            row_label(ui, label);
             let text = if linked {
                 hud.tr("effects-linked")
             } else {
@@ -267,7 +267,7 @@ fn param_row(
     value: &ParamValue,
 ) -> Option<GraphEdit> {
     let param = u8::try_from(index).unwrap_or(0);
-    ui.label(widgets::muted(core_text(hud, name)));
+    row_label(ui, core_text(hud, name));
     let new = match (kind, value) {
         (ParamKind::Float { min, max, .. }, ParamValue::Float(current)) => {
             let mut number = *current;
@@ -314,21 +314,31 @@ fn param_row(
             }
         }
         (ParamKind::Range { min, max, .. }, ParamValue::Range([low, high])) => {
-            let (mut a, mut b) = (*low, *high);
+            let (mut a, mut b) = (f64::from(*low), f64::from(*high));
+            let bounds = (f64::from(*min), f64::from(*max));
             let changed = ui
                 .horizontal(|ui| {
-                    let first = ui.add(DragValue::new(&mut a).range(*min..=*max).speed(0.01).max_decimals(2));
-                    let second = ui.add(DragValue::new(&mut b).range(*min..=*max).speed(0.01).max_decimals(2));
-                    first.changed() || second.changed()
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let half = ((ui.available_width() - 4.0) / 2.0).max(40.0);
+                    let first = ui
+                        .allocate_ui(vec2(half, 24.0), |ui| number_box(ui, &mut a, bounds, 2, 0.01))
+                        .inner;
+                    let second = ui
+                        .allocate_ui(vec2(half, 24.0), |ui| number_box(ui, &mut b, bounds, 2, 0.01))
+                        .inner;
+                    first || second
                 })
                 .inner;
-            changed.then_some(ParamValue::Range([a, b]))
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the fields stay inside the parameter's f32 range"
+            )]
+            let pair = [a as f32, b as f32];
+            changed.then_some(ParamValue::Range(pair))
         }
         (ParamKind::Color { .. }, ParamValue::Color(current)) => {
             let mut rgb8 = effects::unit_to_bytes(*current);
-            egui::color_picker::color_edit_button_srgb(ui, &mut rgb8)
-                .changed()
-                .then(|| ParamValue::Color(effects::bytes_to_unit(rgb8)))
+            color_button(ui, &mut rgb8).then(|| ParamValue::Color(effects::bytes_to_unit(rgb8)))
         }
         (ParamKind::Stops, ParamValue::Stops(stops)) => {
             let edited = ramp_editor(ui, hud, stops);
@@ -365,7 +375,7 @@ fn ramp_editor(ui: &mut Ui, hud: &Hud<'_>, stops: &[RampStop]) -> Option<Vec<Ram
                     )
                     .changed();
                 let mut rgb8 = effects::unit_to_bytes(stop.color);
-                if egui::color_picker::color_edit_button_srgb(ui, &mut rgb8).changed() {
+                if color_button(ui, &mut rgb8) {
                     stop.color = effects::bytes_to_unit(rgb8);
                     changed = true;
                 }
@@ -419,7 +429,7 @@ fn node_actions(ui: &mut Ui, hud: &mut Hud<'_>, node: Option<&GraphNode>) {
                     );
                 }
             }
-            if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, editable && !surface).clicked() {
+            if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, editable && !output).clicked() {
                 effects::duplicate_selection(hud);
             }
             let response = sized_button(ui, &hud.tr("effects-delete"), width, Look::On, editable && !surface);
@@ -560,9 +570,18 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
                 ui.end_row();
 
                 ui.label(widgets::muted(hud.tr("effects-used-by")));
-                ui.horizontal_wrapped(|ui| {
+                ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for id in users.iter().take(8) {
+                    // One line: as many chips as fit beside the "+" button, then a "+N" count.
+                    let room = ui.available_width() - if editable { 28.0 } else { 0.0 };
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "a small positive count of chips"
+                    )]
+                    let slots = (room / 26.0).floor().max(1.0) as usize;
+                    let shown = if users.len() > slots { slots - 1 } else { users.len() };
+                    for id in users.iter().take(shown) {
                         if let Some(color) = hud.editor.scene.palette().get(*id) {
                             let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
                             ui.painter().rect(
@@ -578,10 +597,15 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
                             ));
                         }
                     }
-                    let assign = widgets::icon_button(ui, Icon::Plus, 24.0, Look::Plain, true)
-                        .on_hover_text(hud.tr("material-assign-more"));
-                    if assign.clicked() {
-                        hud.ui.effects.assign_open = !hud.ui.effects.assign_open;
+                    if users.len() > shown {
+                        ui.label(widgets::mono(format!("+{}", users.len() - shown), 11.0));
+                    }
+                    if editable {
+                        let assign = widgets::icon_button(ui, Icon::Plus, 24.0, Look::Plain, true)
+                            .on_hover_text(hud.tr("material-assign-more"));
+                        if assign.clicked() {
+                            hud.ui.effects.assign_open = !hud.ui.effects.assign_open;
+                        }
                     }
                 });
                 ui.end_row();
@@ -603,7 +627,7 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     if hud.ui.effects.assign_open && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         hud.ui.effects.assign_open = false;
     }
-    if hud.ui.effects.assign_open {
+    if hud.ui.effects.assign_open && editable {
         assign_grid(ui, hud, index);
     }
     padded(ui, 0, |ui| {
@@ -614,7 +638,7 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             ui.spacing_mut().item_spacing.x = 4.0;
             let width = (ui.available_width() - 4.0) / 2.0;
             if sized_button(ui, &hud.tr("effects-duplicate"), width, Look::On, true).clicked()
-                && effects::command(hud, &Command::DuplicateMaterial { index })
+                && effects::command(hud, &effects::duplicate_command(hud, index))
             {
                 let last = hud.editor.scene.material_graphs().len().saturating_sub(1);
                 hud.ui.effects.select_graph(last);
@@ -666,6 +690,8 @@ fn number_box(ui: &mut Ui, value: &mut f64, range: (f64, f64), decimals: usize, 
                 state.bg_fill = Color32::TRANSPARENT;
                 state.bg_stroke = Stroke::NONE;
             }
+            // The focused field draws its own box; the frame around it is the only one.
+            ui.visuals_mut().extreme_bg_color = Color32::TRANSPARENT;
             ui.style_mut().override_font_id = Some(egui::FontId::monospace(12.0));
             ui.add_sized(
                 vec2(ui.available_width().max(40.0), 18.0),
@@ -726,4 +752,39 @@ fn assign_grid(ui: &mut Ui, hud: &mut Hud<'_>, graph: u32) {
             }
         }
     });
+}
+
+/// Width of the label column in the node grid, the same for every node so the fields line up.
+const ROW_LABEL_WIDTH: f32 = 96.0;
+
+/// A muted row label in a column of fixed width; long names are cut short.
+fn row_label(ui: &mut Ui, text: impl Into<String>) {
+    ui.allocate_ui_with_layout(
+        vec2(ROW_LABEL_WIDTH, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.add(egui::Label::new(widgets::muted(text)).truncate());
+        },
+    );
+}
+
+/// A swatch that opens the HUD color picker; returns whether the color changed.
+fn color_button(ui: &mut Ui, rgb8: &mut [u8; 3]) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(40.0, 20.0), Sense::click());
+    ui.painter().rect(
+        rect,
+        5,
+        rgb(*rgb8),
+        Stroke::new(1.0, Color32::from_white_alpha(77)),
+        StrokeKind::Inside,
+    );
+    let mut changed = false;
+    egui::Popup::from_toggle_button_response(&response).gap(6.0).show(|ui| {
+        let mut color = rgb(*rgb8);
+        if effects::color_picker(ui, &mut color) {
+            *rgb8 = [color.r(), color.g(), color.b()];
+            changed = true;
+        }
+    });
+    changed
 }

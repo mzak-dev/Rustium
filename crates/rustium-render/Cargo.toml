@@ -11,13 +11,14 @@ publish = false
 bytemuck.workspace = true
 glam.workspace = true
 rustium-core.workspace = true
+pollster.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
 png.workspace = true
-pollster.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

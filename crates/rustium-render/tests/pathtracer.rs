@@ -10,11 +10,11 @@
 
 use glam::{IVec3, Mat4, Vec3};
 use rustium_core::{
-    Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, Scene, SurfaceConstants, Transform,
-    VoxelTool, apply,
+    Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, SampleMaterial, Scene,
+    SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
-    GpuMaterialTable, Ground, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage,
+    Ground, MaterialBuffers, PathTracer, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceImage,
 };
 
 const SIZE: u32 = 96;
@@ -134,17 +134,13 @@ impl Default for Setup {
 }
 
 fn render(gpu: &Gpu, scene: &Scene, camera: &Camera, setup: &Setup) -> TraceImage {
-    let table = GpuMaterialTable::new(scene.palette(), scene.material_graphs());
-    let materials = wgpu::util::DeviceExt::create_buffer_init(
-        &gpu.device,
-        &wgpu::util::BufferInitDescriptor {
-            label: Some("test materials"),
-            contents: bytemuck::bytes_of(&table),
-            usage: wgpu::BufferUsages::UNIFORM,
-        },
-    );
+    let buffers = MaterialBuffers::new(&gpu.device);
+    buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut tracer = PathTracer::new(&gpu.device, &materials, format);
+    let mut tracer = PathTracer::new(&gpu.device, &buffers, format);
+    tracer
+        .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
+        .unwrap();
     tracer.upload_scene(&gpu.device, &gpu.queue, scene);
     let target = gpu
         .device
@@ -746,16 +742,12 @@ fn aov_passes_show_albedo_normals_and_depth() {
 fn offline_rendering_reaches_the_target_and_can_be_cancelled() {
     let gpu = gpu_or_skip!();
     let (scene, camera) = showpiece();
-    let table = GpuMaterialTable::new(scene.palette(), scene.material_graphs());
-    let materials = wgpu::util::DeviceExt::create_buffer_init(
-        &gpu.device,
-        &wgpu::util::BufferInitDescriptor {
-            label: Some("test materials"),
-            contents: bytemuck::bytes_of(&table),
-            usage: wgpu::BufferUsages::UNIFORM,
-        },
-    );
-    let mut tracer = PathTracer::new(&gpu.device, &materials, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let buffers = MaterialBuffers::new(&gpu.device);
+    buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
+    let mut tracer = PathTracer::new(&gpu.device, &buffers, wgpu::TextureFormat::Rgba8UnormSrgb);
+    tracer
+        .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
+        .unwrap();
     tracer.upload_scene(&gpu.device, &gpu.queue, &scene);
     let frame = TraceFrame {
         inv_view_proj: camera.view_proj.inverse().to_cols_array_2d(),
@@ -791,4 +783,80 @@ fn offline_rendering_reaches_the_target_and_can_be_cancelled() {
         .render_to_image(&gpu.device, &gpu.queue, &frame, |done| done < 4)
         .unwrap();
     assert!(cancelled.is_none(), "returning false from progress cancels the render");
+}
+
+/// Standard deviation of the luminance at the centre pixel of every voxel of a floor patch seen from above.
+fn voxel_spread(gpu: &Gpu, material: Option<SampleMaterial>) -> f32 {
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-5, 0, -5), IVec3::new(4, 0, 4), id(3));
+    if let Some(sample) = material {
+        let graph = u32::try_from(scene.material_graphs().len()).unwrap();
+        let add = Command::AddMaterial {
+            graph: Box::new(sample.build()),
+        };
+        apply(&mut scene, &add).unwrap();
+        apply(&mut scene, &Command::AssignGraph { id: id(3), graph }).unwrap();
+    }
+    let camera = Camera::looking_at(Vec3::new(0.0, 22.0, 0.01), Vec3::new(0.0, 0.0, 0.0));
+    let setup = Setup {
+        sky: Sky::Overcast,
+        ground: Ground::None,
+        sun_height: 70.0,
+        samples: 200,
+        ..Setup::default()
+    };
+    let image = render(gpu, &scene, &camera, &setup);
+    dump(material.map_or("flat", SampleMaterial::label), &image);
+    let mut values = Vec::new();
+    for x in -4..4 {
+        for z in -4..4 {
+            values.push(luminance(
+                &image,
+                camera.pixel(Vec3::new(x as f32 + 0.5, 1.0, z as f32 + 0.5)),
+            ));
+        }
+    }
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    (values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+}
+
+#[test]
+fn a_per_voxel_noise_graph_varies_the_color_from_voxel_to_voxel() {
+    let gpu = gpu_or_skip!();
+    let flat = voxel_spread(&gpu, None);
+    let slate = voxel_spread(&gpu, Some(SampleMaterial::RoofSlate));
+    assert!(
+        slate > flat * 1.4,
+        "roof slate varies per voxel (spread {slate}), the default does not (spread {flat})"
+    );
+}
+
+#[test]
+fn a_gradient_graph_changes_the_color_along_its_axis() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    // A tall pillar seen from the side: the grass gradient lightens the colour towards its tip.
+    fill(&mut scene, IVec3::new(-1, 0, -1), IVec3::new(1, 7, 1), id(3));
+    let graph = u32::try_from(scene.material_graphs().len()).unwrap();
+    let add = Command::AddMaterial {
+        graph: Box::new(SampleMaterial::Grass.build()),
+    };
+    apply(&mut scene, &add).unwrap();
+    apply(&mut scene, &Command::AssignGraph { id: id(3), graph }).unwrap();
+    let camera = Camera::looking_at(Vec3::new(0.0, 4.0, 18.0), Vec3::new(0.0, 4.0, 0.0));
+    let setup = Setup {
+        sky: Sky::Overcast,
+        ground: Ground::None,
+        sun_height: 60.0,
+        samples: 32,
+        ..Setup::default()
+    };
+    let image = render(&gpu, &scene, &camera, &setup);
+    dump("grass", &image);
+    let low = rgb(&image, camera.pixel(Vec3::new(0.0, 0.5, 2.0)));
+    let high = rgb(&image, camera.pixel(Vec3::new(0.0, 7.5, 2.0)));
+    assert!(
+        (high[1] / high[0].max(1e-3)) > (low[1] / low[0].max(1e-3)) * 1.05,
+        "the tip is greener: low {low:?} high {high:?}"
+    );
 }

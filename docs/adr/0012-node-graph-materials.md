@@ -11,6 +11,8 @@ A palette entry is now a Color (sRGB plus a reference to one Material), and a Ma
 
 ## Consequences
 
-- Changing a graph rebuilds the material pipelines, so the UI shows a "Compiled" status.
+- Changing a graph's shape rebuilds the material pipelines, so the UI shows a "Compiled" status. The compiled WGSL
+  contains no numbers: node constants live in a storage buffer, so editing a value only rewrites that buffer and
+  needs no rebuild. The rebuild runs on a worker thread and a failed compile keeps the previous pipelines.
 - Glass (transmission, IOR) lives on the Surface output and haze on a separate Volume output.
-- The core palette types were renamed from `Material`/`MaterialId` to `Color`/`ColorId`; `Material` now means the node graph only (still `MaterialGraph` in code until the graph editor lands).
+- The core palette types were renamed from `Material`/`MaterialId` to `Color`/`ColorId`; `Material` now means the node graph only (`MaterialGraph` in code).

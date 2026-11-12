@@ -45,13 +45,32 @@ Scene upload and traversal are separate so a ray-query backend can reuse the upl
 - **Shading**: next-event sun sampling (soft cone), cosine-weighted diffuse bounces, metal, clear-coat, glass
   (Fresnel + refraction, tinted by the base color), emission found by path hits, an analytic sky with presets, and
   a ground of None, Studio or Shadow catcher.
-- **Materials**: a Scene holds material graphs (index 0 is the Default material); each Palette Color points at one
-  (`Color::graph`). Today a graph is constant Surface parameters. `GpuMaterialTable` uploads one record per
-  graph and one entry per Color into a single uniform buffer shared by the raster pass and the path tracer.
+- **Materials**: a Scene holds Materials as node graphs (`MaterialGraph`, index 0 is the Default material); each
+  Palette Color points at one (`Color::graph`). `rustium-core` owns the data: typed sockets (Color / Vector / Float,
+  any converts to any), per-input constants, links (one per input, no cycles), frames, Bypass, stable node ids, the
+  node library as tables (`GraphNodeKind::spec`) and the starter Materials (`SampleMaterial`). Every change is a
+  `Command` (`EditMaterial` with a `GraphEdit`, `AddMaterial`, `DuplicateMaterial`, `DeleteMaterial`, ...) that
+  becomes an undoable Edit through the existing Palette-and-graphs snapshot.
+  `rustium-render::compile_materials` turns the graphs into WGSL: one `material_N` function per Material and a
+  `switch` over the Color's Material inside `evaluate_material`, placed at the marker line at the end of
+  `shaders/material.wgsl` (which holds the helper library: noise, cells, edge distance, bevel, hue, ramp).
+  **Shape versus numbers:** the source depends only on a graph's shape (nodes, links, Bypass, which sockets hold a
+  constant, ramp stop count). Every number lives in the `material_params` storage buffer (binding 7, fixed capacity,
+  slots are literals in the source). Editing a number rewrites that buffer; editing the shape rebuilds the raster
+  and path tracer pipelines on a worker thread (`MaterialCompiler`): the old pipelines keep drawing, the new ones
+  are swapped in together with their numbers, and a shader that fails to compile keeps the old ones and reports
+  `CompileStatus::Error` (`ViewportRenderer::material_status`, shown as the "Compiled" chip).
+  The Palette is a small uniform (`GpuMaterialTable`, binding 1).
   **Contract:** `fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>) -> Surface`
-  in `shaders/material.wgsl` is the only code that reads Color and Material data; both renderers shade through it. The
-  Effects milestone replaces its body with WGSL generated from the node graphs. Raster shows emission unlit and
-  treats transmission as opaque until M4.
+  in `shaders/material.wgsl` is the only code that reads Color and Material data; both renderers shade through it.
+  `Surface` now also carries `volume_density` and `volume_color` (the Volume output) for the M5 haze and glass work,
+  and a normal that the Voxel bevel may have bent (the raster shades with it). Inputs the node library needs beyond
+  the signature: `position` is in voxels, so the voxel cell, the distance to the voxel edge (Edge wear, Voxel bevel,
+  per-voxel Noise) follow from `position` and `normal` alone; the private `material_ao` is set by the raster pass from
+  the mesh's per-vertex occlusion and stays 1 in the path tracer, whose bounce light already darkens corners.
+  Approximations: the Space option of Noise, Cells and Gradient (Model / World) is stored but both read the Scene
+  position, and "Casts shadow" is stored on the Material but neither renderer reads it yet. Raster shows emission
+  unlit and treats transmission as opaque until M5.
 - **Accumulation**: one pass per frame writes `prev + (sample - prev) / n` into an `Rgba32Float` texture,
   ping-ponging two textures. Any change to camera, scene, Palette, light, size, bounces, region, style or lens
   restarts accumulation (`TraceKey`). The same pass writes a G-buffer on its first sample (normal and distance,

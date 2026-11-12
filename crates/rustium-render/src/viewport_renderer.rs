@@ -7,7 +7,9 @@ use wgpu::util::DeviceExt;
 use crate::error::Error;
 use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
-use crate::materials::GpuMaterialTable;
+use crate::material_compiler::{compile_materials, default_compiled};
+use crate::material_pipelines::{BuildContext, CompileStatus, MaterialCompiler};
+use crate::materials::MaterialBuffers;
 use crate::offline::OfflineRenderer;
 use crate::path_tracer::{PathTracer, TraceFrame, TraceImage, TraceProgress};
 
@@ -135,7 +137,8 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub struct ViewportRenderer {
     sample_count: u32,
     camera_buffer: wgpu::Buffer,
-    materials_buffer: wgpu::Buffer,
+    materials: MaterialBuffers,
+    compiler: MaterialCompiler,
     scene_group: wgpu::BindGroup,
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: Pipelines,
@@ -157,26 +160,8 @@ impl ViewportRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let materials_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("materials uniform"),
-            size: size_of::<GpuMaterialTable>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scene bind group layout"),
-            entries: &[uniform_entry(0), uniform_entry(1)],
-        });
+        let materials = MaterialBuffers::new(device);
+        let scene_layout = create_scene_layout(device);
         let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene bind group"),
             layout: &scene_layout,
@@ -187,7 +172,11 @@ impl ViewportRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: materials_buffer.as_entire_binding(),
+                    resource: materials.colors().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: materials.params().as_entire_binding(),
                 },
             ],
         });
@@ -196,15 +185,19 @@ impl ViewportRenderer {
             bind_group_layouts: &[Some(&scene_layout)],
             immediate_size: 0,
         });
-        let pipelines = create_pipelines(device, &pipeline_layout, sample_count);
+        let initial = default_compiled();
+        materials.write_params(gpu.queue(), &initial.params);
+        let pipelines = create_pipelines(device, &pipeline_layout, sample_count, &initial.shader_source());
         let line_buffer = create_line_buffer(device, 256);
         let instance_buffer = create_instance_buffer(device, 64);
         let glass = GlassPass::new(device, gpu.surface_srgb_format());
-        let tracer = PathTracer::new(device, &materials_buffer, SCENE_FORMAT);
+        let tracer = PathTracer::new(device, &materials, SCENE_FORMAT);
+        let compiler = MaterialCompiler::new(materials.clone(), initial.generated);
         Self {
             sample_count,
             camera_buffer,
-            materials_buffer,
+            materials,
+            compiler,
             scene_group,
             pipeline_layout,
             pipelines,
@@ -228,17 +221,54 @@ impl ViewportRenderer {
             return;
         }
         self.sample_count = sample_count;
-        self.pipelines = create_pipelines(gpu.device(), &self.pipeline_layout, sample_count);
+        self.pipelines = create_pipelines(
+            gpu.device(),
+            &self.pipeline_layout,
+            sample_count,
+            &self.compiler.live_source(),
+        );
+        let context = self.build_context(gpu);
+        self.compiler.restart_pending(&context);
         self.targets = None;
     }
 
-    /// Uploads the Colors and material graphs (sRGB converted to linear) for the raster pass and the path tracer,
-    /// and restarts path tracing.
+    /// Uploads the Colors (sRGB converted to linear) and compiles the Material graphs for the raster pass and the
+    /// path tracer, and restarts path tracing.
+    ///
+    /// Editing a number inside a graph only rewrites the constants buffer. Changing a graph's shape builds new
+    /// pipelines on a worker thread: [`ViewportRenderer::material_status`] reads `Compiling` meanwhile, the previous
+    /// pipelines keep drawing, and [`ViewportRenderer::poll_materials`] (also called by `render`) swaps the new ones
+    /// in. A graph that does not compile leaves the old pipelines in place and shows [`CompileStatus::Error`].
     pub fn set_materials(&mut self, gpu: &GpuContext, palette: &Palette, graphs: &[MaterialGraph]) {
-        let table = GpuMaterialTable::new(palette, graphs);
-        gpu.queue()
-            .write_buffer(&self.materials_buffer, 0, bytemuck::bytes_of(&table));
+        self.materials.write_colors(gpu.queue(), palette, graphs);
+        let context = self.build_context(gpu);
+        self.compiler.request(gpu.queue(), &context, compile_materials(graphs));
         self.tracer.restart();
+    }
+
+    /// Whether the Material pipelines match the Scene's graphs (the editor's "Compiled" chip).
+    pub fn material_status(&self) -> &CompileStatus {
+        self.compiler.status()
+    }
+
+    /// Swaps in Material pipelines whose background build has finished; returns whether it did. Cheap when idle.
+    pub fn poll_materials(&mut self, gpu: &GpuContext) -> bool {
+        let Some(built) = self.compiler.poll(gpu.queue()) else {
+            return false;
+        };
+        self.pipelines.raster = built.raster;
+        self.pipelines.raster_mirrored = built.raster_mirrored;
+        self.tracer.set_compute_pipeline(built.compute);
+        true
+    }
+
+    fn build_context(&self, gpu: &GpuContext) -> BuildContext {
+        BuildContext {
+            device: gpu.device().clone(),
+            raster_layout: self.pipeline_layout.clone(),
+            compute_layout: self.tracer.compute_pipeline_layout().clone(),
+            sample_count: self.sample_count,
+        }
     }
 
     /// Uploads every visible Model's Shape for the path tracer and restarts it. Cheap for unchanged chunks.
@@ -246,10 +276,13 @@ impl ViewportRenderer {
         self.tracer.upload_scene(gpu.device(), gpu.queue(), scene);
     }
 
-    /// A path tracer of its own for saving images and video frames on a worker thread. It shares the Color table
-    /// with the viewport and holds no Scene until [`OfflineRenderer::upload_scene`] is called.
+    /// A path tracer of its own for saving images and video frames on a worker thread. It gets a snapshot of the
+    /// Colors and Material constants and the shader the viewport runs right now (later Material edits do not reach
+    /// it), and holds no Scene until [`OfflineRenderer::upload_scene`] is called.
     pub fn offline_renderer(&self, gpu: &GpuContext) -> OfflineRenderer {
-        let tracer = PathTracer::new(gpu.device(), &self.materials_buffer, SCENE_FORMAT);
+        let materials = self.materials.snapshot(gpu.device(), gpu.queue());
+        let mut tracer = PathTracer::new(gpu.device(), &materials, SCENE_FORMAT);
+        tracer.set_material_source(gpu.device(), &self.compiler.live_source());
         OfflineRenderer::new(gpu.device().clone(), gpu.queue().clone(), tracer)
     }
 
@@ -318,6 +351,7 @@ impl ViewportRenderer {
         surface: &wgpu::TextureView,
         frame: &ViewportFrame<'_>,
     ) {
+        self.poll_materials(gpu);
         let size = gpu.size();
         if self.targets.as_ref().is_none_or(|targets| targets.size != size) {
             let targets = create_targets(gpu.device(), size, self.sample_count);
@@ -475,6 +509,37 @@ fn create_targets(device: &wgpu::Device, size: (u32, u32), sample_count: u32) ->
     }
 }
 
+/// Group 0 of the raster pipelines: camera (0), Palette colors (1) and Material constants (9).
+pub(crate) fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scene bind group layout"),
+        entries: &[
+            uniform_entry(0),
+            uniform_entry(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
 struct PipelineSpec<'spec> {
     label: &'spec str,
     module: &'spec wgpu::ShaderModule,
@@ -486,76 +551,79 @@ struct PipelineSpec<'spec> {
     blend: Option<wgpu::BlendState>,
 }
 
-fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample_count: u32) -> Pipelines {
-    let module = |label, source: &str| {
-        device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(
-                format!(
-                    "{}{}{source}",
-                    include_str!("shaders/material.wgsl"),
-                    include_str!("shaders/common.wgsl")
-                )
-                .into(),
-            ),
-        })
-    };
-    let raster_module = module("raster shader", include_str!("shaders/raster.wgsl"));
-    let grid_module = module("grid shader", include_str!("shaders/grid.wgsl"));
-    let lines_module = module("lines shader", include_str!("shaders/lines.wgsl"));
+fn build_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+    spec: &PipelineSpec<'_>,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(spec.label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: spec.module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: spec.buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: spec.topology,
+            cull_mode: spec.cull_mode,
+            front_face: spec.front_face,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(spec.depth_write),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: spec.module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: SCENE_FORMAT,
+                blend: spec.blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
 
-    let build = |spec: PipelineSpec<'_>| {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(spec.label),
-            layout: Some(layout),
-            vertex: wgpu::VertexState {
-                module: spec.module,
-                entry_point: Some("vs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: spec.buffers,
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: spec.topology,
-                cull_mode: spec.cull_mode,
-                front_face: spec.front_face,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(spec.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: spec.module,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: SCENE_FORMAT,
-                    blend: spec.blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        })
-    };
+/// The full WGSL of the raster shader: material module, camera uniform, then the shader proper.
+pub(crate) fn raster_shader_source(material_source: &str) -> String {
+    format!(
+        "{material_source}{}{}",
+        include_str!("shaders/common.wgsl"),
+        include_str!("shaders/raster.wgsl")
+    )
+}
 
+/// The two pipelines that run `evaluate_material` (normal and mirrored winding). They are rebuilt whenever the
+/// Material graphs change shape.
+pub(crate) fn create_raster_pair(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+    material_source: &str,
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raster shader"),
+        source: wgpu::ShaderSource::Wgsl(raster_shader_source(material_source).into()),
+    });
     let mesh_layout = wgpu::VertexBufferLayout {
         array_stride: size_of::<MeshVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Uint32],
-    };
-    let line_layout = wgpu::VertexBufferLayout {
-        array_stride: size_of::<LineVertex>() as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
     };
     let instance_layout = wgpu::VertexBufferLayout {
         array_stride: size_of::<InstanceData>() as u64,
@@ -563,39 +631,81 @@ fn create_pipelines(device: &wgpu::Device, layout: &wgpu::PipelineLayout, sample
         attributes: &wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4],
     };
     let raster = |label, front_face| {
-        build(PipelineSpec {
-            label,
-            module: &raster_module,
-            buffers: &[Some(mesh_layout.clone()), Some(instance_layout.clone())],
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: Some(wgpu::Face::Back),
-            front_face,
-            depth_write: true,
-            blend: None,
+        build_pipeline(
+            device,
+            layout,
+            sample_count,
+            &PipelineSpec {
+                label,
+                module: &module,
+                buffers: &[Some(mesh_layout.clone()), Some(instance_layout.clone())],
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                front_face,
+                depth_write: true,
+                blend: None,
+            },
+        )
+    };
+    (
+        raster("raster pipeline", wgpu::FrontFace::Ccw),
+        raster("mirrored raster pipeline", wgpu::FrontFace::Cw),
+    )
+}
+
+fn create_pipelines(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    sample_count: u32,
+    material_source: &str,
+) -> Pipelines {
+    // The grid and the overlay lines never shade voxels, so they do not carry the material module.
+    let module = |label, source: &str| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(format!("{}{source}", include_str!("shaders/common.wgsl")).into()),
         })
     };
+    let grid_module = module("grid shader", include_str!("shaders/grid.wgsl"));
+    let lines_module = module("lines shader", include_str!("shaders/lines.wgsl"));
+    let line_layout = wgpu::VertexBufferLayout {
+        array_stride: size_of::<LineVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+    };
+    let (raster, raster_mirrored) = create_raster_pair(device, layout, sample_count, material_source);
     Pipelines {
-        raster: raster("raster pipeline", wgpu::FrontFace::Ccw),
-        raster_mirrored: raster("mirrored raster pipeline", wgpu::FrontFace::Cw),
-        grid: build(PipelineSpec {
-            label: "grid pipeline",
-            module: &grid_module,
-            buffers: &[],
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            front_face: wgpu::FrontFace::Ccw,
-            depth_write: false,
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-        }),
-        lines: build(PipelineSpec {
-            label: "lines pipeline",
-            module: &lines_module,
-            buffers: &[Some(line_layout)],
-            topology: wgpu::PrimitiveTopology::LineList,
-            cull_mode: None,
-            front_face: wgpu::FrontFace::Ccw,
-            depth_write: false,
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-        }),
+        raster,
+        raster_mirrored,
+        grid: build_pipeline(
+            device,
+            layout,
+            sample_count,
+            &PipelineSpec {
+                label: "grid pipeline",
+                module: &grid_module,
+                buffers: &[],
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                front_face: wgpu::FrontFace::Ccw,
+                depth_write: false,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            },
+        ),
+        lines: build_pipeline(
+            device,
+            layout,
+            sample_count,
+            &PipelineSpec {
+                label: "lines pipeline",
+                module: &lines_module,
+                buffers: &[Some(line_layout)],
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                front_face: wgpu::FrontFace::Ccw,
+                depth_write: false,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            },
+        ),
     }
 }

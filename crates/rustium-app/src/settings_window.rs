@@ -124,7 +124,9 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
         .show(ctx, |ui| {
             let (_, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click());
             ui.painter().rect_filled(screen, 0, theme::SCRIM);
-            if backdrop.clicked() || ui.input(|input| input.key_pressed(Key::Escape)) {
+            if backdrop.clicked()
+                || (!hud.ui.keymap_ui.is_capturing() && ui.input(|input| input.key_pressed(Key::Escape)))
+            {
                 hud.ui.settings_section = None;
             }
             ui.painter().rect(
@@ -317,7 +319,7 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section) {
 }
 
 /// One settings row: label (and hint) on the left, the control on the right.
-fn row(ui: &mut Ui, label: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
+pub(crate) fn row(ui: &mut Ui, label: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
     let top = ui.cursor().top();
     ui.horizontal(|ui| {
         ui.set_min_height(50.0);
@@ -521,57 +523,7 @@ fn viewport(ui: &mut Ui, hud: &mut Hud<'_>) {
 }
 
 fn input(ui: &mut Ui, hud: &mut Hud<'_>) {
-    let i18n = hud.i18n;
-    let settings: &mut Settings = hud.settings;
-    row(ui, &i18n.tr("setting-keymap"), None, |ui| {
-        ui.add_enabled(
-            false,
-            egui::Button::new(i18n.tr("keymap-default")).min_size(vec2(170.0, 30.0)),
-        );
-    });
-    let bindings = [
-        (i18n.tr("tool-attach"), "B"),
-        (i18n.tr("tool-erase"), "E"),
-        (i18n.tr("tool-paint"), "P"),
-        (i18n.tr("tool-fill"), "F"),
-        (i18n.tr("tool-pick"), "I"),
-        (i18n.tr("tool-move"), "G"),
-        (i18n.tr("hint-tool-wheel"), "RMB"),
-        (i18n.tr("hint-orbit"), "MMB"),
-        (i18n.tr("binding-color-slots"), "1 – 0"),
-        (i18n.tr("binding-search"), "Ctrl K"),
-    ];
-    egui::Grid::new("bindings")
-        .num_columns(2)
-        .spacing(vec2(28.0, 0.0))
-        .show(ui, |ui| {
-            for pair in bindings.chunks(2) {
-                for (label, key) in pair {
-                    ui.horizontal(|ui| {
-                        ui.set_min_size(vec2(270.0, 36.0));
-                        ui.label(label.as_str());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            egui::Frame::new()
-                                .fill(Color32::from_white_alpha(15))
-                                .stroke(Stroke::new(1.0, Color32::from_white_alpha(46)))
-                                .corner_radius(6)
-                                .inner_margin(egui::Margin::symmetric(8, 3))
-                                .show(ui, |ui| ui.label(widgets::mono(*key, 11.0).color(theme::TEXT)));
-                        });
-                    });
-                }
-                ui.end_row();
-            }
-        });
-    row(ui, &i18n.tr("setting-invert-zoom"), None, |ui| {
-        widgets::switch(ui, &mut settings.invert_zoom, true);
-    });
-    row(
-        ui,
-        &i18n.tr("setting-rebind"),
-        Some(&i18n.tr("setting-rebind-hint")),
-        |_| {},
-    );
+    crate::settings_input::show(ui, hud);
 }
 
 fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {

@@ -5,6 +5,7 @@ use egui::{Align2, Context, FontId, Stroke, vec2};
 use super::widgets::{self, Look};
 use super::{Hud, Intro, MARGIN, Place, island};
 use crate::editor::Tool;
+use crate::keymap::Action;
 use crate::theme;
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
@@ -36,7 +37,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                         Look::Plain
                     };
                     let response = widgets::icon_button(ui, tool.icon(), 44.0, look, true);
-                    let key = format!("{:?}", tool.key());
+                    let key = hud.settings.keymap.label(Action::Tool(tool));
                     if hud.settings.shortcut_letters {
                         let color = if look == Look::Accent {
                             theme::ON_ACCENT
@@ -51,7 +52,11 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                             color.gamma_multiply(0.85),
                         );
                     }
-                    let tooltip = format!("{} ({key})", hud.tr(tool.message_key()));
+                    let tooltip = format!(
+                        "{}{}",
+                        hud.tr(tool.message_key()),
+                        hud.settings.keymap.hint(Action::Tool(tool))
+                    );
                     if response.on_hover_text(tooltip).clicked() {
                         hud.editor.tool = tool;
                     }

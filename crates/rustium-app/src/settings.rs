@@ -5,6 +5,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::keymap::Keymap;
 use crate::mcp::McpSettings;
 
 /// Interface language.
@@ -115,6 +116,7 @@ pub(crate) struct Settings {
     pub(crate) backend: Backend,
     pub(crate) vsync: bool,
     pub(crate) frame_limit: FrameLimit,
+    pub(crate) keymap: Keymap,
     pub(crate) mcp: McpSettings,
 }
 
@@ -143,6 +145,7 @@ impl Default for Settings {
             backend: Backend::Automatic,
             vsync: true,
             frame_limit: FrameLimit::MatchDisplay,
+            keymap: Keymap::default(),
             mcp: McpSettings::default(),
         }
     }
@@ -206,7 +209,10 @@ impl Settings {
                 self.field_of_view_degrees = defaults.field_of_view_degrees;
                 self.msaa_samples = defaults.msaa_samples;
             }
-            Section::Input => self.invert_zoom = defaults.invert_zoom,
+            Section::Input => {
+                self.invert_zoom = defaults.invert_zoom;
+                self.keymap = defaults.keymap;
+            }
             Section::Performance => {
                 self.backend = defaults.backend;
                 self.vsync = defaults.vsync;

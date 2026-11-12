@@ -1,14 +1,12 @@
 //! Render mode, the viewport itself: where the 16:9 frame sits, its labels, guides and progress bar, and what the
 //! pointer and keys do over it.
 
-use egui::{
-    Align2, Color32, Context, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Response, Stroke, StrokeKind, Ui,
-    pos2, vec2,
-};
+use egui::{Align2, Color32, Context, FontId, PointerButton, Pos2, Rect, Response, Stroke, StrokeKind, Ui, pos2, vec2};
 use glam::{Vec2 as GlamVec2, Vec3};
 use rustium_core::{HitTarget, NodeId, pick_scene};
 
 use super::{Hud, INSPECTOR_WIDTH, MARGIN, render_bottom};
+use crate::keymap::Action;
 use crate::render_mode::{OrbitAround, RenderTool};
 use crate::theme;
 
@@ -273,17 +271,12 @@ fn point_under(hud: &Hud<'_>, frame: Rect, position: Pos2) -> Option<Vec3> {
     })
 }
 
-/// Render-mode keyboard shortcuts: tool letters, F5 and Escape.
-pub(crate) fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
-    for tool in RenderTool::ALL {
-        if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, tool.key())) {
-            hud.ui.render.tool = tool;
-        }
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::F5)) {
-        render_bottom::toggle_render(hud);
-    }
-    if ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape)) {
-        hud.ui.render.region = None;
+/// Applies one Render-mode shortcut from the keymap.
+pub(crate) fn shortcut(hud: &mut Hud<'_>, action: Action) {
+    match action {
+        Action::RenderTool(tool) => hud.ui.render.tool = tool,
+        Action::RenderStart => render_bottom::toggle_render(hud),
+        Action::ClearRenderRegion => hud.ui.render.region = None,
+        _ => {}
     }
 }

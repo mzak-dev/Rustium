@@ -6,6 +6,7 @@ use egui::{Align2, Color32, Context, Id, Key, Rect, RichText, Sense, Stroke, Str
 use crate::hud::widgets::{self, Look};
 use crate::hud::{AppCommand, Glass, Hud};
 use crate::icons::Icon;
+use crate::keymap::Action;
 use crate::settings::Motion;
 use crate::theme;
 
@@ -125,13 +126,17 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 ui,
                 Icon::Attach,
                 &hud.tr("splash-new"),
-                "Ctrl N",
+                &hud.settings.keymap.label(Action::NewScene),
                 width,
                 Look::Accent,
                 true,
             )
             .clicked()
-                || ui.input(|input| input.modifiers.command && input.key_pressed(Key::N))
+                || hud
+                    .settings
+                    .keymap
+                    .chord(Action::NewScene)
+                    .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
             {
                 hud.send(AppCommand::NewScene);
                 hud.ui.splash_open = false;
@@ -140,13 +145,17 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 ui,
                 Icon::Folder,
                 &hud.tr("splash-open"),
-                "Ctrl O",
+                &hud.settings.keymap.label(Action::OpenFile),
                 width,
                 Look::Plain,
                 true,
             )
             .clicked()
-                || ui.input(|input| input.modifiers.command && input.key_pressed(Key::O))
+                || hud
+                    .settings
+                    .keymap
+                    .chord(Action::OpenFile)
+                    .is_some_and(|chord| ui.input(|input| chord.pressed(input)))
             {
                 hud.send(AppCommand::Open(None));
             }

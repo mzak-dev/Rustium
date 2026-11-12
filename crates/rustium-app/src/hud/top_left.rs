@@ -6,6 +6,7 @@ use egui::{Align2, Context, Image, PopupCloseBehavior, vec2};
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud, Intro, MARGIN, Mode, Place, TOP_BAR_HEIGHT, island};
 use crate::icons::Icon;
+use crate::keymap::Action;
 use crate::settings_window::Section;
 use crate::theme;
 
@@ -82,16 +83,44 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
                         .min_size(vec2(220.0, 28.0)),
                 )
             };
-            if item(ui, hud.tr("menu-new"), "Ctrl N", true).clicked() {
+            if item(
+                ui,
+                hud.tr("menu-new"),
+                &hud.settings.keymap.label(Action::NewScene),
+                true,
+            )
+            .clicked()
+            {
                 hud.send(AppCommand::NewScene);
             }
-            if item(ui, hud.tr("menu-open"), "Ctrl O", true).clicked() {
+            if item(
+                ui,
+                hud.tr("menu-open"),
+                &hud.settings.keymap.label(Action::OpenFile),
+                true,
+            )
+            .clicked()
+            {
                 hud.send(AppCommand::Open(None));
             }
-            if item(ui, hud.tr("menu-save"), "Ctrl S", true).clicked() {
+            if item(
+                ui,
+                hud.tr("menu-save"),
+                &hud.settings.keymap.label(Action::SaveFile),
+                true,
+            )
+            .clicked()
+            {
                 hud.send(AppCommand::Save);
             }
-            if item(ui, hud.tr("menu-save-as"), "Ctrl Shift S", true).clicked() {
+            if item(
+                ui,
+                hud.tr("menu-save-as"),
+                &hud.settings.keymap.label(Action::SaveFileAs),
+                true,
+            )
+            .clicked()
+            {
                 hud.send(AppCommand::SaveAs);
             }
             ui.separator();
@@ -112,7 +141,14 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
                 hud.send(AppCommand::RunScript);
             }
             ui.separator();
-            if item(ui, hud.tr("menu-settings"), "Ctrl ,", true).clicked() {
+            if item(
+                ui,
+                hud.tr("menu-settings"),
+                &hud.settings.keymap.label(Action::OpenSettings),
+                true,
+            )
+            .clicked()
+            {
                 hud.ui.settings_section = Some(Section::General);
             }
             if item(ui, hud.tr("menu-start-screen"), "", true).clicked() {

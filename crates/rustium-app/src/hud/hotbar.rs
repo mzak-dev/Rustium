@@ -7,6 +7,7 @@ use rustium_core::ColorId;
 use super::widgets::{self, Look};
 use super::{Glass, Hud, Intro, MARGIN, Place, island};
 use crate::icons::Icon;
+use crate::keymap::Action;
 use crate::settings::Motion;
 use crate::theme;
 
@@ -88,10 +89,11 @@ fn slot_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, slot: usize) {
         StrokeKind::Inside,
     );
     let number = ((slot + 1) % 10).to_string();
+    let key = hud.settings.keymap.label(Action::Slot(u8::try_from(slot).unwrap_or(0)));
     painter.text(
         rect.left_top() + vec2(3.0, 1.0),
         Align2::LEFT_TOP,
-        &number,
+        &key,
         FontId::monospace(9.0),
         Color32::WHITE,
     );

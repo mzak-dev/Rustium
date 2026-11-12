@@ -22,7 +22,7 @@ mod view_cube;
 mod viewport;
 pub(crate) mod widgets;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub(crate) use effects::{EffectsState, GraphTool, PreviewShape};
@@ -65,6 +65,10 @@ pub(crate) enum InspectorTab {
 
 /// Interface state that is not part of the document.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent open/closed flags of separate panels"
+)]
 pub(crate) struct UiState {
     pub(crate) started_at: Option<f64>,
     pub(crate) mode: Mode,
@@ -77,6 +81,10 @@ pub(crate) struct UiState {
     pub(crate) splash_opened_at: Option<f64>,
     pub(crate) settings_section: Option<Section>,
     pub(crate) settings_search: String,
+    /// The Interface scale shown while its slider is dragged; applied on release.
+    pub(crate) scale_draft: Option<u32>,
+    /// Whether a text field had keyboard focus at the end of the previous frame.
+    pub(crate) text_focus_before: bool,
     /// Where the Tool wheel is open, in points.
     pub(crate) tool_wheel: Option<Pos2>,
     /// Where a marquee drag started, in points.
@@ -97,6 +105,10 @@ pub(crate) struct UiState {
     pub(crate) maximize_button: Option<Rect>,
     /// Settings → Input: rebinding, search and file dialogs.
     pub(crate) keymap_ui: crate::settings_input::KeymapUi,
+    /// Where each island was drawn last frame, by id, so centre islands can keep clear of the corner ones.
+    pub(crate) island_rects: HashMap<String, Rect>,
+    /// How compact each shrinking island is drawn.
+    pub(crate) fit: HashMap<String, Fit>,
 }
 
 impl UiState {
@@ -113,6 +125,8 @@ impl UiState {
             splash_opened_at: None,
             settings_section: None,
             settings_search: String::new(),
+            scale_draft: None,
+            text_focus_before: false,
             tool_wheel: None,
             marquee: None,
             collapsed: HashSet::new(),
@@ -123,6 +137,8 @@ impl UiState {
             document_name: String::new(),
             maximize_button: None,
             keymap_ui: crate::settings_input::KeymapUi::default(),
+            island_rects: HashMap::new(),
+            fit: HashMap::new(),
         }
     }
 
@@ -275,11 +291,75 @@ pub(crate) fn island<R>(
             .max(frame.corner_radius.ne)
             .max(frame.corner_radius.se),
     );
-    hud.glass.push(Glass {
-        rect: response.response.rect,
-        radius,
-    });
+    let rect = response.response.rect;
+    hud.glass.push(Glass { rect, radius });
+    hud.ui.island_rects.insert(id.to_owned(), rect);
+    if let Some(fit) = hud.ui.fit.get_mut(id) {
+        fit.widths[usize::from(fit.level)] = rect.width();
+    }
     response
+}
+
+/// Space kept between islands that sit side by side.
+pub(crate) const ISLAND_GAP: f32 = 8.0;
+/// The narrowest a bottom-centre island gets; the bottom corner islands leave this much room.
+const CENTRE_MIN: f32 = 385.0;
+/// Number of layouts an island can shrink through, from 0 (full) up.
+pub(crate) const FIT_LEVELS: usize = 4;
+
+/// How compact an island is drawn and how wide each layout turned out to be.
+#[derive(Debug, Default)]
+pub(crate) struct Fit {
+    level: u8,
+    widths: [f32; FIT_LEVELS],
+    key: u64,
+}
+
+/// A hash of what decides the width of an island (the Tool, the language), to forget stale measurements.
+pub(crate) fn fit_key(parts: &[&dyn std::fmt::Debug]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        format!("{part:?}").hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// The layout an island must use to fit in `budget` points: the first of the levels `0..=max` whose measured width
+/// fits. Widths are measured when an island is drawn (see [`island`]), so a level that was never drawn is tried
+/// next frame. Call it before drawing the island with the same `id`.
+pub(crate) fn fit_level(ctx: &Context, hud: &mut Hud<'_>, id: &str, budget: f32, key: u64, max: u8) -> u8 {
+    let fit = hud.ui.fit.entry(id.to_owned()).or_default();
+    if fit.key != key {
+        *fit = Fit { key, ..Fit::default() };
+    }
+    let mut chosen = max;
+    for level in 0..=max {
+        let width = fit.widths[usize::from(level)];
+        if width == 0.0 || width <= budget {
+            chosen = level;
+            break;
+        }
+    }
+    fit.level = chosen;
+    if fit.widths[usize::from(chosen)] == 0.0 {
+        ctx.request_repaint();
+    }
+    chosen
+}
+
+/// Width available to an island centred in the window between the islands `left` and `right`, as drawn last frame.
+pub(crate) fn centre_budget(ctx: &Context, hud: &Hud<'_>, left: &str, right: &str) -> f32 {
+    let centre = ctx.content_rect().center().x;
+    match (hud.ui.island_rects.get(left), hud.ui.island_rects.get(right)) {
+        (Some(left), Some(right)) => 2.0 * (centre - left.right()).min(right.left() - centre) - 2.0 * ISLAND_GAP,
+        _ => f32::MAX,
+    }
+}
+
+/// Width a bottom corner island may take so the bottom-centre island still fits between the two.
+pub(crate) fn corner_budget(ctx: &Context) -> f32 {
+    (ctx.content_rect().width() - CENTRE_MIN) / 2.0 - ISLAND_GAP
 }
 
 fn intro_progress(ctx: &Context, hud: &Hud<'_>, delay: f32) -> f32 {
@@ -315,7 +395,8 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     }
     // egui hands keyboard focus to the first widget on Tab while the frame is built; remember whether the key was
     // meant for a shortcut before that happens.
-    let text_focus = ctx.egui_wants_keyboard_input();
+    // Escape already took focus off a text field when the frame starts, so the previous frame's state counts too.
+    let text_focus = ctx.egui_wants_keyboard_input() || hud.ui.text_focus_before;
     let tab_shortcut =
         hud.ui.mode == Mode::Effects && !text_focus && ctx.input(|input| input.key_pressed(egui::Key::Tab));
     // A popup, menu, the Tool wheel or a text field that is open when the frame starts owns the Escape key.
@@ -356,6 +437,7 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
         shortcuts(ctx, hud);
     }
     prompt::show(ctx, hud);
+    hud.ui.text_focus_before = ctx.egui_wants_keyboard_input();
 }
 
 /// Whether something that closes on Escape is open: an egui popup or menu, the Tool wheel, a Scene tree rename or

@@ -127,6 +127,40 @@ pub(crate) fn switch(ui: &mut Ui, on: &mut bool, enabled: bool) -> Response {
     response
 }
 
+/// A checkbox with its label to the right, like the native control the mockups use: accent fill when checked.
+pub(crate) fn checkbox(ui: &mut Ui, on: &mut bool, text: &str) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), FontId::proportional(11.0), theme::MUTED);
+    let (rect, mut response) = ui.allocate_exact_size(vec2(14.0 + 6.0 + galley.size().x, 18.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let accent = ui.visuals().selection.bg_fill;
+    let boxed = Rect::from_min_size(rect.left_center() - vec2(0.0, 7.0), Vec2::splat(14.0));
+    let painter = ui.painter();
+    if *on {
+        painter.rect_filled(boxed, 3, accent);
+        let point = |(x, y): (f32, f32)| boxed.min + vec2(x, y);
+        painter.add(egui::Shape::line(
+            vec![point((3.5, 7.2)), point((6.0, 9.8)), point((10.5, 4.6))],
+            Stroke::new(1.8, Color32::WHITE),
+        ));
+    } else {
+        painter.rect(
+            boxed,
+            3,
+            theme::FIELD,
+            Stroke::new(1.0, Color32::from_rgb(0x6b, 0x75, 0x83)),
+            StrokeKind::Inside,
+        );
+    }
+    let color = if response.hovered() { theme::TEXT } else { theme::MUTED };
+    painter.galley_with_override_text_color(rect.left_center() + vec2(20.0, -galley.size().y / 2.0), galley, color);
+    response
+}
+
 /// A segmented control; returns true when the value changed.
 pub(crate) fn segmented<T: PartialEq + Copy>(
     ui: &mut Ui,
@@ -142,8 +176,15 @@ pub(crate) fn segmented<T: PartialEq + Copy>(
         .inner_margin(2)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            // A right-to-left parent (Settings rows) also flips the layout of `horizontal`.
+            let flipped = ui.layout().prefer_right_to_left();
             ui.horizontal(|ui| {
-                for (option, label) in options {
+                let ordered: Vec<&(T, String)> = if flipped {
+                    options.iter().rev().collect()
+                } else {
+                    options.iter().collect()
+                };
+                for (option, label) in ordered.into_iter().map(|pair| (&pair.0, &pair.1)) {
                     let look = if *value == *option { Look::On } else { Look::Plain };
                     if text_button(ui, label, 22.0, look, enabled).clicked() && *value != *option {
                         *value = *option;
@@ -178,4 +219,75 @@ pub(crate) fn dropdown_button(ui: &mut Ui, text: &str) -> Response {
     let chevron = Rect::from_center_size(rect.right_center() - vec2(14.0, 0.0), Vec2::splat(14.0));
     Icon::ChevronDown.paint(ui.painter(), chevron, foreground);
     response
+}
+
+/// Widest a side tooltip gets, in points.
+const TIP_MAX_WIDTH: f32 = 236.0;
+/// Padding inside a side tooltip.
+const TIP_PAD: Vec2 = vec2(10.0, 8.0);
+
+/// The tooltip of a vertical toolbar button, like the mockup's `.tip`: a card to the right of the button with the
+/// name, a key cap showing the current binding and a one-line description.
+///
+/// Shows after the Settings tooltip delay while `response` is hovered; call it for every toolbar button.
+pub(crate) fn side_tip(response: &Response, name: &str, key: &str, description: &str) {
+    if !egui::Tooltip::should_show_tooltip(response, false) {
+        return;
+    }
+    let ctx = &response.ctx;
+    let (name_galley, key_galley, description_galley) = ctx.fonts_mut(|fonts| {
+        (
+            fonts.layout_no_wrap(name.to_owned(), theme::bold(12.0), theme::TEXT),
+            fonts.layout_no_wrap(key.to_owned(), FontId::monospace(10.0), theme::TEXT),
+            fonts.layout(
+                description.to_owned(),
+                FontId::proportional(11.0),
+                theme::MUTED,
+                TIP_MAX_WIDTH - 2.0 * TIP_PAD.x,
+            ),
+        )
+    });
+    let key_size = key_galley.size() + vec2(12.0, 2.0);
+    let width = (name_galley.size().x + 10.0 + key_size.x)
+        .max(description_galley.size().x)
+        .max(60.0);
+    let row = name_galley.size().y.max(key_size.y);
+    let size = vec2(width, row + 4.0 + description_galley.size().y) + 2.0 * TIP_PAD;
+    egui::Area::new(egui::Id::unique(("side-tip", response.id)))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .pivot(egui::Align2::LEFT_CENTER)
+        .fixed_pos(response.rect.right_center() + vec2(10.0, 0.0))
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let painter = ui.painter();
+            painter.rect(
+                rect,
+                9,
+                Color32::from_rgb(0x0b, 0x0d, 0x10),
+                Stroke::new(1.0, Color32::from_white_alpha(36)),
+                StrokeKind::Inside,
+            );
+            let inner = rect.shrink2(TIP_PAD);
+            painter.galley(
+                inner.left_top() + vec2(0.0, (row - name_galley.size().y) / 2.0),
+                name_galley,
+                theme::TEXT,
+            );
+            let cap_min = inner.right_top() - vec2(key_size.x, 0.0) + vec2(0.0, (row - key_size.y) / 2.0);
+            let cap = Rect::from_min_size(cap_min, key_size);
+            painter.rect(
+                cap,
+                5,
+                Color32::from_white_alpha(15),
+                Stroke::new(1.0, Color32::from_white_alpha(51)),
+                StrokeKind::Inside,
+            );
+            painter.galley(cap.center() - key_galley.size() / 2.0, key_galley, theme::TEXT);
+            painter.galley(
+                inner.left_top() + vec2(0.0, row + 4.0),
+                description_galley,
+                theme::MUTED,
+            );
+        });
 }

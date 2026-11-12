@@ -12,8 +12,10 @@ use crate::editor::Tool;
 use crate::icons::Icon;
 use crate::theme;
 
-/// The most compact layout.
-const MAX_LEVEL: u8 = 3;
+/// The most compact layout: Brush folded and the controls packed tighter.
+const MAX_LEVEL: u8 = 4;
+/// The first layout that folds the Brush buttons into one.
+const FOLD_LEVEL: u8 = 3;
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     let budget = centre_budget(ctx, hud, "top-left", "top-right");
@@ -37,7 +39,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
         |ui, hud| {
             ui.set_height(TOP_BAR_HEIGHT - 8.0);
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = if level >= MAX_LEVEL { 1.0 } else { 4.0 };
                 let tool = hud.editor.tool;
                 let ready = hud.editor.tool_ready();
                 let name = hud.tr(tool.message_key());
@@ -62,7 +64,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     return;
                 }
                 widgets::divider(ui, 32.0);
-                brush_buttons(ui, hud, level >= MAX_LEVEL);
+                brush_buttons(ui, hud, level >= FOLD_LEVEL);
                 widgets::divider(ui, 32.0);
                 if level < 2 {
                     ui.label(widgets::muted(hud.tr("size")));

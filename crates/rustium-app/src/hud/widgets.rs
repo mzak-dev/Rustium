@@ -67,6 +67,66 @@ pub(crate) fn text_button(ui: &mut Ui, text: &str, height: f32, look: Look, enab
     response
 }
 
+/// One row of a popup menu: full width, a check mark when `selected`, a subtle fill on hover and when selected.
+pub(crate) fn menu_row(ui: &mut Ui, text: &str, selected: bool) -> Response {
+    let width = 180.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 6, theme::HOVER);
+    } else if selected {
+        ui.painter().rect_filled(rect, 6, theme::ACTIVE);
+    }
+    if selected {
+        let origin = rect.left_center() + vec2(10.0, 0.0);
+        let check = [vec2(0.0, 0.0), vec2(3.0, 3.5), vec2(8.0, -3.5)].map(|offset| origin + offset);
+        ui.painter()
+            .add(egui::Shape::line(check.to_vec(), Stroke::new(1.6, theme::TEXT)));
+    }
+    let color = if selected || response.hovered() {
+        Color32::WHITE
+    } else {
+        theme::TEXT
+    };
+    ui.painter().text(
+        rect.left_center() + vec2(28.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.0),
+        color,
+    );
+    response
+}
+
+/// A dialog footer button of a fixed `size`; `Look::Accent` is the filled primary one, anything else is outlined.
+pub(crate) fn dialog_button(ui: &mut Ui, text: &str, size: Vec2, look: Look) -> Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let accent = look == Look::Accent;
+    let (fill, foreground) = if accent {
+        colors(ui, &response, Look::Accent, true)
+    } else if response.hovered() {
+        (theme::HOVER, Color32::WHITE)
+    } else {
+        (Color32::TRANSPARENT, theme::TEXT)
+    };
+    ui.painter().rect_filled(rect, 8, fill);
+    if !accent {
+        ui.painter().rect_stroke(
+            rect.shrink(0.5),
+            8,
+            Stroke::new(1.0, theme::FIELD_BORDER),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let font = if accent {
+        theme::bold(13.0)
+    } else {
+        FontId::proportional(12.0)
+    };
+    ui.painter()
+        .text(rect.center(), egui::Align2::CENTER_CENTER, text, font, foreground);
+    response
+}
+
 /// Icon followed by a label, e.g. the Palette button.
 pub(crate) fn icon_text_button(ui: &mut Ui, icon: Icon, text: &str, extra: &str, look: Look) -> Response {
     let font = FontId::proportional(12.0);

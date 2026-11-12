@@ -48,11 +48,11 @@ impl Section {
     fn icon(self) -> Icon {
         match self {
             Self::General => Icon::Settings,
-            Self::Interface => Icon::Palette,
+            Self::Interface => Icon::Panel,
             Self::Viewport => Icon::Cube,
-            Self::Input => Icon::Grid,
-            Self::Performance => Icon::Attach,
-            Self::Mcp => Icon::Folder,
+            Self::Input => Icon::Keyboard,
+            Self::Performance => Icon::Bolt,
+            Self::Mcp => Icon::Plug,
         }
     }
 
@@ -88,6 +88,7 @@ impl Section {
             Self::Performance => &[
                 "setting-device",
                 "setting-backend",
+                "setting-pt-device",
                 "setting-ray-tracing",
                 "setting-vsync",
                 "setting-frame-limit",
@@ -181,6 +182,22 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     }
 }
 
+/// Sections whose title, rows or (for Input) shortcut names contain `query`; every section when it is empty.
+fn matching_sections(hud: &Hud<'_>, query: &str) -> Vec<Section> {
+    Section::ALL
+        .into_iter()
+        .filter(|section| {
+            query.is_empty()
+                || hud.tr(section.title_key()).to_lowercase().contains(query)
+                || section
+                    .row_keys()
+                    .iter()
+                    .any(|key| hud.tr(key).to_lowercase().contains(query))
+                || (*section == Section::Input && crate::settings_input::any_action_matches(hud, query))
+        })
+        .collect()
+}
+
 fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
     // A short card has no room for the logo footer and gives the entries less height.
     let tight = rect.height() < 400.0;
@@ -193,36 +210,47 @@ fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (icon, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                    Icon::Search.paint(ui.painter(), icon, theme::SUBTLE);
+                    let (icon, _) = ui.allocate_exact_size(vec2(14.0, 22.0), Sense::hover());
+                    Icon::Search.paint(
+                        ui.painter(),
+                        Rect::from_center_size(icon.center(), vec2(14.0, 14.0)),
+                        theme::SUBTLE,
+                    );
                     let hint = hud.tr("settings-search");
                     ui.add(
                         egui::TextEdit::singleline(&mut hud.ui.settings_search)
                             .hint_text(hint)
                             .frame(egui::Frame::NONE)
+                            .align(egui::Align2::LEFT_CENTER)
+                            .min_size(vec2(0.0, 22.0))
                             .desired_width(f32::INFINITY),
                     );
                 });
             });
         ui.add_space(if tight { 4.0 } else { 10.0 });
         let query = hud.ui.settings_search.trim().to_lowercase();
-        let matching: Vec<Section> = Section::ALL
-            .into_iter()
-            .filter(|section| {
-                query.is_empty()
-                    || hud.tr(section.title_key()).to_lowercase().contains(&query)
-                    || section
-                        .row_keys()
-                        .iter()
-                        .any(|key| hud.tr(key).to_lowercase().contains(&query))
-            })
-            .collect();
+        let matching = matching_sections(hud, &query);
         // Searching jumps to the first section that has a match, where the matching rows are highlighted.
         let mut current = current;
         if let Some(first) = matching.first().filter(|_| !matching.contains(&current)) {
             current = *first;
             hud.ui.settings_section = Some(current);
             ui.ctx().request_repaint();
+        }
+        if matching.is_empty() {
+            ui.add_space(8.0);
+            ui.label(widgets::muted(hud.tr("settings-no-results")).size(12.0));
+        }
+        // A shortcut name typed into the main search also narrows the shortcut list on the Input page.
+        let applied_id = Id::unique("settings-filter-applied");
+        let applied: String = ui.ctx().data(|data| data.get_temp(applied_id)).unwrap_or_default();
+        if applied != query {
+            ui.ctx().data_mut(|data| data.insert_temp(applied_id, query.clone()));
+            hud.ui.keymap_ui.filter = if crate::settings_input::any_action_matches(hud, &query) {
+                query.clone()
+            } else {
+                String::new()
+            };
         }
         for section in matching {
             let (row, response) =
@@ -319,7 +347,13 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section, compact: b
         });
     });
 
+    let query = hud.ui.settings_search.trim().to_lowercase();
     ui.scope_builder(UiBuilder::new().max_rect(rows), |ui| {
+        if !query.is_empty() && matching_sections(hud, &query).is_empty() {
+            ui.add_space(24.0);
+            ui.label(widgets::muted(hud.tr("settings-no-results")).size(13.0));
+            return;
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| match section {
@@ -337,13 +371,21 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section, compact: b
         footer.top(),
         Stroke::new(1.0, Color32::from_white_alpha(20)),
     );
-    ui.scope_builder(UiBuilder::new().max_rect(footer.shrink2(vec2(pad, 13.0))), |ui| {
+    ui.scope_builder(UiBuilder::new().max_rect(footer.shrink2(vec2(pad, 12.0))), |ui| {
         ui.horizontal_centered(|ui| {
-            if widgets::text_button(ui, &hud.tr("settings-reset-section"), 32.0, Look::On, true).clicked() {
+            let reset = hud.tr("settings-reset-section");
+            let reset_width = ui
+                .painter()
+                .layout_no_wrap(reset.clone(), egui::FontId::proportional(12.0), Color32::WHITE)
+                .size()
+                .x
+                + 32.0;
+            if widgets::dialog_button(ui, &reset, vec2(reset_width, 34.0), Look::Plain).clicked() {
                 hud.settings.reset_section(section);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::text_button(ui, &hud.tr("settings-done"), 32.0, Look::Accent, true).clicked() {
+                let done = vec2(if compact { 84.0 } else { 114.0 }, 34.0);
+                if widgets::dialog_button(ui, &hud.tr("settings-done"), done, Look::Accent).clicked() {
                     hud.ui.settings_section = None;
                 }
                 if !compact {
@@ -421,6 +463,13 @@ pub(crate) fn row(ui: &mut Ui, label: &str, hint: Option<&str>, control: impl Fn
         .unwrap_or_default();
     let row_rect = Rect::from_min_size(area.min, vec2(area.width(), height));
     if !query.is_empty() && label.to_lowercase().contains(&query) {
+        // Bring the first match of a new search into view once, so scrolling afterwards stays free.
+        let seen_id = Id::unique("settings-scrolled-to");
+        let seen: String = ui.ctx().data(|data| data.get_temp(seen_id)).unwrap_or_default();
+        if seen != query {
+            ui.ctx().data_mut(|data| data.insert_temp(seen_id, query.clone()));
+            ui.scroll_to_rect(row_rect, Some(egui::Align::Center));
+        }
         ui.painter().rect_filled(
             row_rect.shrink2(vec2(-8.0, 3.0)),
             8,
@@ -686,25 +735,86 @@ fn input(ui: &mut Ui, hud: &mut Hud<'_>) {
 fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
     let i18n = hud.i18n;
     let adapter = hud.adapter_name;
+    let adapters = hud.adapters;
     let settings: &mut Settings = hud.settings;
-    row(ui, &i18n.tr("setting-device"), None, |ui| {
-        ui.label(widgets::mono(adapter, 11.0));
-    });
+    let backends: Vec<(Backend, String)> = rustium_render::selectable_backends(adapters)
+        .into_iter()
+        .map(Backend::from)
+        .map(|backend| {
+            let name = match backend {
+                Backend::Automatic => i18n.tr("backend-automatic"),
+                Backend::Vulkan => "Vulkan".to_owned(),
+                Backend::DirectX12 => "DirectX 12".to_owned(),
+            };
+            (backend, name)
+        })
+        .collect();
+    // A saved choice this machine cannot offer (settings copied from another PC) is shown as it is, so it can be
+    // changed; startup already fell back to Automatic.
+    let mut backends = backends;
+    if !backends.iter().any(|(backend, _)| *backend == settings.backend) {
+        backends.push((settings.backend, format!("{:?}", settings.backend)));
+    }
+    let wanted = rustium_render::GraphicsBackend::from(settings.backend);
+    let mut devices: Vec<&str> = Vec::new();
+    for choice in adapters {
+        let fits = wanted == rustium_render::GraphicsBackend::Automatic || choice.backend == Some(wanted);
+        if fits && !devices.contains(&choice.name.as_str()) {
+            devices.push(&choice.name);
+        }
+    }
+    row(
+        ui,
+        &i18n.tr("setting-device"),
+        Some(&i18n.tr("settings-restart")),
+        |ui| {
+            let automatic = i18n.tr("backend-automatic");
+            let shown = settings.gpu_adapter.clone().unwrap_or_else(|| automatic.clone());
+            ComboBox::from_id_salt("gpu-device")
+                .selected_text(shown)
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut settings.gpu_adapter, None, automatic);
+                    for name in &devices {
+                        ui.selectable_value(&mut settings.gpu_adapter, Some((*name).to_owned()), *name);
+                    }
+                })
+                .response
+                .on_hover_text(format!("{}: {adapter}", i18n.tr("setting-device-current")));
+        },
+    );
     row(
         ui,
         &i18n.tr("setting-backend"),
         Some(&i18n.tr("settings-restart")),
         |ui| {
-            widgets::segmented(
-                ui,
-                &mut settings.backend,
-                &[
-                    (Backend::Automatic, i18n.tr("backend-automatic")),
-                    (Backend::Vulkan, "Vulkan".to_owned()),
-                    (Backend::DirectX12, "DirectX 12".to_owned()),
-                ],
-                true,
-            );
+            let before = settings.backend;
+            widgets::segmented(ui, &mut settings.backend, &backends, true);
+            let wanted = rustium_render::GraphicsBackend::from(settings.backend);
+            if settings.backend != before
+                && let Some(name) = &settings.gpu_adapter
+                && !adapters.iter().any(|choice| {
+                    choice.name == *name
+                        && (wanted == rustium_render::GraphicsBackend::Automatic || choice.backend == Some(wanted))
+                })
+            {
+                settings.gpu_adapter = None;
+            }
+        },
+    );
+    row(
+        ui,
+        &i18n.tr("setting-pt-device"),
+        Some(&i18n.tr("setting-pt-device-hint")),
+        |ui| {
+            ui.add_enabled_ui(false, |ui| {
+                ComboBox::from_id_salt("pt-device")
+                    .selected_text(i18n.tr("pt-device-same"))
+                    .width(220.0)
+                    .show_ui(ui, |_| {});
+            })
+            .response
+            .on_disabled_hover_text(i18n.tr("setting-pt-device-hint"));
         },
     );
     let ray_hint = i18n.tr(if hud.ray_query_supported {
@@ -785,11 +895,40 @@ fn mcp(ui: &mut Ui, hud: &mut Hud<'_>) {
             number_field(ui, DragValue::new(&mut settings.mcp.port).range(1024..=65535).speed(1));
         },
     );
-    for permission in Permission::ALL {
-        row(ui, &i18n.tr(permission_key(permission)), None, |ui| {
-            widgets::switch(ui, settings.mcp.permissions.flag_mut(permission), true);
+    ui.add_space(14.0);
+    ui.label(
+        RichText::new(i18n.tr("mcp-allowed-tools").to_uppercase())
+            .size(10.0)
+            .color(theme::SUBTLE),
+    );
+    ui.add_space(2.0);
+    // Two columns of compact rows, like the mockup, so the client setup row stays on screen.
+    let column = (ui.available_width() - 28.0) / 2.0;
+    for pair in Permission::ALL.chunks(2) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 28.0;
+            for permission in pair {
+                ui.allocate_ui_with_layout(
+                    vec2(column, 38.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_size(vec2(column, 38.0));
+                        ui.label(i18n.tr(permission_key(*permission)));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            widgets::switch(ui, settings.mcp.permissions.flag_mut(*permission), true);
+                        });
+                    },
+                );
+            }
         });
     }
+    ui.add_space(6.0);
+    let line = ui.available_rect_before_wrap();
+    ui.painter().hline(
+        line.x_range(),
+        line.top(),
+        Stroke::new(1.0, Color32::from_white_alpha(18)),
+    );
     let mut copy = false;
     row(
         ui,

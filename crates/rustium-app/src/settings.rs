@@ -76,6 +76,26 @@ pub(crate) enum Backend {
     DirectX12,
 }
 
+impl From<Backend> for rustium_render::GraphicsBackend {
+    fn from(backend: Backend) -> Self {
+        match backend {
+            Backend::Automatic => Self::Automatic,
+            Backend::Vulkan => Self::Vulkan,
+            Backend::DirectX12 => Self::DirectX12,
+        }
+    }
+}
+
+impl From<rustium_render::GraphicsBackend> for Backend {
+    fn from(backend: rustium_render::GraphicsBackend) -> Self {
+        match backend {
+            rustium_render::GraphicsBackend::Automatic => Self::Automatic,
+            rustium_render::GraphicsBackend::Vulkan => Self::Vulkan,
+            rustium_render::GraphicsBackend::DirectX12 => Self::DirectX12,
+        }
+    }
+}
+
 /// Which traversal the path tracer uses; applied immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum RayTracingMode {
@@ -128,6 +148,8 @@ pub(crate) struct Settings {
     pub(crate) msaa_samples: u32,
     pub(crate) invert_zoom: bool,
     pub(crate) backend: Backend,
+    /// Name of the chosen graphics device; `None` is Automatic.
+    pub(crate) gpu_adapter: Option<String>,
     pub(crate) ray_tracing: RayTracingMode,
     pub(crate) vsync: bool,
     pub(crate) frame_limit: FrameLimit,
@@ -159,6 +181,7 @@ impl Default for Settings {
             msaa_samples: 4,
             invert_zoom: false,
             backend: Backend::Automatic,
+            gpu_adapter: None,
             ray_tracing: RayTracingMode::Automatic,
             vsync: true,
             frame_limit: FrameLimit::MatchDisplay,
@@ -233,6 +256,7 @@ impl Settings {
             }
             Section::Performance => {
                 self.backend = defaults.backend;
+                self.gpu_adapter = defaults.gpu_adapter;
                 self.ray_tracing = defaults.ray_tracing;
                 self.vsync = defaults.vsync;
                 self.frame_limit = defaults.frame_limit;

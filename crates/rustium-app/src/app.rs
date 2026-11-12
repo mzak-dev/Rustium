@@ -9,8 +9,8 @@ use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_platform::{HitRegions, Platform};
 use rustium_render::{
-    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, RayTracing,
-    TraceFrame, ViewportFrame, ViewportRenderer,
+    AdapterChoice, CameraUniform, GlassRect, GpuContext, GpuPreferences, LineVertex, ModelDraw, RayTracing, TraceFrame,
+    ViewportFrame, ViewportRenderer, available_adapters, startup_fallback,
 };
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
@@ -117,6 +117,8 @@ struct Running {
     preview: Preview,
     sample_counts: Vec<u32>,
     adapter_name: String,
+    /// Every graphics device on the machine, for the Settings → Performance pickers.
+    adapters: Vec<AdapterChoice>,
     next_frame: Option<Instant>,
     /// Mode and Editor revision the path tracer's scene upload matches.
     last_mode: Mode,
@@ -140,7 +142,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.running.is_some() {
             return;
         }
-        match Running::new(event_loop, &self.settings, &self.proxy, self.open_path.take()) {
+        match Running::new(event_loop, &mut self.settings, &self.proxy, self.open_path.take()) {
             Ok(running) => self.running = Some(running),
             Err(report) => self.fail(event_loop, report),
         }
@@ -219,7 +221,7 @@ impl ApplicationHandler<UserEvent> for App {
 impl Running {
     fn new(
         event_loop: &ActiveEventLoop,
-        settings: &Settings,
+        settings: &mut Settings,
         proxy: &EventLoopProxy<UserEvent>,
         open_path: Option<PathBuf>,
     ) -> Result<Self> {
@@ -243,25 +245,39 @@ impl Running {
         let platform = Platform::attach(&*window);
         let size = window.inner_size();
         let preferences = GpuPreferences {
-            backend: match settings.backend {
-                Backend::Automatic => GraphicsBackend::Automatic,
-                Backend::Vulkan => GraphicsBackend::Vulkan,
-                Backend::DirectX12 => GraphicsBackend::DirectX12,
-            },
+            backend: settings.backend.into(),
+            adapter: settings.gpu_adapter.clone(),
         };
-        let mut gpu = pollster::block_on(GpuContext::new(
+        let mut startup_notice = None;
+        let mut gpu = match pollster::block_on(GpuContext::new(
             Arc::clone(&window),
             size.width,
             size.height,
-            preferences,
-        ))
-        .wrap_err("cannot open the GPU")?;
+            preferences.clone(),
+        )) {
+            Ok(gpu) => gpu,
+            Err(error) => {
+                // A saved backend or device that no longer works must never keep the editor from starting.
+                let Some(fallback) = startup_fallback(&preferences) else {
+                    return Err(error).wrap_err("cannot open the GPU");
+                };
+                warn!(%error, "the chosen graphics backend or device failed, falling back to Automatic");
+                let gpu = pollster::block_on(GpuContext::new(Arc::clone(&window), size.width, size.height, fallback))
+                    .wrap_err("cannot open the GPU")?;
+                settings.backend = Backend::Automatic;
+                settings.gpu_adapter = None;
+                settings.save();
+                startup_notice = Some(I18n::new(settings.language).tr("startup-gpu-fallback"));
+                gpu
+            }
+        };
         gpu.set_vsync(settings.vsync);
         let sample_counts = gpu.supported_sample_counts(wgpu::TextureFormat::Rgba8UnormSrgb);
         let samples = best_sample_count(&sample_counts, settings.msaa_samples);
         let mut viewport = ViewportRenderer::new(&gpu, samples);
         viewport.set_ray_tracing(&gpu, ray_tracing(settings.ray_tracing));
         let adapter_name = gpu.adapter_info().name;
+        let adapters = pollster::block_on(available_adapters());
         info!(samples, "viewport ready");
 
         let egui_ctx = egui::Context::default();
@@ -307,6 +323,7 @@ impl Running {
         let recent_files = recent::load();
         let mut ui = UiState::new(settings.show_start_screen && open_path.is_none());
         ui.recent = recent::check(recent_files.clone());
+        ui.toast = startup_notice.map(|text| Toast::new(text, true));
         ui.prompt = startup_recovery(&recent_files).map(hud::Prompt::Recovery);
         if let Some(path) = open_path {
             io.submit(files::IoJob::Load { path });
@@ -329,6 +346,7 @@ impl Running {
             preview: Preview::default(),
             sample_counts,
             adapter_name,
+            adapters,
             next_frame: None,
             last_mode: Mode::Model,
             trace_revision: None,
@@ -401,6 +419,16 @@ impl Running {
         if self.handle_io(settings) {
             return Ok(true);
         }
+        // At a high interface scale a small window would crowd the islands, so the scale is capped to what fits.
+        let size = self.window.inner_size();
+        let zoom = theme::effective_zoom(
+            settings.ui_scale_percent,
+            (size.width, size.height),
+            scale_factor(&self.window),
+        );
+        if (self.egui_ctx.zoom_factor() - zoom).abs() > 1e-3 {
+            self.egui_ctx.set_zoom_factor(zoom);
+        }
         let mut raw_input = self.egui_state.take_egui_input(&self.window);
         self.show_maximize_hover(&mut raw_input);
         let ctx = self.egui_ctx.clone();
@@ -417,6 +445,7 @@ impl Running {
                 logo: &self.logo,
                 maximized,
                 adapter_name: &self.adapter_name,
+                adapters: &self.adapters,
                 trace_engine: self.viewport.trace_engine(),
                 ray_query_supported: self.gpu.supports_ray_query(),
                 sample_counts: &self.sample_counts,

@@ -74,6 +74,20 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// Smallest window, in points at 100 % scale, that the HUD islands are laid out for.
+const MIN_POINTS: (f32, f32) = (960.0, 640.0);
+
+/// The interface scale to use: the chosen percentage, lowered so the window still holds [`MIN_POINTS`] points.
+///
+/// `physical` is the window's inner size in pixels and `native` the display scale factor.
+pub(crate) fn effective_zoom(percent: u32, physical: (u32, u32), native: f32) -> f32 {
+    let wanted = percent as f32 / 100.0;
+    let native = native.max(0.1);
+    let fit = (physical.0 as f32 / native / MIN_POINTS.0).min(physical.1 as f32 / native / MIN_POINTS.1);
+    // A window that is not laid out yet reports a zero size; leave the scale alone then.
+    if fit <= 0.0 { wanted } else { wanted.min(fit.max(1.0)) }
+}
+
 /// Applies colors, sizes and timing from `settings` to egui's style.
 pub(crate) fn apply_style(ctx: &egui::Context, settings: &Settings) {
     let accent = accent(settings.accent);
@@ -153,4 +167,22 @@ pub(crate) fn island() -> Frame {
         .corner_radius(ISLAND_RADIUS)
         .inner_margin(4)
         .shadow(shadow())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_zoom;
+
+    #[test]
+    fn a_large_scale_is_lowered_until_the_window_fits_the_layout() {
+        assert!((effective_zoom(200, (960, 640), 1.0) - 1.0).abs() < 1e-6);
+        assert!((effective_zoom(150, (1920, 1200), 1.0) - 1.5).abs() < 1e-6);
+        assert!((effective_zoom(200, (1440, 900), 1.0) - 1.40625).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_small_scale_is_kept_and_an_empty_window_is_ignored() {
+        assert!((effective_zoom(80, (960, 640), 1.0) - 0.8).abs() < 1e-6);
+        assert!((effective_zoom(150, (0, 0), 1.0) - 1.5).abs() < 1e-6);
+    }
 }

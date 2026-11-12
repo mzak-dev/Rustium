@@ -47,7 +47,7 @@ pub(crate) struct KeymapUi {
     /// The shortcut waiting for the next key press.
     capturing: Option<Action>,
     pending: Option<Pending>,
-    filter: String,
+    pub(crate) filter: String,
     job: Option<Receiver<FileOutcome>>,
 }
 
@@ -177,6 +177,14 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
     }
 }
 
+/// Whether any shortcut's name (or its key) contains `query`, which is already lowercase.
+pub(crate) fn any_action_matches(hud: &Hud<'_>, query: &str) -> bool {
+    Action::all().iter().any(|action| {
+        action_name(hud.i18n, *action).to_lowercase().contains(query)
+            || hud.settings.keymap.label(*action).to_lowercase().contains(query)
+    })
+}
+
 /// Name of a shortcut in the current language.
 fn action_name(i18n: &I18n, action: Action) -> String {
     match action.slot_number() {
@@ -243,12 +251,15 @@ fn mouse_bindings(ui: &mut Ui, i18n: &I18n) {
                     ui.set_min_size(vec2(270.0, 36.0));
                     ui.label(i18n.tr(label));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::Frame::new()
-                            .fill(Color32::from_white_alpha(15))
-                            .stroke(Stroke::new(1.0, Color32::from_white_alpha(46)))
-                            .corner_radius(6)
-                            .inner_margin(egui::Margin::symmetric(8, 3))
-                            .show(ui, |ui| ui.label(widgets::mono(key, 11.0).color(theme::TEXT)));
+                        // The same chip as the key bindings, only not clickable.
+                        ui.add(
+                            egui::Button::new(widgets::mono(key, 11.0).color(theme::TEXT))
+                                .fill(Color32::from_white_alpha(15))
+                                .stroke(Stroke::new(1.0, Color32::from_white_alpha(46)))
+                                .corner_radius(6)
+                                .min_size(vec2(56.0, 24.0))
+                                .sense(egui::Sense::hover()),
+                        );
                     });
                 });
             }

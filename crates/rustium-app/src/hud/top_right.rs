@@ -85,19 +85,18 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     let shading = widgets::dropdown_button(ui, &hud.tr("shading-shaded"));
                     egui::Popup::menu(&shading).show(|ui| {
                         ui.set_min_width(170.0);
-                        let _ = ui.selectable_label(true, hud.tr("shading-shaded"));
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        let _ = widgets::menu_row(ui, &hud.tr("shading-shaded"), true);
                         ui.separator();
-                        let camera = &mut *hud.camera;
-                        ui.selectable_value(
-                            &mut camera.projection,
-                            Projection::Perspective,
-                            hud.i18n.tr("projection-perspective"),
-                        );
-                        ui.selectable_value(
-                            &mut camera.projection,
-                            Projection::Orthographic,
-                            hud.i18n.tr("projection-orthographic"),
-                        );
+                        for (projection, key) in [
+                            (Projection::Perspective, "projection-perspective"),
+                            (Projection::Orthographic, "projection-orthographic"),
+                        ] {
+                            let selected = hud.camera.projection == projection;
+                            if widgets::menu_row(ui, &hud.i18n.tr(key), selected).clicked() {
+                                hud.camera.projection = projection;
+                            }
+                        }
                     });
                 }
                 widgets::divider(ui, 32.0);

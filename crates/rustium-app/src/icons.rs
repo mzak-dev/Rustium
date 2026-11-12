@@ -55,6 +55,10 @@ pub(crate) enum Icon {
     Grab,
     Forbidden,
     Scissors,
+    Panel,
+    Keyboard,
+    Bolt,
+    Plug,
 }
 
 impl Icon {
@@ -86,6 +90,10 @@ impl Icon {
             Self::BrushBox => "M4 8h12v12H4z M4 8l4-4h12l-4 4 M20 4v12l-4 4",
             Self::Palette => "M4 4h7v7H4z M13 4h7v7h-7z M4 13h7v7H4z M13 13h7v7h-7z",
             Self::Cube => "M12 3l8 4.5v9L12 21l-8-4.5v-9z M12 12l8-4.5 M12 12v9 M12 12L4 7.5",
+            Self::Panel => "M4 5h16v14H4z M4 9h16 M8 9v10",
+            Self::Keyboard => "M3 7h18v10H3z M7 11h.01 M11 11h.01 M15 11h.01 M8 14h8",
+            Self::Bolt => "M13 3L5 13h6l-1 8 8-10h-6z",
+            Self::Plug => "M9 3v5 M15 3v5 M6 8h12v4a6 6 0 0 1-12 0z M12 18v3",
             Self::Folder => "M3 6h6l2 2h10v11H3z",
             Self::Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M16 16l4 4",
             Self::Settings => "M4 7h10 M18 7h2 M4 17h2 M10 17h10 M16 5v4 M8 15v4",

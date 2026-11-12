@@ -81,7 +81,7 @@ impl Node {
 }
 
 /// The arena of Nodes. Deleted Nodes stay in it, detached from the tree, so an Edit can bring them back.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Graph {
     nodes: Vec<Node>,
 }

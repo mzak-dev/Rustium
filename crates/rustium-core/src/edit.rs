@@ -9,6 +9,7 @@ use crate::material_graph::MaterialGraph;
 use crate::node::Graph;
 use crate::palette::Palette;
 use crate::scene::Scene;
+use crate::selection::Selection;
 use crate::shape::{Shape, Volume, Voxel};
 
 /// What kind of change an [`Edit`] made; the interface turns it into a History label.
@@ -108,10 +109,12 @@ pub struct Edit {
     volumes: Vec<VolumeChange>,
     created: Vec<NodeId>,
     materials: Option<MaterialsChange>,
+    /// The voxel Selection before and after, so undo and redo can put it back.
+    selection: Option<(Selection, Selection)>,
 }
 
 /// The Palette and material graphs before and after an Edit; both are small, so a snapshot is cheap.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct MaterialsChange {
     before: (Palette, Vec<MaterialGraph>),
     after: (Palette, Vec<MaterialGraph>),
@@ -151,6 +154,7 @@ impl Edit {
                 before,
                 after: (scene.palette.clone(), scene.material_graphs.clone()),
             }),
+            selection: None,
         }
     }
 
@@ -169,6 +173,60 @@ impl Edit {
     /// What the Edit did.
     pub fn kind(&self) -> EditKind {
         self.kind
+    }
+
+    /// Records the voxel Selection before and after the Edit; undo and redo hand it back.
+    #[must_use]
+    pub fn with_selection(mut self, before: Selection, after: Selection) -> Self {
+        self.selection = Some((before, after));
+        self
+    }
+
+    /// The Selection before the Edit, if it was recorded.
+    pub fn selection_before(&self) -> Option<&Selection> {
+        self.selection.as_ref().map(|(before, _)| before)
+    }
+
+    /// The Selection after the Edit, if it was recorded.
+    pub fn selection_after(&self) -> Option<&Selection> {
+        self.selection.as_ref().map(|(_, after)| after)
+    }
+
+    /// Whether the Edit ends where it started (a Move dragged out and back), so it is not worth a History step.
+    pub fn is_noop(&self) -> bool {
+        self.created.is_empty()
+            && self.chunks.iter().all(|change| change.before == change.after)
+            && self.volumes.iter().all(|change| change.before == change.after)
+            && self
+                .graph
+                .as_ref()
+                .is_none_or(|change| Arc::ptr_eq(&change.before, &change.after) || change.before == change.after)
+            && self
+                .materials
+                .as_ref()
+                .is_none_or(|change| change.before == change.after)
+    }
+
+    /// Every voxel the Edit changed: its Shape, position, and the voxel before and after.
+    // ponytail: scans each touched chunk whole (32³); fine for strokes, track changed cells if huge Edits lag.
+    pub fn voxel_changes(&self) -> Vec<(ShapeId, IVec3, Voxel, Voxel)> {
+        let read = |chunk: &Option<Arc<Chunk>>, local| chunk.as_ref().and_then(|chunk| chunk.get(local));
+        let size = crate::CHUNK_SIZE;
+        let mut changes = Vec::new();
+        for change in self.chunks.iter().filter(|change| change.before != change.after) {
+            for y in 0..size {
+                for z in 0..size {
+                    for x in 0..size {
+                        let local = IVec3::new(x, y, z);
+                        let (before, after) = (read(&change.before, local), read(&change.after, local));
+                        if before != after {
+                            changes.push((change.shape, change.coord.origin() + local, before, after));
+                        }
+                    }
+                }
+            }
+        }
+        changes
     }
 
     /// Chunks whose voxels the Edit changed, with the Shape they belong to.
@@ -218,6 +276,10 @@ impl Edit {
                 before: first.before,
                 after: next.after,
             }),
+            (first, next) => first.or(next),
+        };
+        self.selection = match (self.selection.take(), later.selection) {
+            (Some((before, _)), Some((_, after))) => Some((before, after)),
             (first, next) => first.or(next),
         };
         self
@@ -333,6 +395,11 @@ impl<'scene> Recorder<'scene> {
             after: Arc::clone(&self.scene.graph),
         });
         let scene = self.scene;
+        for shape in self.volumes_before.keys() {
+            if let Some(shape) = scene.shape_mut(*shape) {
+                shape.refresh_volume();
+            }
+        }
         let chunks: Vec<ChunkChange> = self
             .chunks_before
             .into_iter()
@@ -362,6 +429,7 @@ impl<'scene> Recorder<'scene> {
             volumes,
             created: self.created,
             materials: None,
+            selection: None,
         })
     }
 }

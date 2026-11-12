@@ -52,6 +52,8 @@ impl Volume {
 pub struct Shape {
     chunks: HashMap<ChunkCoord, Arc<Chunk>>,
     volume: Option<Volume>,
+    /// A voxel on the edge of the Volume was emptied, so the Volume may be too large until it is measured again.
+    volume_stale: bool,
 }
 
 impl Shape {
@@ -60,6 +62,7 @@ impl Shape {
         let mut shape = Self {
             chunks: chunks.into_iter().filter(|(_, chunk)| !chunk.is_empty()).collect(),
             volume: None,
+            volume_stale: false,
         };
         let mut volume: Option<Volume> = None;
         for (position, _) in shape.voxels() {
@@ -123,8 +126,61 @@ impl Shape {
                 self.volume
                     .map_or(Volume::point(position), |volume| volume.including(position)),
             );
+        } else if self
+            .volume
+            .is_some_and(|volume| position.cmpeq(volume.min).any() || position.cmpeq(volume.max).any())
+        {
+            self.volume_stale = true;
         }
         changed
+    }
+
+    /// A copy with the voxels at `cells` emptied, for drawing a Shape while some of its voxels are shown another
+    /// way (an edit animation). Cheap: only the touched chunks are copied, and the Volume is left as it is.
+    pub fn with_hidden(&self, cells: impl IntoIterator<Item = IVec3>) -> Self {
+        let mut copy = self.clone();
+        for cell in cells {
+            let coord = ChunkCoord::of(cell);
+            if let Some(chunk) = copy.chunks.get_mut(&coord) {
+                Arc::make_mut(chunk).set(chunk::local_of(cell), None);
+            }
+        }
+        copy
+    }
+
+    /// Shrinks the Volume to the voxels after an erase emptied its edge; cheap when nothing on the edge changed.
+    pub(crate) fn refresh_volume(&mut self) {
+        if std::mem::take(&mut self.volume_stale) {
+            self.volume = self.measure_volume();
+        }
+    }
+
+    /// The box around the filled voxels. The extreme voxel on each side lies in the outermost layer of chunks on that
+    /// side, so only those chunks are scanned.
+    fn measure_volume(&self) -> Option<Volume> {
+        let mut coords = self.chunks.keys().map(|coord| coord.0);
+        let first = coords.next()?;
+        let (low, high) = coords.fold((first, first), |(low, high), coord| (low.min(coord), high.max(coord)));
+        let mut min = IVec3::splat(i32::MAX);
+        let mut max = IVec3::splat(i32::MIN);
+        for (coord, chunk) in &self.chunks {
+            let (at_low, at_high) = (coord.0.cmpeq(low), coord.0.cmpeq(high));
+            if !(at_low.any() || at_high.any()) {
+                continue;
+            }
+            for (local, _) in chunk.iter() {
+                let position = coord.origin() + local;
+                for axis in 0..3 {
+                    if at_low.test(axis) {
+                        min[axis] = min[axis].min(position[axis]);
+                    }
+                    if at_high.test(axis) {
+                        max[axis] = max[axis].max(position[axis]);
+                    }
+                }
+            }
+        }
+        Some(Volume { min, max })
     }
 
     /// Puts back a chunk exactly as an Edit recorded it.
@@ -137,5 +193,34 @@ impl Shape {
 
     pub(crate) fn set_volume(&mut self, volume: Option<Volume>) {
         self.volume = volume;
+        self.volume_stale = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CHUNK_SIZE;
+
+    #[test]
+    fn erasing_the_edge_shrinks_the_volume() {
+        let mut shape = Shape::new();
+        let far = IVec3::new(CHUNK_SIZE * 2 + 3, 1, -5);
+        for position in [IVec3::ZERO, IVec3::new(4, 2, 1), far] {
+            shape.set(position, ColorId::new(1));
+        }
+        shape.set(far, None);
+        shape.refresh_volume();
+        assert_eq!(
+            shape.volume(),
+            Some(Volume {
+                min: IVec3::ZERO,
+                max: IVec3::new(4, 2, 1)
+            })
+        );
+        shape.set(IVec3::ZERO, None);
+        shape.set(IVec3::new(4, 2, 1), None);
+        shape.refresh_volume();
+        assert_eq!(shape.volume(), None);
     }
 }

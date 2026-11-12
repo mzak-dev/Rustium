@@ -117,34 +117,30 @@ fn cube_span(size: u32) -> (i32, i32) {
     (-(size - 1) / 2, size / 2)
 }
 
-/// The box of voxel positions a Voxel brush covers: for Attach a cube resting on the hit face and centred across
-/// it, for Erase and Paint a cube centred on the hit voxel.
+/// The box of voxel positions a Voxel brush covers: a cube centred across the hit face that rests on it, outside
+/// the face for Attach and inside it, from the surface in, for Erase and Paint. Only the side of the face changes
+/// between the Tools, so a cube of any size reaches the same depth whichever way the face points.
 fn voxel_bounds(tool: VoxelTool, size: u32, hit: RayHit) -> Volume {
     let (low, high) = cube_span(size);
     let size = i32::try_from(size.clamp(1, Brush::MAX_SIZE)).unwrap_or(1);
-    match tool {
-        VoxelTool::Attach => {
-            let normal = hit.face.normal();
-            let base = hit.voxel + normal;
-            let axis = hit.face.axis();
-            let mut min = IVec3::splat(low);
-            let mut max = IVec3::splat(high);
-            min[axis] = if normal[axis] > 0 { 0 } else { 1 - size };
-            max[axis] = if normal[axis] > 0 { size - 1 } else { 0 };
-            Volume {
-                min: base + min,
-                max: base + max,
-            }
-        }
-        VoxelTool::Erase | VoxelTool::Paint => Volume {
-            min: hit.voxel + low,
-            max: hit.voxel + high,
-        },
+    let base = gesture_cell(tool, hit);
+    let axis = hit.face.axis();
+    // The direction the cube grows in along the face axis: away from the face for Attach, into the solid otherwise.
+    let outward = hit.face.normal()[axis] > 0;
+    let grows_up = outward == (tool == VoxelTool::Attach);
+    let mut min = IVec3::splat(low);
+    let mut max = IVec3::splat(high);
+    min[axis] = if grows_up { 0 } else { 1 - size };
+    max[axis] = if grows_up { size - 1 } else { 0 };
+    Volume {
+        min: base + min,
+        max: base + max,
     }
 }
 
-/// Every cell a gesture covers, from the press at `from` to the release at `to` (equal for Voxel and Face).
-pub(crate) fn brush_positions(shape: &Shape, tool: VoxelTool, brush: Brush, from: RayHit, to: RayHit) -> Vec<IVec3> {
+/// Every cell a gesture covers, from the press at `from` to the release at `to` (equal for Voxel and Face), before
+/// Mirror; the Tool then changes the ones it can (Attach only fills empty cells, Paint only recolors filled ones).
+pub fn brush_positions(shape: &Shape, tool: VoxelTool, brush: Brush, from: RayHit, to: RayHit) -> Vec<IVec3> {
     if tool != VoxelTool::Attach && from.target == HitTarget::Ground {
         return Vec::new();
     }
@@ -377,6 +373,28 @@ mod tests {
         let mut count = 0;
         mirror.for_each_image(voxel(3, 3, 3), |_| count += 1);
         assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn erase_cubes_reach_into_the_solid_the_same_from_either_side() {
+        for (face, inward) in [(Face::PosY, -1), (Face::NegY, 1), (Face::PosX, 0), (Face::NegZ, 0)] {
+            let hit = RayHit {
+                voxel: IVec3::ZERO,
+                face,
+                target: HitTarget::Voxel,
+            };
+            let bounds = voxel_bounds(VoxelTool::Erase, 2, hit);
+            let axis = face.axis();
+            assert_eq!(bounds.size(), IVec3::splat(2), "{face:?}");
+            assert_eq!(
+                bounds.min[axis] + bounds.max[axis],
+                -face.normal()[axis],
+                "{face:?} digs inward"
+            );
+            if inward != 0 {
+                assert_eq!(bounds.min.y + bounds.max.y, inward);
+            }
+        }
     }
 
     #[test]

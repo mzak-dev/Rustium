@@ -14,8 +14,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, 
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
-    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
+    IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
+    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
 };
 
 use crate::hit::{Edge, HitRegions, HitZone};
@@ -118,7 +118,7 @@ unsafe extern "system" fn subclass_proc(
                 Err(_) => tracing::error!("panic while answering WM_NCHITTEST"),
             }
         }
-        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
+        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK | WM_NCLBUTTONUP => {
             let handled = panic::catch_unwind(AssertUnwindSafe(|| {
                 maximize_button_message(hwnd, message, wparam, data)
             }));
@@ -173,7 +173,9 @@ fn maximize_button_message(hwnd: HWND, message: u32, wparam: WPARAM, data: usize
             }
             false
         }
-        WM_NCLBUTTONDOWN if over_button => {
+        // The second press of a quick double click arrives as a double click message; handling it like a press keeps
+        // the default procedure from running its own maximize logic after ours.
+        WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK if over_button => {
             shared.maximize_pressed.store(true, Ordering::Relaxed);
             true
         }

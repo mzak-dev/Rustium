@@ -76,6 +76,18 @@ pub(crate) enum Backend {
     DirectX12,
 }
 
+/// Which traversal the path tracer uses; applied immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum RayTracingMode {
+    /// Hardware ray query when the GPU supports it.
+    #[default]
+    Automatic,
+    /// Software DDA, runs on every GPU.
+    Software,
+    /// Hardware ray query; software where unsupported.
+    Hardware,
+}
+
 /// Frame pacing when vertical sync is off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum FrameLimit {
@@ -114,6 +126,7 @@ pub(crate) struct Settings {
     pub(crate) msaa_samples: u32,
     pub(crate) invert_zoom: bool,
     pub(crate) backend: Backend,
+    pub(crate) ray_tracing: RayTracingMode,
     pub(crate) vsync: bool,
     pub(crate) frame_limit: FrameLimit,
     pub(crate) keymap: Keymap,
@@ -143,6 +156,7 @@ impl Default for Settings {
             msaa_samples: 4,
             invert_zoom: false,
             backend: Backend::Automatic,
+            ray_tracing: RayTracingMode::Automatic,
             vsync: true,
             frame_limit: FrameLimit::MatchDisplay,
             keymap: Keymap::default(),
@@ -215,6 +229,7 @@ impl Settings {
             }
             Section::Performance => {
                 self.backend = defaults.backend;
+                self.ray_tracing = defaults.ray_tracing;
                 self.vsync = defaults.vsync;
                 self.frame_limit = defaults.frame_limit;
             }

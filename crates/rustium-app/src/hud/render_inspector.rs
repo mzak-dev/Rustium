@@ -1,7 +1,7 @@
 //! Render mode, right island: the Render, Camera, Light and Output tabs.
 
 use egui::{Color32, DragValue, Grid, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
-use rustium_render::{Ground, RenderStyle, Sky};
+use rustium_render::{Ground, RenderStyle, Sky, TraceEngine};
 
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud};
@@ -205,7 +205,14 @@ fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         hud.tr("bounces"),
         hud.tr("denoise"),
     ];
-    let engine = hud.tr("engine-path-tracing");
+    let engine = format!(
+        "{} \u{b7} {}",
+        hud.tr("engine-path-tracing"),
+        hud.tr(match hud.trace_engine {
+            TraceEngine::Software => "engine-software",
+            TraceEngine::Hardware => "engine-hardware",
+        })
+    );
     let denoise_hint = hud.tr("denoise-hint");
     properties(ui, "render-tab", |ui| {
         let render = &mut hud.ui.render;

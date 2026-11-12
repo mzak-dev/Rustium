@@ -22,7 +22,10 @@ mod viewport_renderer;
 
 pub use error::Error;
 pub use glass_pass::GlassRect;
-pub use gpu_context::{GpuContext, GpuPreferences, GraphicsBackend, request_device};
+pub use gpu_context::{
+    AdapterChoice, GpuContext, GpuPreferences, GraphicsBackend, available_adapters, request_device,
+    selectable_backends, startup_fallback,
+};
 pub use material_compiler::{CompileError, CompiledMaterials, PARAM_CAPACITY, compile_materials};
 pub use material_pipelines::CompileStatus;
 pub use materials::{GpuColor, GpuMaterialTable, MaterialBuffers};

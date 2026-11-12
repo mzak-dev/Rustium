@@ -22,6 +22,7 @@ It needs WebGPU: a recent Chrome or Edge, Safari 26 or later, or a Firefox with 
 ## Building it locally
 
 ```bash
+rustup target add wasm32-unknown-unknown
 cargo install wasm-pack          # once; it fetches the matching wasm-bindgen and wasm-opt
 scripts/build-web.sh             # release build into target/web (scripts/build-web.sh --dev is faster)
 python3 -m http.server -d target/web 8000
@@ -39,4 +40,4 @@ It runs WebGPU on SwiftShader, so it works without a GPU, and fails on any conso
 
 ## Deployment
 
-`.github/workflows/pages.yml` runs on every push to `main` (and by hand): it builds the release version, smoke-tests it and deploys it with `actions/deploy-pages`. One-time setup: in the repository's **Settings → Pages**, set **Source** to **GitHub Actions**. The `ci.yml` job "Web build and smoke test" runs the same build and test on every pull request, so a change that breaks the browser version is caught before it is merged.
+The `ci.yml` job "Web build and smoke test" builds the release version and smoke-tests it on every pull request, so a change that breaks the browser version is caught before it is merged. On a push to `main` (a merged pull request, or a manual run) it also uploads the site, and the "Deploy to GitHub Pages" job publishes it with `actions/deploy-pages` once every CI check has passed. One-time setup: in the repository's **Settings → Pages**, set **Source** to **GitHub Actions**.

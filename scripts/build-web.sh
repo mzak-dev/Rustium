@@ -4,8 +4,8 @@
 #   scripts/build-web.sh [--dev] [OUT_DIR]
 #
 # OUT_DIR defaults to target/web. --dev builds without optimizations (faster, much larger). Needs the
-# wasm32-unknown-unknown target (rust-toolchain.toml installs it) and wasm-pack (`cargo install wasm-pack`), which
-# brings wasm-bindgen and wasm-opt along. Serve the folder over HTTP to try it, e.g. `python3 -m http.server -d
+# wasm32-unknown-unknown target (`rustup target add wasm32-unknown-unknown`) and wasm-pack (`cargo install wasm-pack`),
+# which brings wasm-bindgen and wasm-opt along. Serve the folder over HTTP to try it, e.g. `python3 -m http.server -d
 # target/web`; opening index.html as a file does not work.
 set -euo pipefail
 

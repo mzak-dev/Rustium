@@ -21,7 +21,6 @@ mod hud;
 mod i18n;
 mod icons;
 mod keymap;
-#[cfg(not(target_arch = "wasm32"))]
 mod logging;
 mod mcp;
 mod recent;

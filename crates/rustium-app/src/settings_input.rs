@@ -389,7 +389,7 @@ fn start_job(hud: &mut Hud<'_>, export: Option<String>) {
     } else {
         let title = hud.tr("keymap-import");
         wasm_bindgen_futures::spawn_local(async move {
-            let outcome = match crate::web::pick_file(title, KEYMAP_FILTER.to_owned(), vec!["toml"]).await {
+            let outcome = match crate::web::pick_file(title, KEYMAP_FILTER.to_owned(), &["toml"]).await {
                 Some((_, bytes)) => imported(&String::from_utf8_lossy(&bytes)),
                 None => FileOutcome::Cancelled,
             };

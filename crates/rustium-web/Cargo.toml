@@ -14,10 +14,8 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook.workspace = true
 rustium-app.workspace = true
-tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"] }
-tracing-web.workspace = true
 wasm-bindgen.workspace = true
+web-sys = { workspace = true, features = ["console"] }
 
 [package.metadata.wasm-pack.profile.release]
 # Size first: the editor downloads before it can start. The features are the ones rustc enables by default for

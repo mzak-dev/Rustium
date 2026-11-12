@@ -25,7 +25,6 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    #[cfg(not(target_arch = "wasm32"))]
     const ALL: [Self; 6] = [
         Self::General,
         Self::Interface,
@@ -33,15 +32,6 @@ impl Section {
         Self::Input,
         Self::Performance,
         Self::Mcp,
-    ];
-    /// A page cannot serve MCP, so the browser has no MCP section.
-    #[cfg(target_arch = "wasm32")]
-    const ALL: [Self; 5] = [
-        Self::General,
-        Self::Interface,
-        Self::Viewport,
-        Self::Input,
-        Self::Performance,
     ];
 
     fn title_key(self) -> &'static str {
@@ -196,6 +186,8 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
 fn matching_sections(hud: &Hud<'_>, query: &str) -> Vec<Section> {
     Section::ALL
         .into_iter()
+        // A page cannot serve MCP, so the browser has no MCP section.
+        .filter(|section| crate::DESKTOP || *section != Section::Mcp)
         .filter(|section| {
             query.is_empty()
                 || hud.tr(section.title_key()).to_lowercase().contains(query)

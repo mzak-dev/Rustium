@@ -28,8 +28,8 @@
 //!
 //! # WebAssembly
 //!
-//! A browser cannot listen on a port, so on `wasm32` the crate offers only the [`Permission`] switches and
-//! [`DEFAULT_PORT`], which the editor's settings store either way.
+//! A browser cannot listen on a port, so on `wasm32` the crate offers only the [`Permission`] switches,
+//! [`DEFAULT_PORT`] and [`Waker`], which the editor uses either way.
 #![warn(clippy::panic, clippy::expect_used)]
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,7 +45,7 @@ mod stdio;
 mod tools;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use bridge::{Bridge, BrushTool, Envelope, FaceDirection, Reply, Request, VoxelWrite, Waker, channel};
+pub use bridge::{Bridge, BrushTool, Envelope, FaceDirection, Reply, Request, VoxelWrite, channel};
 #[cfg(not(target_arch = "wasm32"))]
 pub use error::Error;
 pub use permission::{Permission, Permissions, SharedPermissions};
@@ -58,3 +58,6 @@ pub use tools::Tools;
 
 /// The port the editor serves MCP on unless the settings say otherwise.
 pub const DEFAULT_PORT: u16 = 7420;
+
+/// Wakes the UI thread's event loop so it looks at its request channel.
+pub type Waker = std::sync::Arc<dyn Fn() + Send + Sync>;

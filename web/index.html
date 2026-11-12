@@ -6,6 +6,9 @@
   <title>Rustium</title>
   <meta name="description" content="Rustium, a voxel model editor written in Rust, running in the browser with WebGPU.">
   <link rel="icon" type="image/png" href="logo.png">
+  <!-- Start both downloads at once instead of fetching the module only after its JavaScript has run. -->
+  <link rel="modulepreload" href="pkg/rustium_web.js">
+  <link rel="preload" href="pkg/rustium_web_bg.wasm" as="fetch" type="application/wasm" crossorigin>
   <style>
     :root {
       color-scheme: dark;

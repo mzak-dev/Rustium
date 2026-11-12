@@ -19,6 +19,14 @@ fn aces(color: vec3<f32>) -> vec3<f32> {
     return clamp((color * (2.51 * color + 0.03)) / (color * (2.43 * color + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// ACES with its toe lifted: below about 0.05 the curve follows the identity instead of ACES's slope of 0.2, so a
+// dark Color (a #1A1A1A floor) comes out about as dark as the Model view paints it, not half as bright. Above that it
+// is ACES, so highlights and mid-tones are unchanged. Keep in step with `tonemap` in render_output.rs.
+fn tonemap(color: vec3<f32>) -> vec3<f32> {
+    let filmic = aces(color);
+    return filmic + (color - filmic) * exp(-color / 0.04);
+}
+
 fn load_clamped(pixel: vec2<i32>) -> vec4<f32> {
     let last = vec2<i32>(present.image.xy) - vec2<i32>(1);
     return textureLoad(accumulated, clamp(pixel, vec2<i32>(0), last), 0);
@@ -38,7 +46,7 @@ fn fs_present(in: FullscreenOutput) -> @location(0) vec4<f32> {
     let top = mix(load_clamped(corner), load_clamped(corner + vec2<i32>(1, 0)), blend.x);
     let bottom = mix(load_clamped(corner + vec2<i32>(0, 1)), load_clamped(corner + vec2<i32>(1, 1)), blend.x);
     let texel = mix(top, bottom, blend.y);
-    var color = select(aces(texel.rgb * present.image.z), texel.rgb, present.options.x > 0.5);
+    var color = select(tonemap(texel.rgb * present.image.z), texel.rgb, present.options.x > 0.5);
     if (present.image.w > 0.5) {
         // Premultiplied radiance over a checkerboard.
         let cell = vec2<i32>(floor(in.clip.xy / 12.0));

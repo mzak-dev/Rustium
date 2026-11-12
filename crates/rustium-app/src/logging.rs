@@ -23,6 +23,9 @@ pub(crate) fn init() -> Result<WorkerGuard> {
                 .with_target("wgpu_hal", tracing::Level::WARN)
         });
     let directory = settings::data_dir().join("logs");
+    // The appender prunes old files while it is built; without the directory it prints an error on the first start.
+    std::fs::create_dir_all(&directory)
+        .wrap_err_with(|| format!("cannot create log directory {}", directory.display()))?;
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("rustium")

@@ -311,6 +311,8 @@ pub struct ParamSpec {
     pub name: &'static str,
     /// Type and limits.
     pub kind: ParamKind,
+    /// Whether the node on the canvas shows the parameter; the rest are edited in the inspector only.
+    pub inline: bool,
 }
 
 /// Everything the editor and the compiler need to know about one node kind.
@@ -408,7 +410,20 @@ const fn out(name: &'static str, ty: SocketType) -> OutputSpec {
 }
 
 const fn param(name: &'static str, kind: ParamKind) -> ParamSpec {
-    ParamSpec { name, kind }
+    ParamSpec {
+        name,
+        kind,
+        inline: true,
+    }
+}
+
+/// A parameter shown in the inspector only (seeds, spaces, blend modes and switches); the node keeps the main ones.
+const fn side_param(name: &'static str, kind: ParamKind) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind,
+        inline: false,
+    }
 }
 
 const fn float_param(name: &'static str, min: f32, max: f32, default: f32) -> ParamSpec {
@@ -480,9 +495,9 @@ static NOISE: NodeSpec = NodeSpec {
                 default: 2,
             },
         ),
-        param("Seed", SEED),
-        param("Space", SPACE),
-        param("Per voxel", ParamKind::Bool { default: false }),
+        side_param("Seed", SEED),
+        side_param("Space", SPACE),
+        side_param("Per voxel", ParamKind::Bool { default: false }),
     ],
     bypass_input: None,
 };
@@ -502,8 +517,8 @@ static CELLS: NodeSpec = NodeSpec {
     params: &[
         float_param("Scale", 0.01, 64.0, 4.0),
         float_param("Randomness", 0.0, 1.0, 1.0),
-        param("Seed", SEED),
-        param("Space", SPACE),
+        side_param("Seed", SEED),
+        side_param("Space", SPACE),
     ],
     bypass_input: None,
 };
@@ -531,7 +546,7 @@ static GRADIENT: NodeSpec = NodeSpec {
                 default: [0.0, 16.0],
             },
         ),
-        param("Space", SPACE),
+        side_param("Space", SPACE),
     ],
     bypass_input: None,
 };
@@ -546,7 +561,7 @@ static EDGE_WEAR: NodeSpec = NodeSpec {
     params: &[
         float_param("Width", 0.01, 0.5, 0.12),
         float_param("Breakup", 0.0, 1.0, 0.4),
-        param("Seed", SEED),
+        side_param("Seed", SEED),
     ],
     bypass_input: None,
 };
@@ -562,7 +577,7 @@ static MIX: NodeSpec = NodeSpec {
         color_in("B", InputValue::Color([0.243, 0.290, 0.337])),
     ],
     outputs: &[out("Color", SocketType::Color)],
-    params: &[param(
+    params: &[side_param(
         "Blend",
         ParamKind::Choice {
             options: &["Mix", "Multiply", "Add", "Screen"],
@@ -624,7 +639,7 @@ static REMAP: NodeSpec = NodeSpec {
                 default: [0.0, 1.0],
             },
         ),
-        param("Clamp", ParamKind::Bool { default: true }),
+        side_param("Clamp", ParamKind::Bool { default: true }),
     ],
     bypass_input: Some(0),
 };

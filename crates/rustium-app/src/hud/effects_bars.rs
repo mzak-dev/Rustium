@@ -6,12 +6,14 @@ use egui::{
     pos2, vec2,
 };
 use fluent_bundle::FluentValue;
-use rustium_core::{Command, MaterialGraph, SampleMaterial};
+use rustium_core::{Command, GraphEdit, InputRef, MaterialGraph, SampleMaterial};
 use rustium_render::CompileStatus;
 
 use super::effects::{self, EffectsTab, GraphTool, PreviewShape, rgb};
 use super::widgets::{self, Look};
-use super::{Glass, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, corner, fit_key, fit_level, island};
+use super::{
+    Glass, Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, corner, corner_budget, fit_key, fit_level, island,
+};
 use crate::icons::Icon;
 use crate::theme;
 
@@ -39,7 +41,9 @@ pub(crate) fn preview_view_rect(screen: Rect) -> Rect {
 
 /// The most compact layouts of the islands that share the window's centre.
 const TOP_MAX_LEVEL: u8 = 3;
-const HOTBAR_MAX_LEVEL: u8 = 3;
+const HOTBAR_MAX_LEVEL: u8 = 4;
+/// The hints island keeps three hints, then two, then one.
+const HINTS_MAX_LEVEL: u8 = 2;
 
 pub(crate) fn top_centre(ctx: &Context, hud: &mut Hud<'_>) {
     let budget = centre_budget(ctx, hud, "top-left", "top-right");
@@ -416,7 +420,18 @@ fn swatch(hud: &Hud<'_>, index: usize, graph: &MaterialGraph) -> [Color32; 3] {
         }
     }
     if surface.emission_strength > 0.0 {
-        mid = surface.emission_color.map(f32::from);
+        // A linked Emission (Voxel color in the samples) glows in the Palette Color, not in the unlinked constant.
+        let linked = graph.surface_output().is_some_and(|node| {
+            graph
+                .link_to(InputRef {
+                    node: node.id,
+                    socket: 4,
+                })
+                .is_some()
+        });
+        if !linked {
+            mid = surface.emission_color.map(f32::from);
+        }
         light = 1.25;
         dark = 0.75;
     }
@@ -445,12 +460,13 @@ pub(crate) fn hotbar(ctx: &Context, hud: &mut Hud<'_>) {
         &count,
         &hud.ui.effects.graph,
     ]);
-    // 0: everything. 1: no Material info. 2: at most six Materials. 3: at most three.
+    // 0: everything. 1: no Material info. 2: at most six Materials. 3: at most three. 4: only the first.
     let level = fit_level(ctx, hud, "materials-hotbar", budget, key, HOTBAR_MAX_LEVEL);
     let visible = match level {
         0 | 1 => HOTBAR_VISIBLE,
         2 => 6,
-        _ => 3,
+        3 => 3,
+        _ => 1,
     };
     island(
         ctx,
@@ -503,7 +519,7 @@ fn info_block(ui: &mut Ui, hud: &Hud<'_>) {
     ui.allocate_ui(vec2(112.0, 38.0), |ui| {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(egui::RichText::new(name).font(theme::bold(12.0)).color(theme::TEXT));
+            ui.add(egui::Label::new(egui::RichText::new(name).font(theme::bold(12.0)).color(theme::TEXT)).truncate());
             let info = hud.i18n.tr_args(
                 "effects-material-info",
                 &[(
@@ -556,7 +572,7 @@ fn material_button(ui: &mut Ui, hud: &mut Hud<'_>, index: usize) {
     response.context_menu(|ui| {
         if ui.button(hud.tr("effects-duplicate")).clicked() {
             let index = u32::try_from(index).unwrap_or(0);
-            if effects::command(hud, &Command::DuplicateMaterial { index }) {
+            if effects::command(hud, &effects::duplicate_command(hud, index)) {
                 let last = hud.editor.scene.material_graphs().len().saturating_sub(1);
                 hud.ui.effects.select_graph(last);
             }
@@ -629,11 +645,30 @@ fn new_button(ui: &mut Ui, hud: &mut Hud<'_>) {
             if ui.add_enabled(!full, egui::Button::new(&label)).clicked() {
                 let mut graph = sample.build();
                 graph.name = label;
+                translate_frames(hud, &mut graph);
                 add_material(hud, graph);
                 ui.close();
             }
         }
     });
+}
+
+/// Gives the frames of a freshly built sample their translated labels.
+fn translate_frames(hud: &Hud<'_>, graph: &mut MaterialGraph) {
+    let edits: Vec<GraphEdit> = graph
+        .frames()
+        .iter()
+        .map(|frame| GraphEdit::SetFrame {
+            frame: frame.id,
+            label: effects::core_text(hud, &frame.label),
+            position: frame.position,
+            size: frame.size,
+        })
+        .collect();
+    for edit in edits {
+        // A label that cannot be applied keeps the English text.
+        let _ = graph.apply_edit(&edit);
+    }
 }
 
 /// Adds a Material to the Scene and starts editing it.
@@ -646,6 +681,9 @@ pub(crate) fn add_material(hud: &mut Hud<'_>, graph: MaterialGraph) {
 }
 
 pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
+    let budget = corner_budget(ctx);
+    let key = fit_key(&[&hud.settings.language, &hud.settings.ui_scale_percent]);
+    let hints_level = fit_level(ctx, hud, "effects-hints", budget, key, HINTS_MAX_LEVEL);
     let hints = theme::island()
         .corner_radius(corner(0, 12, 0, 0))
         .inner_margin(egui::Margin {
@@ -668,12 +706,20 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(34.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
+                let shown = match hints_level {
+                    0 => 3,
+                    1 => 2,
+                    _ => 1,
+                };
                 for (button, key) in [
                     ("Tab", "hint-add-node"),
                     ("LMB", "hint-connect"),
                     ("RMB", "hint-tool-wheel"),
                     ("MMB", "hint-pan-graph"),
-                ] {
+                ]
+                .into_iter()
+                .take(shown)
+                {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label(widgets::mono(button, 11.0).color(theme::TEXT));

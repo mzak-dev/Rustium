@@ -80,8 +80,12 @@ pub enum EditKind {
     RenameGraphNode,
     /// A node's Bypass was switched.
     BypassGraphNode,
-    /// A frame of a Material graph was changed (moved, resized, renamed) or removed.
+    /// A frame of a Material graph was moved or removed.
     GraphFrame,
+    /// A frame of a Material graph was renamed.
+    RenameGraphFrame,
+    /// A frame of a Material graph was resized.
+    ResizeGraphFrame,
     /// A frame was added to a Material graph.
     AddGraphFrame,
     /// Nodes of a Material graph were copied.

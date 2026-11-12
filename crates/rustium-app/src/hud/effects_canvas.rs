@@ -103,8 +103,10 @@ pub(crate) fn geometry(node: &GraphNode) -> Geo {
     for index in 0..spec.inputs.len() {
         push(RowKind::Input(index_u8(index)), &mut top);
     }
-    for index in 0..spec.params.len() {
-        push(RowKind::Param(index_u8(index)), &mut top);
+    for (index, param) in spec.params.iter().enumerate() {
+        if param.inline {
+            push(RowKind::Param(index_u8(index)), &mut top);
+        }
     }
     Geo {
         rect: Rect::from_min_max(pos2(left, node.position[1]), pos2(left + width, top + BOTTOM)),
@@ -938,7 +940,12 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     if response.dragged_by(PointerButton::Primary)
         && let Some(position) = pointer
     {
-        update(ctx, hud, response.drag_delta(), position);
+        // egui only starts a drag after a few pixels; count them, so the node stays under the pointer.
+        let delta = match origin {
+            Some(origin) if response.drag_started() => position - origin,
+            _ => response.drag_delta(),
+        };
+        update(ctx, hud, delta, position);
     }
     if response.drag_stopped_by(PointerButton::Primary) {
         end(ctx, hud, pointer);

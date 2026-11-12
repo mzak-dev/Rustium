@@ -2,10 +2,11 @@
 //! shortcuts and the popups (add node, frame label, color picker); the canvas, the islands and the inspector live
 //! in the sibling `effects_*` files.
 
-use egui::{Align2, Color32, Context, Id, Key, Modifiers, Order, Pos2, Rect, Stroke, StrokeKind, Vec2, vec2};
+use egui::{Align2, Color32, Context, Id, Key, Modifiers, Order, Pos2, Rect, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use fluent_bundle::FluentValue;
 use rustium_core::{
-    FrameId, GraphEdit, GraphNodeId, GraphNodeKind, InputRef, MaterialGraph, NodeCategory, OutputRef, ParamValue,
-    SocketType,
+    Command, FrameId, GraphEdit, GraphNodeId, GraphNodeKind, InputRef, MaterialGraph, NodeCategory, OutputRef,
+    ParamValue, SocketType,
 };
 
 use super::effects_canvas::{self, Target};
@@ -184,6 +185,21 @@ pub(crate) fn material_name(hud: &Hud<'_>, index: usize, graph: &MaterialGraph) 
     } else {
         graph.name.clone()
     }
+}
+
+/// The Command that duplicates Material `index`, named "NAME copy" in the interface language.
+pub(crate) fn duplicate_command(hud: &Hud<'_>, index: u32) -> Command {
+    let name = hud
+        .editor
+        .scene
+        .material_graphs()
+        .get(index as usize)
+        .map_or_else(String::new, |graph| {
+            let shown = material_name(hud, index as usize, graph);
+            hud.i18n
+                .tr_args("material-copy-name", &[("name", FluentValue::from(shown))])
+        });
+    Command::DuplicateMaterial { index, name }
 }
 
 /// A translated message for an error of a Material Command; errors without one keep the core's English text.
@@ -456,7 +472,8 @@ pub(crate) fn free_area(screen: Rect, inspector_open: bool) -> Rect {
     let right = if inspector_open {
         super::INSPECTOR_WIDTH + 2.0 * super::MARGIN
     } else {
-        0.0
+        // The tab that expands the collapsed inspector sits on the right edge.
+        36.0
     };
     let top_left = egui::pos2(screen.left() + 76.0, screen.top() + 70.0);
     let bottom_right = egui::pos2(screen.right() - right - 12.0, screen.bottom() - 92.0);
@@ -729,6 +746,16 @@ fn add_popup(ctx: &Context, hud: &mut Hud<'_>) {
     };
     // A press in the frame that opened the popup (a fast click) is not a click outside it.
     let opened_now = popup.fresh;
+    if popup.fresh {
+        // The search field only gets focus after this frame: keep what was typed in the meantime.
+        ctx.input(|input| {
+            for event in &input.events {
+                if let egui::Event::Text(text) = event {
+                    popup.query.push_str(text);
+                }
+            }
+        });
+    }
     let mut kinds = matching_kinds(hud, &popup.query, false);
     let ordered: Vec<GraphNodeKind> = library_groups(&kinds)
         .into_iter()
@@ -921,7 +948,7 @@ fn color_popup(ctx: &Context, hud: &mut Hud<'_>) {
         .constrain(true)
         .show(ctx, |ui| {
             theme::island().fill(theme::PANEL_SOLID).inner_margin(8).show(ui, |ui| {
-                egui::color_picker::color_picker_color32(ui, &mut color, egui::color_picker::Alpha::Opaque);
+                color_picker(ui, &mut color);
             });
         });
     hud.glass.push(Glass {
@@ -960,4 +987,133 @@ pub(crate) fn set_color(hud: &mut Hud<'_>, node: GraphNodeId, target: Target, co
         },
     };
     graph_edit(hud, edit, merge);
+}
+
+/// Width of the color picker's square and strip.
+const PICKER_WIDTH: f32 = 200.0;
+
+/// A color picker in the HUD's style: a saturation / value square, a hue strip and a hex field. Returns whether the
+/// color changed.
+pub(crate) fn color_picker(ui: &mut Ui, color: &mut Color32) -> bool {
+    use egui::Sense;
+    use egui::ecolor::Hsva;
+    use egui::epaint::{Mesh, Vertex, WHITE_UV};
+
+    let state_id = ui.make_persistent_id("hud-color-picker");
+    let bytes = |c: Color32| [c.r(), c.g(), c.b()];
+    // The hue is kept beside the color: a grey has none, and dragging the strip must not lose it.
+    let mut hsva = ui
+        .data(|data| data.get_temp::<Hsva>(state_id))
+        .filter(|kept| bytes(Color32::from(*kept)) == bytes(*color))
+        .unwrap_or_else(|| Hsva::from(*color));
+    let mut changed = false;
+
+    let (square, response) = ui.allocate_exact_size(vec2(PICKER_WIDTH, 132.0), Sense::click_and_drag());
+    if let Some(pointer) = response.interact_pointer_pos() {
+        hsva.s = ((pointer.x - square.left()) / square.width()).clamp(0.0, 1.0);
+        hsva.v = 1.0 - ((pointer.y - square.top()) / square.height()).clamp(0.0, 1.0);
+        changed = true;
+    }
+    let hue_color: Color32 = Hsva::new(hsva.h, 1.0, 1.0, 1.0).into();
+    let mut mesh = Mesh::default();
+    for (position, vertex_color) in [
+        (square.left_top(), Color32::WHITE),
+        (square.right_top(), hue_color),
+        (square.right_bottom(), Color32::BLACK),
+        (square.left_bottom(), Color32::BLACK),
+    ] {
+        mesh.vertices.push(Vertex {
+            pos: position,
+            uv: WHITE_UV,
+            color: vertex_color,
+        });
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(
+        square,
+        3,
+        Stroke::new(1.0, Color32::from_white_alpha(40)),
+        StrokeKind::Inside,
+    );
+    let marker = pos2(
+        square.left() + hsva.s * square.width(),
+        square.top() + (1.0 - hsva.v) * square.height(),
+    );
+    ui.painter()
+        .circle_stroke(marker, 5.5, Stroke::new(2.0, Color32::BLACK));
+    ui.painter()
+        .circle_stroke(marker, 4.5, Stroke::new(1.5, Color32::WHITE));
+
+    ui.add_space(6.0);
+    let (strip, response) = ui.allocate_exact_size(vec2(PICKER_WIDTH, 14.0), Sense::click_and_drag());
+    if let Some(pointer) = response.interact_pointer_pos() {
+        hsva.h = ((pointer.x - strip.left()) / strip.width()).clamp(0.0, 1.0);
+        changed = true;
+    }
+    let mut mesh = Mesh::default();
+    for step in 0..=6_u32 {
+        let t = step as f32 / 6.0;
+        let x = strip.left() + t * strip.width();
+        let tint: Color32 = Hsva::new(t, 1.0, 1.0, 1.0).into();
+        for y in [strip.top(), strip.bottom()] {
+            mesh.vertices.push(Vertex {
+                pos: pos2(x, y),
+                uv: WHITE_UV,
+                color: tint,
+            });
+        }
+        if step > 0 {
+            let base = (step - 1) * 2;
+            mesh.indices
+                .extend([base, base + 1, base + 3, base, base + 3, base + 2]);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(
+        strip,
+        3,
+        Stroke::new(1.0, Color32::from_white_alpha(40)),
+        StrokeKind::Inside,
+    );
+    let knob = Rect::from_center_size(
+        pos2(strip.left() + hsva.h * strip.width(), strip.center().y),
+        vec2(6.0, 18.0),
+    );
+    ui.painter().rect(
+        knob,
+        3,
+        hue_color,
+        Stroke::new(2.0, Color32::WHITE),
+        StrokeKind::Outside,
+    );
+
+    if changed {
+        *color = Hsva::new(hsva.h, hsva.s, hsva.v, 1.0).into();
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(widgets::muted("HEX").size(11.0));
+        let shown = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
+        if let Some(text) = widgets::text_field(ui, egui::IdSalt::new("hud-picker-hex"), &shown, true, None, 84.0)
+            && let Some(parsed) = parse_hex(&text)
+        {
+            *color = parsed;
+            hsva = Hsva::from(parsed);
+            changed = true;
+        }
+    });
+    ui.data_mut(|data| data.insert_temp(state_id, hsva));
+    changed
+}
+
+/// `#RRGGBB` or `RRGGBB` as a color.
+fn parse_hex(text: &str) -> Option<Color32> {
+    let digits = text.trim().trim_start_matches('#');
+    if digits.len() != 6 {
+        return None;
+    }
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    let [_, r, g, b] = value.to_be_bytes();
+    Some(Color32::from_rgb(r, g, b))
 }

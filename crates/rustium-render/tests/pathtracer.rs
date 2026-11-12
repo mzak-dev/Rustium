@@ -1869,3 +1869,17 @@ fn a_changed_view_never_shows_the_old_one_in_part_of_the_picture() {
         "the first sample of the new view completes"
     );
 }
+
+/// Save image, the Shot queue and turntables trace with a snapshot of the material buffers; the copy must be valid.
+#[test]
+fn snapshotting_the_material_buffers_raises_no_validation_error() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipped");
+        return;
+    };
+    let buffers = MaterialBuffers::new(&gpu.device);
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _copy = buffers.snapshot(&gpu.device, &gpu.queue);
+    let error = pollster::block_on(scope.pop());
+    assert!(error.is_none(), "{error:?}");
+}

@@ -85,18 +85,18 @@ pub struct MaterialBuffers {
 }
 
 impl MaterialBuffers {
-    /// Creates empty buffers.
+    /// Creates empty buffers. They are copy sources too, so [`Self::snapshot`] can duplicate them.
     pub fn new(device: &wgpu::Device) -> Self {
         let colors = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("materials colors uniform"),
             size: size_of::<GpuMaterialTable>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("material params storage"),
             size: (PARAM_CAPACITY * size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
         Self { colors, params }

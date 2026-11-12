@@ -296,6 +296,7 @@ pub(crate) fn island<R>(
         .order(Order::Middle)
         .constrain(false)
         .sense(egui::Sense::click_and_drag());
+    let place = placed_by_known_width(ctx, hud, id, place);
     let area = match place {
         Place::Anchor(align, position) => area.anchor(align, position + offset),
         Place::Fixed(position) => area.fixed_pos(position + offset),
@@ -318,6 +319,29 @@ pub(crate) fn island<R>(
         fit.widths[usize::from(fit.level)] = rect.width();
     }
     response
+}
+
+/// An island anchored at the horizontal centre is placed from the width its current layout measured before, instead of
+/// the size the area had last frame: after its content changes (Pause to Render, a Shot added) the anchor would
+/// otherwise centre the old width for one frame.
+fn placed_by_known_width(ctx: &Context, hud: &Hud<'_>, id: &str, place: Place) -> Place {
+    let Place::Anchor(align, offset) = place else {
+        return place;
+    };
+    let (Some(fit), Some(previous)) = (hud.ui.fit.get(id), hud.ui.island_rects.get(id)) else {
+        return place;
+    };
+    let width = fit.widths[usize::from(fit.level)];
+    if align.x() != egui::Align::Center || width == 0.0 {
+        return place;
+    }
+    let screen = ctx.content_rect();
+    let top = match align.y() {
+        egui::Align::Min => screen.top(),
+        egui::Align::Center => screen.center().y - previous.height() / 2.0,
+        egui::Align::Max => screen.bottom() - previous.height(),
+    };
+    Place::Fixed(Pos2::new(screen.center().x - width / 2.0, top) + offset)
 }
 
 /// Space kept between islands that sit side by side.

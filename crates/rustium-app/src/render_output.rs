@@ -30,9 +30,16 @@ pub(crate) enum SaveOutcome {
     Failed(String),
 }
 
-/// Narkowicz's ACES fit, matching `present.wgsl`, clamped to `0..=1`.
+/// Narkowicz's ACES fit, clamped to `0..=1`.
 fn aces(value: f32) -> f32 {
     ((value * (2.51 * value + 0.03)) / (value * (2.43 * value + 0.59) + 0.14)).clamp(0.0, 1.0)
+}
+
+/// ACES with its toe lifted, matching `tonemap` in `present.wgsl`: near the identity for dark values (a dark Color
+/// stays as dark as the Model view shows it), ACES above about 0.05.
+fn tonemap(value: f32) -> f32 {
+    let filmic = aces(value);
+    filmic + (value - filmic) * (-value / 0.04).exp()
 }
 
 /// `0.0..=1.0` to a byte.
@@ -69,7 +76,7 @@ fn to_bytes(image: &TraceImage, with_alpha: bool, exposure: f32) -> Vec<u8> {
             srgb8(if image.display_ready {
                 linear
             } else {
-                aces(linear * exposure)
+                tonemap(linear * exposure)
             })
         }));
         if with_alpha {
@@ -186,13 +193,29 @@ mod tests {
     #[test]
     fn tonemapping_is_monotonic_and_stays_in_range() {
         let mut previous = 0;
-        for step in 0..=80 {
-            let value = srgb8(aces(step as f32 * 0.1));
+        let mut previous_linear = 0.0;
+        for step in 0..=8000 {
+            let linear = step as f32 * 0.0025;
+            let value = srgb8(tonemap(linear));
             assert!(value >= previous);
+            assert!(tonemap(linear) >= previous_linear - 1e-6, "monotonic at {linear}");
             previous = value;
+            previous_linear = tonemap(linear);
         }
-        assert_eq!(srgb8(aces(0.0)), 0);
-        assert_eq!(srgb8(aces(1000.0)), 255);
+        assert_eq!(srgb8(tonemap(0.0)), 0);
+        assert_eq!(srgb8(tonemap(1000.0)), 255);
+    }
+
+    #[test]
+    fn dark_colors_keep_their_darkness_and_highlights_are_filmic() {
+        // The #1A1A1A floor (linear 0.0103) lit about twice over and exposed at -1 EV is what the Model view shows:
+        // sRGB 26, not the 12 or so that plain ACES gives.
+        let lit_floor = srgb8(tonemap(0.0103 * 2.0 * 0.5));
+        assert!((22..=30).contains(&lit_floor), "dark floor reads {lit_floor}");
+        assert!(srgb8(aces(0.0103)) < 16, "plain ACES crushes it");
+        for linear in [0.3, 0.8, 2.0, 6.0] {
+            assert!((tonemap(linear) - aces(linear)).abs() < 1e-3, "unchanged at {linear}");
+        }
     }
 
     #[test]

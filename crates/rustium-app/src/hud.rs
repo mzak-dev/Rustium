@@ -315,9 +315,11 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     }
     // egui hands keyboard focus to the first widget on Tab while the frame is built; remember whether the key was
     // meant for a shortcut before that happens.
-    let tab_shortcut = hud.ui.mode == Mode::Effects
-        && !ctx.egui_wants_keyboard_input()
-        && ctx.input(|input| input.key_pressed(egui::Key::Tab));
+    let text_focus = ctx.egui_wants_keyboard_input();
+    let tab_shortcut =
+        hud.ui.mode == Mode::Effects && !text_focus && ctx.input(|input| input.key_pressed(egui::Key::Tab));
+    // A popup, menu, the Tool wheel or a text field that is open when the frame starts owns the Escape key.
+    let escape_owned = text_focus || escape_owner_open(ctx, hud);
     if hud.ui.mode == Mode::Render {
         render_viewport::layout(ctx, hud);
     }
@@ -342,13 +344,29 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
             render_bottom::corners(ctx, hud);
         }
     }
-    if !hud.ui.modal_open() {
+    if escape_owned && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        // Whatever closed on Escape is drawn one frame later; make sure that frame happens.
+        ctx.request_repaint();
+    }
+    // Keys typed into a text field that loses focus in this very frame (Enter, Escape) are not shortcuts either.
+    if !hud.ui.modal_open() && !text_focus {
         if tab_shortcut {
             ctx.memory_mut(egui::Memory::stop_text_input);
         }
         shortcuts(ctx, hud);
     }
     prompt::show(ctx, hud);
+}
+
+/// Whether something that closes on Escape is open: an egui popup or menu, the Tool wheel, a Scene tree rename or
+/// one of the Effects popups.
+fn escape_owner_open(ctx: &Context, hud: &Hud<'_>) -> bool {
+    egui::Popup::is_any_open(ctx)
+        || hud.ui.tool_wheel.is_some()
+        || hud.ui.renaming.is_some()
+        || hud.ui.effects.add_popup.is_some()
+        || hud.ui.effects.frame_label.is_some()
+        || hud.ui.effects.color_popup.is_some()
 }
 
 /// Puts the MCP client configuration snippet on the clipboard and says so.

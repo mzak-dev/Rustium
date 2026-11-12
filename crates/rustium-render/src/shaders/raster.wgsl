@@ -43,8 +43,11 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let normal = in.normal;
-    let surface = evaluate_material(in.color_index, in.world, normal);
+    // The mesh's per-vertex occlusion feeds the Ambient occlusion node.
+    material_ao = in.ao;
+    let surface = evaluate_material(in.color_index, in.world, in.normal);
+    // The Material may bend the normal (Voxel bevel); it only changes the shading.
+    let normal = surface.normal;
     // Glowing voxels show their emission color unlit (not dimmed); the path tracer is the reference for how they
     // light things. Transmission stays opaque here until the dithered transparency of M4.
     if (surface.emission_strength > 0.0) {

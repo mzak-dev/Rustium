@@ -375,7 +375,8 @@ impl Running {
             .viewport_output
             .get(&ViewportId::ROOT)
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
-        let repaint_delay = if self.ui.mode == Mode::Render && self.ui.render.is_accumulating() {
+        let compiling = *self.viewport.material_status() == rustium_render::CompileStatus::Compiling;
+        let repaint_delay = if compiling || (self.ui.mode == Mode::Render && self.ui.render.is_accumulating()) {
             Duration::ZERO
         } else if self.ui.render.job.is_some() {
             repaint_delay.min(Duration::from_millis(200))
@@ -621,6 +622,7 @@ impl Running {
                 self.editor.scene.material_graphs(),
             );
         }
+        self.viewport.poll_materials(&self.gpu);
         let mode = self.ui.mode;
         if mode == Mode::Render {
             if self.last_mode != Mode::Render || self.trace_revision != Some(self.editor.revision) {

@@ -191,7 +191,7 @@ pub enum Command {
         /// The Material to add.
         graph: Box<MaterialGraph>,
     },
-    /// Copies a Material (the copy is named "<name> copy") and appends it.
+    /// Copies a Material (the copy is named "NAME copy") and appends it.
     DuplicateMaterial {
         /// Index of the Material to copy.
         index: u32,

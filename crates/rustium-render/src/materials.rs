@@ -1,10 +1,10 @@
 use bytemuck::{Pod, Zeroable};
 use rustium_core::{MaterialGraph, Palette};
 
+use crate::material_compiler::PARAM_CAPACITY;
+
 /// Number of Color slots on the GPU: ids 1..=255, slot 0 stays empty so a voxel's byte indexes it directly.
 pub(crate) const COLORS: usize = 256;
-/// Number of material graph records on the GPU.
-pub(crate) const SURFACES: usize = MaterialGraph::MAX_PER_SCENE;
 
 /// One Palette Color as the shaders read it (`shaders/material.wgsl`): linear base color and graph index.
 #[repr(C)]
@@ -18,45 +18,24 @@ pub struct GpuColor {
 
 const _: () = assert!(size_of::<GpuColor>() == 16);
 
-/// The constant Surface parameters of one material graph.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct GpuSurface {
-    /// rgb: linear emission color, a: emission strength (`0` means no glow).
-    pub emission: [f32; 4],
-    /// x: roughness, y: metallic, z: transmission, w: index of refraction.
-    pub params: [f32; 4],
-}
-
-const _: () = assert!(size_of::<GpuSurface>() == 32);
-
-/// Everything `evaluate_material` reads, as one uniform buffer shared by the raster pass and the path tracer.
+/// The Palette as one uniform buffer shared by the raster pass and the path tracer. The Materials themselves are
+/// compiled code plus the `material_params` storage buffer (see [`MaterialBuffers`]).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct GpuMaterialTable {
     /// One entry per Color id.
     pub colors: [GpuColor; COLORS],
-    /// One record per material graph.
-    pub surfaces: [GpuSurface; SURFACES],
 }
 
-const _: () = assert!(size_of::<GpuMaterialTable>() == COLORS * 16 + SURFACES * 32);
+const _: () = assert!(size_of::<GpuMaterialTable>() == COLORS * 16);
 
 impl GpuMaterialTable {
-    /// Builds the table for a Scene's `palette` and `graphs`; unused slots are zeroed and a Color pointing at a
-    /// missing graph falls back to the Default material (0).
+    /// Builds the table for a Scene's `palette`; a Color pointing at a graph that does not exist falls back to the
+    /// Default material (0).
     pub fn new(palette: &Palette, graphs: &[MaterialGraph]) -> Self {
         let mut table = Self::zeroed();
-        for (slot, graph) in table.surfaces.iter_mut().zip(graphs) {
-            let surface = graph.surface_constants();
-            let [r, g, b] = surface.emission_color.map(srgb_to_linear);
-            *slot = GpuSurface {
-                emission: [r, g, b, surface.emission_strength],
-                params: [surface.roughness, surface.metallic, surface.transmission, surface.ior],
-            };
-        }
         for (id, color) in palette.iter() {
-            let graph = if (color.graph as usize) < graphs.len().min(SURFACES) {
+            let graph = if (color.graph as usize) < graphs.len().min(MaterialGraph::MAX_PER_SCENE) {
                 color.graph
             } else {
                 0
@@ -72,6 +51,68 @@ impl GpuMaterialTable {
     }
 }
 
+/// The two GPU buffers the shaders read Colors and Material constants from. Both renderers bind the same pair, and
+/// neither is ever reallocated (the parameter buffer has a fixed capacity), so bind groups stay valid.
+#[derive(Debug, Clone)]
+pub struct MaterialBuffers {
+    colors: wgpu::Buffer,
+    params: wgpu::Buffer,
+}
+
+impl MaterialBuffers {
+    /// Creates empty buffers.
+    pub fn new(device: &wgpu::Device) -> Self {
+        let colors = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("materials colors uniform"),
+            size: size_of::<GpuMaterialTable>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material params storage"),
+            size: (PARAM_CAPACITY * size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { colors, params }
+    }
+
+    /// New buffers holding a copy of these (for a renderer that must not see later edits).
+    #[must_use]
+    pub fn snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let copy = Self::new(device);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("snapshot materials"),
+        });
+        encoder.copy_buffer_to_buffer(&self.colors, 0, &copy.colors, 0, self.colors.size());
+        encoder.copy_buffer_to_buffer(&self.params, 0, &copy.params, 0, self.params.size());
+        queue.submit(std::iter::once(encoder.finish()));
+        copy
+    }
+
+    /// The Palette uniform (binding 1).
+    pub fn colors(&self) -> &wgpu::Buffer {
+        &self.colors
+    }
+
+    /// The Material constants storage buffer (binding 9).
+    pub fn params(&self) -> &wgpu::Buffer {
+        &self.params
+    }
+
+    /// Writes the Palette (cheap, always safe).
+    pub fn write_colors(&self, queue: &wgpu::Queue, palette: &Palette, graphs: &[MaterialGraph]) {
+        let table = GpuMaterialTable::new(palette, graphs);
+        queue.write_buffer(&self.colors, 0, bytemuck::bytes_of(&table));
+    }
+
+    /// Writes the Material constants. Only call it with numbers that belong to the shader the pipelines run.
+    pub fn write_params(&self, queue: &wgpu::Queue, params: &[f32]) {
+        let len = params.len().min(PARAM_CAPACITY);
+        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&params[..len]));
+    }
+}
+
 fn srgb_to_linear(channel: u8) -> f32 {
     let value = f32::from(channel) / 255.0;
     if value <= 0.04045 {
@@ -83,7 +124,7 @@ fn srgb_to_linear(channel: u8) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use rustium_core::{Scene, SurfaceConstants};
+    use rustium_core::Scene;
 
     use super::*;
 
@@ -97,34 +138,12 @@ mod tests {
     }
 
     #[test]
-    fn surface_constants_land_in_the_expected_lanes() {
-        let graphs = [
-            MaterialGraph::default_material(),
-            MaterialGraph::from_constants(
-                "Lamp",
-                SurfaceConstants {
-                    roughness: 0.25,
-                    metallic: 1.0,
-                    emission_color: [255, 255, 255],
-                    emission_strength: 4.0,
-                    transmission: 0.5,
-                    ior: 1.33,
-                },
-            ),
-        ];
-        let table = GpuMaterialTable::new(&Palette::default(), &graphs);
-        assert_eq!(table.surfaces[1].params, [0.25, 1.0, 0.5, 1.33]);
-        assert!((table.surfaces[1].emission[0] - 1.0).abs() < 1e-6);
-        assert!((table.surfaces[1].emission[3] - 4.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn a_color_pointing_at_a_missing_graph_falls_back_to_the_default() {
         let mut scene = Scene::new();
         let id = rustium_core::ColorId::new(3).unwrap();
         let create = rustium_core::Command::CreateGraph {
             name: "Glass".to_owned(),
-            surface: SurfaceConstants::MATTE,
+            surface: rustium_core::SurfaceConstants::MATTE,
         };
         rustium_core::apply(&mut scene, &create).unwrap();
         rustium_core::apply(&mut scene, &rustium_core::Command::AssignGraph { id, graph: 1 }).unwrap();

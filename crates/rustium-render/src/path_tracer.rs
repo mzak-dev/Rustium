@@ -5,9 +5,12 @@ use std::sync::mpsc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
+use rustium_core::MaterialGraph;
 use tracing::warn;
 
 use crate::error::Error;
+use crate::material_compiler::{CompileError, compile_materials, default_compiled};
+use crate::materials::MaterialBuffers;
 use crate::resolve::{self, ResolveInput, Resolver};
 use crate::trace_scene::TraceScene;
 
@@ -294,8 +297,9 @@ struct ResolveKey {
 #[derive(Debug)]
 pub struct PathTracer {
     scene: TraceScene,
-    materials: wgpu::Buffer,
+    materials: MaterialBuffers,
     compute_layout: wgpu::BindGroupLayout,
+    compute_pipeline_layout: wgpu::PipelineLayout,
     compute_pipeline: wgpu::ComputePipeline,
     present_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
@@ -316,21 +320,10 @@ pub struct PathTracer {
 }
 
 impl PathTracer {
-    /// Builds the pipelines; `materials` is the shared Palette and Material uniform and `target_format` the format of
-    /// the view [`PathTracer::encode`] draws into.
-    pub fn new(device: &wgpu::Device, materials: &wgpu::Buffer, target_format: wgpu::TextureFormat) -> Self {
-        let compute_source = format!(
-            "{}{}",
-            include_str!("shaders/material.wgsl"),
-            concat!(
-                include_str!("shaders/pathtracer.wgsl"),
-                include_str!("shaders/trace_style.wgsl")
-            )
-        );
-        let compute_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("path tracer shader"),
-            source: wgpu::ShaderSource::Wgsl(compute_source.into()),
-        });
+    /// Builds the pipelines; `materials` are the buffers shared with the raster pass and `target_format` the format
+    /// of the view [`PathTracer::encode`] draws into. The compute pipeline starts out with only the Default material
+    /// compiled; call [`PathTracer::set_materials`] (or let the [`ViewportRenderer`](crate::ViewportRenderer) do it).
+    pub fn new(device: &wgpu::Device, materials: &MaterialBuffers, target_format: wgpu::TextureFormat) -> Self {
         let present_source = format!(
             "{}{}",
             include_str!("shaders/fullscreen.wgsl"),
@@ -371,6 +364,7 @@ impl PathTracer {
                 buffer_entry(2, storage),
                 buffer_entry(3, storage),
                 buffer_entry(6, storage),
+                buffer_entry(9, storage),
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -391,14 +385,8 @@ impl PathTracer {
             bind_group_layouts: &[Some(&compute_layout)],
             immediate_size: 0,
         });
-        let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("path tracer pipeline"),
-            layout: Some(&compute_pipeline_layout),
-            module: &compute_module,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let compute_pipeline =
+            create_compute_pipeline(device, &compute_pipeline_layout, &default_compiled().shader_source());
 
         let present_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path tracer present bind group layout"),
@@ -468,6 +456,7 @@ impl PathTracer {
             scene: TraceScene::new(device),
             materials: materials.clone(),
             compute_layout,
+            compute_pipeline_layout,
             compute_pipeline,
             present_layout,
             present_pipeline,
@@ -490,6 +479,45 @@ impl PathTracer {
     pub fn upload_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &rustium_core::Scene) {
         self.scene.upload(device, queue, scene);
         self.restart();
+    }
+
+    /// The layout the compute pipeline is built against (for rebuilding it on a worker thread).
+    pub(crate) fn compute_pipeline_layout(&self) -> &wgpu::PipelineLayout {
+        &self.compute_pipeline_layout
+    }
+
+    /// Rebuilds the compute pipeline from a complete material module (see `MaterialCompiler::live_source`).
+    pub(crate) fn set_material_source(&mut self, device: &wgpu::Device, material_source: &str) {
+        self.compute_pipeline = create_compute_pipeline(device, &self.compute_pipeline_layout, material_source);
+    }
+
+    /// Swaps in a compute pipeline built from newly compiled Materials and restarts accumulation.
+    pub(crate) fn set_compute_pipeline(&mut self, pipeline: wgpu::ComputePipeline) {
+        self.compute_pipeline = pipeline;
+        self.restart();
+    }
+
+    /// Compiles `graphs`, uploads their constants and swaps in the new pipeline, waiting for the driver. The viewport
+    /// does this in the background instead; this is for tools and tests that have no frame to protect.
+    ///
+    /// # Errors
+    ///
+    /// [`CompileError`] when the graphs do not compile to valid WGSL.
+    pub fn set_materials(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        graphs: &[MaterialGraph],
+    ) -> Result<(), CompileError> {
+        let compiled = compile_materials(graphs)?;
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = create_compute_pipeline(device, &self.compute_pipeline_layout, &compiled.shader_source());
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            return Err(CompileError::Shader(error.to_string()));
+        }
+        self.materials.write_params(queue, &compiled.params);
+        self.set_compute_pipeline(pipeline);
+        Ok(())
     }
 
     /// Throws away accumulated samples; call after the Palette changed.
@@ -877,7 +905,7 @@ impl PathTracer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: self.materials.as_entire_binding(),
+                        resource: self.materials.colors().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -890,6 +918,10 @@ impl PathTracer {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: self.scene.models().as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: self.materials.params().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -930,6 +962,34 @@ impl PathTracer {
             ],
         })
     }
+}
+
+/// The full WGSL of the path tracer: material module, then the tracer.
+pub(crate) fn compute_shader_source(material_source: &str) -> String {
+    format!(
+        "{material_source}{}{}",
+        include_str!("shaders/pathtracer.wgsl"),
+        include_str!("shaders/trace_style.wgsl")
+    )
+}
+
+pub(crate) fn create_compute_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    material_source: &str,
+) -> wgpu::ComputePipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("path tracer shader"),
+        source: wgpu::ShaderSource::Wgsl(compute_shader_source(material_source).into()),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("path tracer pipeline"),
+        layout: Some(layout),
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
 }
 
 /// Unit vector towards the sun for an azimuth (`turn`) and elevation (`height`) in degrees.

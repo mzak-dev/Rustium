@@ -12,7 +12,7 @@
 use glam::{IVec3, Mat4, Vec3};
 use rustium_core::{
     Brush, ColorId, Command, Face, GraphEdit, GraphNodeKind, HitTarget, InputValue, Mirror, NodeId, Orientation,
-    RayHit, SampleMaterial, Scene, SurfaceConstants, Transform, VoxelTool, apply,
+    ParamValue, RayHit, SampleMaterial, Scene, SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
     Ground, MaterialBuffers, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame,
@@ -966,6 +966,63 @@ fn a_model_space_gradient_moves_with_its_model() {
     );
 }
 
+/// A patch of Roof slate (its Noise Vector is linked from Voxel color's Position) seen from above, the Model moved by
+/// `offset` and the camera with it; `space` is the Noise node's Space choice (0 Model, 1 World).
+fn slate_patch(gpu: &Gpu, offset: IVec3, space: u32) -> TraceImage {
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-5, 0, -5), IVec3::new(4, 0, 4), id(3));
+    let graph = u32::try_from(scene.material_graphs().len()).unwrap();
+    let mut slate = SampleMaterial::RoofSlate.build();
+    let noise = slate
+        .nodes()
+        .iter()
+        .find(|node| node.kind == GraphNodeKind::Noise)
+        .unwrap()
+        .id;
+    slate
+        .apply_edit(&GraphEdit::SetParam {
+            node: noise,
+            param: 3,
+            value: ParamValue::Choice(space),
+        })
+        .unwrap();
+    apply(&mut scene, &Command::AddMaterial { graph: Box::new(slate) }).unwrap();
+    apply(&mut scene, &Command::AssignGraph { id: id(3), graph }).unwrap();
+    let model = first_model(&scene);
+    let transform = Transform {
+        orientation: Orientation::default(),
+        offset,
+    };
+    apply(&mut scene, &Command::SetTransform { node: model, transform }).unwrap();
+    let shift = offset.as_vec3();
+    let camera = Camera::looking_at(Vec3::new(0.0, 22.0, 0.01) + shift, shift);
+    let setup = Setup {
+        sky: Sky::Overcast,
+        ground: Ground::None,
+        sun_height: 70.0,
+        samples: 64,
+        ..Setup::default()
+    };
+    render(gpu, &scene, &camera, &setup)
+}
+
+#[test]
+fn a_model_space_pattern_linked_to_the_voxel_position_moves_with_its_model() {
+    let gpu = gpu_or_skip!();
+    let home = slate_patch(&gpu, IVec3::ZERO, 0);
+    let moved = slate_patch(&gpu, IVec3::new(13, 9, -7), 0);
+    let (same, _) = difference(&home, &moved);
+    let world = slate_patch(&gpu, IVec3::new(13, 9, -7), 1);
+    let (changed, _) = difference(&home, &world);
+    dump("slate-home", &home);
+    dump("slate-moved", &moved);
+    dump("slate-world", &world);
+    assert!(
+        same * 3.0 < changed,
+        "in Model space the moved patch looks the same as at home ({same}); in World space it does not ({changed})"
+    );
+}
+
 /// How far two images of the same scene are apart: the mean absolute difference per channel, and the share of pixels
 /// that differ clearly (more than 0.25 in any channel).
 fn difference(a: &TraceImage, b: &TraceImage) -> (f32, f32) {
@@ -1377,6 +1434,39 @@ fn a_material_that_does_not_cast_shadows_leaves_the_floor_lit() {
     assert!(
         dark > light * 0.8,
         "without a shadow the floor stays lit: {dark} against {light}"
+    );
+}
+
+#[test]
+fn an_opaque_material_with_an_empty_volume_output_still_casts_a_shadow() {
+    let gpu = gpu_or_skip!();
+    let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        sun_height: 40.0,
+        samples: 48,
+        ..bright_setup()
+    };
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-12, 0, -12), IVec3::new(12, 0, 12), id(3));
+    fill(&mut scene, IVec3::new(-2, 1, -2), IVec3::new(1, 4, 1), id(37));
+    shade(&mut scene, 37, SurfaceConstants::MATTE);
+    let index = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+    let add = Command::EditMaterial {
+        index,
+        edit: GraphEdit::AddNode {
+            kind: GraphNodeKind::VolumeOutput,
+            position: [0.0, 0.0],
+        },
+    };
+    apply(&mut scene, &add).unwrap();
+    let image = render(&gpu, &scene, &camera, &setup);
+    dump("volume-zero-shadow", &image);
+    let shadowed_spot = camera.pixel(Vec3::new(-4.0, 1.0, 3.0));
+    let lit_spot = camera.pixel(Vec3::new(5.0, 1.0, 5.0));
+    assert!(
+        luminance(&image, shadowed_spot) * 1.5 < luminance(&image, lit_spot),
+        "an opaque voxel with a zero-density Volume output blocks the sun"
     );
 }
 

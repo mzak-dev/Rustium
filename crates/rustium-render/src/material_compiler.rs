@@ -253,15 +253,26 @@ impl Emitter {
         }
     }
 
-    /// Like [`Emitter::input`] for the Vector input of Noise, Cells and Gradient: while the input holds its default
-    /// Position, the node's Space option (Model / World, a runtime parameter) picks the Model-local or the Scene
-    /// position. A linked or constant vector is used as it is.
-    fn spatial_input(&mut self, graph: &MaterialGraph, node: &GraphNode, socket: u8, space: &str) -> String {
+    /// Like [`Emitter::input`] for the Vector input of Noise, Cells and Gradient. Returns the position and the matching
+    /// normal. While the input holds its default Position, or is linked straight from Voxel color's Position output,
+    /// the node's Space option (Model / World, a runtime parameter) picks the Model-local or the Scene position (and
+    /// normal). Any other linked or constant vector is used as it is, paired with the Scene normal.
+    fn spatial_input(&mut self, graph: &MaterialGraph, node: &GraphNode, socket: u8, space: &str) -> (String, String) {
         let vector = self.input(graph, node, socket);
-        if vector == "position" {
-            format!("select(position, local_position, {space} < 0.5)")
+        let from_position = vector == "position"
+            || graph
+                .link_to(InputRef { node: node.id, socket })
+                .and_then(|link| graph.node(link.from.node).map(|source| (source, link.from.socket)))
+                .is_some_and(|(source, out_socket)| {
+                    source.kind == GraphNodeKind::VoxelColor && out_socket == 1 && !source.bypass
+                });
+        if from_position {
+            (
+                format!("select(position, local_position, {space} < 0.5)"),
+                format!("select(normal, local_normal, {space} < 0.5)"),
+            )
         } else {
-            vector
+            (vector, "normal".to_owned())
         }
     }
 
@@ -345,11 +356,11 @@ impl Emitter {
                 let detail = self.param(node, 1).scalar();
                 let seed = self.param(node, 2).scalar();
                 let space = self.param(node, 3).scalar();
-                let vector = self.spatial_input(graph, node, 0, &space);
+                let (vector, snap_normal) = self.spatial_input(graph, node, 0, &space);
                 let per_voxel = self.param(node, 4).scalar();
                 let _ = writeln!(
                     out,
-                    "    let {v0} = noise_pattern({vector}, select(normal, local_normal, {space} < 0.5), {scale}, i32({detail}), u32({seed}), {per_voxel} > 0.5);"
+                    "    let {v0} = noise_pattern({vector}, {snap_normal}, {scale}, i32({detail}), u32({seed}), {per_voxel} > 0.5);"
                 );
             }
             GraphNodeKind::Cells => {
@@ -357,7 +368,7 @@ impl Emitter {
                 let randomness = self.param(node, 1).scalar();
                 let seed = self.param(node, 2).scalar();
                 let space = self.param(node, 3).scalar();
-                let vector = self.spatial_input(graph, node, 0, &space);
+                let (vector, _) = self.spatial_input(graph, node, 0, &space);
                 let cells = format!("c{}", id.get());
                 let _ = writeln!(
                     out,
@@ -370,7 +381,7 @@ impl Emitter {
                 let axis = self.param(node, 0).scalar();
                 let range = self.param(node, 1).vec2();
                 let space = self.param(node, 2).scalar();
-                let vector = self.spatial_input(graph, node, 0, &space);
+                let (vector, _) = self.spatial_input(graph, node, 0, &space);
                 let _ = writeln!(out, "    let {v0} = gradient_pattern({vector}, i32({axis}), {range});");
             }
             GraphNodeKind::EdgeWear => {
@@ -512,6 +523,19 @@ mod tests {
         let other = compile(world);
         assert_eq!(compiled.generated, other.generated);
         assert_ne!(compiled.params, other.params);
+    }
+
+    #[test]
+    fn a_vector_linked_from_the_voxel_position_follows_the_space_option() {
+        let compiled = compile(SampleMaterial::RoofSlate.build());
+        assert!(
+            compiled.generated.contains("select(position, local_position, mp("),
+            "the linked Position still reads Space"
+        );
+        assert!(
+            compiled.generated.contains("select(normal, local_normal, mp("),
+            "and the snapping normal is paired with the position"
+        );
     }
 
     #[test]

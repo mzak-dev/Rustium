@@ -1128,7 +1128,7 @@ mod tests {
         let padded = 96_000;
         let rows = readback_band_rows(256 << 20, padded, 4000);
         assert!(u64::from(rows) * u64::from(padded) <= (256 << 20) / 4);
-        assert!(rows >= 1 && rows < 4000);
+        assert!((1..4000).contains(&rows));
         assert_eq!(
             readback_band_rows(u64::MAX, 256, 10),
             10,

@@ -8,10 +8,11 @@
 use std::sync::mpsc;
 use std::thread;
 
+use bytemuck::Zeroable;
 use wgpu::naga;
 
 use crate::material_compiler::{CompileError, CompiledMaterials, assemble};
-use crate::materials::MaterialBuffers;
+use crate::materials::{GpuMaterialTable, MaterialBuffers};
 use crate::path_tracer::{TraceEngine, compute_shader_source, create_compute_pipeline};
 use crate::viewport_renderer::{create_raster_pair, raster_shader_source};
 
@@ -54,6 +55,8 @@ struct Pending {
     generation: u64,
     generated: String,
     params: Vec<f32>,
+    /// The color table that goes with `generated`: its Material indices only make sense for that shader.
+    table: GpuMaterialTable,
 }
 
 /// Tracks which generated source the live pipelines run and builds replacements in the background.
@@ -61,6 +64,10 @@ struct Pending {
 pub(crate) struct MaterialCompiler {
     buffers: MaterialBuffers,
     live: String,
+    /// The color table the live shader runs with.
+    live_table: GpuMaterialTable,
+    /// Source that failed to build, so changing only numbers does not build it again.
+    failed: Option<String>,
     status: CompileStatus,
     pending: Option<Pending>,
     sender: mpsc::Sender<Message>,
@@ -75,6 +82,8 @@ impl MaterialCompiler {
         Self {
             buffers,
             live,
+            live_table: GpuMaterialTable::zeroed(),
+            failed: None,
             status: CompileStatus::Compiled,
             pending: None,
             sender,
@@ -99,36 +108,49 @@ impl MaterialCompiler {
         queue: &wgpu::Queue,
         context: &BuildContext,
         compiled: Result<CompiledMaterials, CompileError>,
+        table: &GpuMaterialTable,
     ) {
+        // Until a new shader is live the table keeps pointing at the Materials the live shader knows, so Colors can
+        // change at once without any of them landing on the wrong Material.
+        let interim = (*table).with_graphs_of(&self.live_table);
         let compiled = match compiled {
             Ok(compiled) => compiled,
             Err(error) => {
                 self.pending = None;
                 self.status = CompileStatus::Error(error.to_string());
+                self.buffers.write_table(queue, &interim);
                 return;
             }
         };
         if compiled.generated == self.live {
-            // Includes undoing back to what is already running: any build in flight is obsolete.
             self.pending = None;
+            self.failed = None;
             self.buffers.write_params(queue, &compiled.params);
+            self.live_table = *table;
+            self.buffers.write_table(queue, table);
             self.status = CompileStatus::Compiled;
-        } else if let Some(pending) = self.pending.as_mut().filter(|p| p.generated == compiled.generated) {
+            return;
+        }
+        self.buffers.write_table(queue, &interim);
+        if let Some(pending) = self.pending.as_mut().filter(|p| p.generated == compiled.generated) {
             pending.params = compiled.params;
+            pending.table = *table;
             self.status = CompileStatus::Compiling;
+        } else if self.failed.as_deref() == Some(compiled.generated.as_str()) {
+            // This exact source already failed; only its numbers changed, so building it again fails again.
+            self.pending = None;
         } else {
-            self.start(context, compiled.generated, compiled.params);
+            self.start(context, compiled.generated, compiled.params, table);
         }
     }
 
-    /// Builds the pending shader again, e.g. for a new MSAA sample count.
     pub(crate) fn restart_pending(&mut self, context: &BuildContext) {
         if let Some(pending) = self.pending.take() {
-            self.start(context, pending.generated, pending.params);
+            self.start(context, pending.generated, pending.params, &pending.table);
         }
     }
 
-    fn start(&mut self, context: &BuildContext, generated: String, params: Vec<f32>) {
+    fn start(&mut self, context: &BuildContext, generated: String, params: Vec<f32>, table: &GpuMaterialTable) {
         self.next_generation += 1;
         let generation = self.next_generation;
         let source = assemble(&generated);
@@ -136,7 +158,9 @@ impl MaterialCompiler {
             generation,
             generated,
             params,
+            table: *table,
         });
+        self.failed = None;
         self.status = CompileStatus::Compiling;
         let context = context.clone();
         let sender = self.sender.clone();
@@ -168,11 +192,17 @@ impl MaterialCompiler {
             match message.result {
                 Ok(pipelines) => {
                     self.buffers.write_params(queue, &pending.params);
+                    self.buffers.write_table(queue, &pending.table);
+                    self.live_table = pending.table;
                     self.live = pending.generated;
+                    self.failed = None;
                     self.status = CompileStatus::Compiled;
                     built = Some(pipelines);
                 }
-                Err(error) => self.status = CompileStatus::Error(error),
+                Err(error) => {
+                    self.failed = Some(pending.generated);
+                    self.status = CompileStatus::Error(error);
+                }
             }
         }
         built
@@ -301,7 +331,9 @@ mod tests {
         };
         let mut graphs = vec![MaterialGraph::default_material(), SampleMaterial::Stone.build()];
         let compiled = compile_materials(&graphs);
-        harness.compiler.request(&harness.queue, &harness.context, compiled);
+        harness
+            .compiler
+            .request(&harness.queue, &harness.context, compiled, &GpuMaterialTable::zeroed());
         assert_eq!(*harness.compiler.status(), CompileStatus::Compiling);
         assert!(wait_for_build(&mut harness).is_some(), "the build finishes");
         assert_eq!(*harness.compiler.status(), CompileStatus::Compiled);
@@ -309,7 +341,9 @@ mod tests {
         // Same shape, different number: no build at all.
         graphs[1].casts_shadow = false;
         let compiled = compile_materials(&graphs);
-        harness.compiler.request(&harness.queue, &harness.context, compiled);
+        harness
+            .compiler
+            .request(&harness.queue, &harness.context, compiled, &GpuMaterialTable::zeroed());
         assert_eq!(*harness.compiler.status(), CompileStatus::Compiled);
         assert!(harness.compiler.poll(&harness.queue).is_none());
     }
@@ -321,14 +355,20 @@ mod tests {
             return;
         };
         let stone = vec![MaterialGraph::default_material(), SampleMaterial::Stone.build()];
-        harness
-            .compiler
-            .request(&harness.queue, &harness.context, compile_materials(&stone));
+        harness.compiler.request(
+            &harness.queue,
+            &harness.context,
+            compile_materials(&stone),
+            &GpuMaterialTable::zeroed(),
+        );
         // Back to the shader that is live before the build finishes.
         let default = vec![MaterialGraph::default_material()];
-        harness
-            .compiler
-            .request(&harness.queue, &harness.context, compile_materials(&default));
+        harness.compiler.request(
+            &harness.queue,
+            &harness.context,
+            compile_materials(&default),
+            &GpuMaterialTable::zeroed(),
+        );
         assert_eq!(*harness.compiler.status(), CompileStatus::Compiled);
         std::thread::sleep(Duration::from_millis(300));
         assert!(
@@ -351,16 +391,52 @@ mod tests {
     }
 
     #[test]
+    fn numbers_changing_on_a_shader_that_failed_do_not_rebuild_it() {
+        let Some(mut harness) = harness() else {
+            eprintln!("no GPU adapter, skipping");
+            return;
+        };
+        let graphs = vec![MaterialGraph::default_material(), SampleMaterial::Stone.build()];
+        let compiled = compile_materials(&graphs).unwrap();
+        harness.compiler.failed = Some(compiled.generated.clone());
+        harness.compiler.status = CompileStatus::Error("boom".to_owned());
+        harness.compiler.request(
+            &harness.queue,
+            &harness.context,
+            Ok(compiled),
+            &GpuMaterialTable::zeroed(),
+        );
+        assert!(harness.compiler.pending.is_none(), "no build was started");
+        assert!(matches!(harness.compiler.status(), CompileStatus::Error(_)));
+    }
+
+    #[test]
+    fn the_interim_table_keeps_the_materials_the_live_shader_knows() {
+        let mut live = GpuMaterialTable::zeroed();
+        live.colors[3].graph = 1;
+        let mut wanted = GpuMaterialTable::zeroed();
+        wanted.colors[3].graph = 2;
+        wanted.colors[3].albedo = [0.5, 0.5, 0.5];
+        let interim = wanted.with_graphs_of(&live);
+        assert_eq!(interim.colors[3].graph, 1);
+        assert_eq!(interim.colors[3].albedo, [0.5, 0.5, 0.5]);
+    }
+
+    #[test]
     fn a_graph_the_compiler_rejects_shows_as_an_error_until_fixed() {
         let Some(mut harness) = harness() else {
             eprintln!("no GPU adapter, skipping");
             return;
         };
         let compiled = Err(crate::material_compiler::CompileError::TooManyParameters(1));
-        harness.compiler.request(&harness.queue, &harness.context, compiled);
+        harness
+            .compiler
+            .request(&harness.queue, &harness.context, compiled, &GpuMaterialTable::zeroed());
         assert!(matches!(harness.compiler.status(), CompileStatus::Error(_)));
         let compiled = compile_materials(&[MaterialGraph::default_material()]);
-        harness.compiler.request(&harness.queue, &harness.context, compiled);
+        harness
+            .compiler
+            .request(&harness.queue, &harness.context, compiled, &GpuMaterialTable::zeroed());
         assert_eq!(*harness.compiler.status(), CompileStatus::Compiled);
     }
 }

@@ -61,6 +61,16 @@ pub struct GpuMaterialTable {
 const _: () = assert!(size_of::<GpuMaterialTable>() == COLORS * 16);
 
 impl GpuMaterialTable {
+    /// This table with the Material indices (and their flags) of `live`: the new Colors, but still pointing at
+    /// Materials the shader that is running knows.
+    #[must_use]
+    pub(crate) fn with_graphs_of(mut self, live: &Self) -> Self {
+        for (color, live) in self.colors.iter_mut().zip(&live.colors) {
+            color.graph = live.graph;
+        }
+        self
+    }
+
     /// Builds the table for a Scene's `palette`; a Color pointing at a graph that does not exist falls back to the
     /// Default material (0).
     pub fn new(palette: &Palette, graphs: &[MaterialGraph]) -> Self {
@@ -140,10 +150,14 @@ impl MaterialBuffers {
         &self.params
     }
 
-    /// Writes the Palette (cheap, always safe).
+    /// Writes the Palette straight into the color table (for renderers without a background shader build).
     pub fn write_colors(&self, queue: &wgpu::Queue, palette: &Palette, graphs: &[MaterialGraph]) {
-        let table = GpuMaterialTable::new(palette, graphs);
-        queue.write_buffer(&self.colors, 0, bytemuck::bytes_of(&table));
+        self.write_table(queue, &GpuMaterialTable::new(palette, graphs));
+    }
+
+    /// Writes the color table.
+    pub fn write_table(&self, queue: &wgpu::Queue, table: &GpuMaterialTable) {
+        queue.write_buffer(&self.colors, 0, bytemuck::bytes_of(table));
     }
 
     /// Writes the Material constants. Only call it with numbers that belong to the shader the pipelines run.

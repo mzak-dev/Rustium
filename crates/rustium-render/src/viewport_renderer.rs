@@ -9,7 +9,7 @@ use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
 use crate::material_compiler::{compile_materials, default_compiled};
 use crate::material_pipelines::{BuildContext, CompileStatus, MaterialCompiler};
-use crate::materials::{MaterialBuffers, is_transparent};
+use crate::materials::{GpuMaterialTable, MaterialBuffers, is_transparent};
 use crate::offline::OfflineRenderer;
 use crate::path_tracer::{PathTracer, RayTracing, TraceEngine, TraceFrame, TraceImage, TraceProgress};
 use crate::taa::{self, TaaPass, TaaTargets, TaaUniform};
@@ -299,13 +299,14 @@ impl ViewportRenderer {
     /// pipelines keep drawing, and [`ViewportRenderer::poll_materials`] (also called by `render`) swaps the new ones
     /// in. A graph that does not compile leaves the old pipelines in place and shows [`CompileStatus::Error`].
     pub fn set_materials(&mut self, gpu: &GpuContext, palette: &Palette, graphs: &[MaterialGraph]) {
-        self.materials.write_colors(gpu.queue(), palette, graphs);
+        let table = GpuMaterialTable::new(palette, graphs);
         self.has_transparency = palette
             .iter()
             .any(|(_, color)| graphs.get(color.graph as usize).is_some_and(is_transparent));
         self.taa.edited = true;
         let context = self.build_context(gpu);
-        self.compiler.request(gpu.queue(), &context, compile_materials(graphs));
+        self.compiler
+            .request(gpu.queue(), &context, compile_materials(graphs), &table);
         self.tracer.restart();
     }
 

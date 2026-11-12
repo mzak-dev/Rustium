@@ -10,7 +10,7 @@
 [![wgpu 30](https://img.shields.io/badge/wgpu-30-7C9CF5)](https://wgpu.rs)
 [![egui 0.37](https://img.shields.io/badge/egui-0.37-35D0C8)](https://github.com/emilk/egui)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-B6E36A)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Windows_·_Linux_·_macOS-1A1D22)
+![Platform](https://img.shields.io/badge/platform-Windows_·_Linux_·_macOS_·_Web-1A1D22)
 ![Status](https://img.shields.io/badge/status-M1–M7_·_preview-A6AFBC)
 
 <img src="docs/images/editor.jpg" alt="Rustium editor: a voxel scene with glass and colored blocks on a ground grid, floating glass tool panels around the viewport" width="100%">
@@ -106,6 +106,8 @@ Every shortcut can be rebound in Settings → Input; these are the defaults.
 
 ## Getting started
 
+**Try it in the browser:** [mzak-dev.github.io/Rustium](https://mzak-dev.github.io/Rustium/) (needs WebGPU; files, scripts, MCP and saved renders are desktop only, see [docs/web.md](docs/web.md)).
+
 You need a recent stable Rust toolchain (`rust-toolchain.toml` pins `stable`) and a GPU with Vulkan or Metal (DirectX 12 is turned off for now: its shader compiler cannot build the path tracer).
 
 ```bash
@@ -150,13 +152,15 @@ flowchart LR
 | [`rustium-mcp`](crates/rustium-mcp) | MCP server over HTTP and the stdio bridge; the only crate with tokio. |
 | [`rustium-script`](crates/rustium-script) | Sandboxed Luau scripting through mlua. |
 | [`rustium-platform`](crates/rustium-platform) | Win32 hit-testing for the frameless window; the only crate with `unsafe`. |
-| [`rustium-app`](crates/rustium-app) | The `rustium` binary: winit, egui interface, i18n, camera, keymap, files, render jobs, settings, logging. |
+| [`rustium-app`](crates/rustium-app) | The editor (a library) and the `rustium` binary: winit, egui interface, i18n, camera, keymap, files, render jobs, settings, logging. |
+| [`rustium-web`](crates/rustium-web) | The browser entry point (WebAssembly): console logging and panics, then the editor on a `<canvas>`. |
 
 Further reading:
 - [ARCHITECTURE.md](ARCHITECTURE.md): how a frame flows and the coordinate conventions.
 - [GLOSSARY.md](GLOSSARY.md): the project's vocabulary (Scene, Model, Shape, Volume, Edit…).
-- [docs/adr](docs/adr): fourteen architecture decisions with their trade-offs.
+- [docs/adr](docs/adr): fifteen architecture decisions with their trade-offs.
 - [docs/releasing.md](docs/releasing.md): how versions, the changelog and release packages are produced.
+- [docs/web.md](docs/web.md): the browser version, how to build it locally and how it is deployed.
 
 ## Development
 

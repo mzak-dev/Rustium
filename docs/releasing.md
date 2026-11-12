@@ -36,10 +36,11 @@ The highest bump among the commits since the last `v*` tag wins. All crates shar
 
 | Workflow | Trigger | Job |
 |---|---|---|
-| `ci.yml` | PRs, pushes to main, merge queue | nightly rustfmt; Clippy with `-D warnings` and tests on Windows, Linux (with lavapipe, so the GPU tests run) and macOS; rustdoc with `-D warnings`; the release tooling's tests. `CI success` collects them for branch protection. |
+| `ci.yml` | PRs, pushes to main, merge queue | nightly rustfmt; Clippy with `-D warnings` and tests on Windows, Linux (with lavapipe, so the GPU tests run) and macOS; rustdoc with `-D warnings`; the release tooling's tests; Clippy for `wasm32` and the browser build with its smoke test. `CI success` collects them for branch protection. |
 | `pr-title.yml` | PR opened or edited | the title is a Conventional Commit header |
 | `release.yml` | push to main, manual | `plan`, then either the release PR or build and publish (below) |
 | `release-approve.yml` | the release PR is opened or updated | verify the bump, approve, optionally enable auto-merge |
+| `pages.yml` | push to main, manual | build the browser version, smoke-test it and publish it on GitHub Pages ([docs/web.md](web.md)) |
 
 `scripts/release.py plan` decides, from the commit on main and the tags only:
 

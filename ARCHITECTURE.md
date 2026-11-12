@@ -1,16 +1,18 @@
 # Architecture
 
 Rustium is a Cargo workspace. Dependencies point down: `rustium-app → rustium-render → rustium-core`; `rustium-app` also uses
-`rustium-mcp`, `rustium-script` (`rustium-script → rustium-core`) and `rustium-platform`.
+`rustium-mcp`, `rustium-script` (`rustium-script → rustium-core`) and `rustium-platform`; `rustium-web → rustium-app` is the
+browser entry point.
 Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons are in [docs/adr](docs/adr).
 
 | Crate | Owns | Must not depend on |
 |---|---|---|
 | `rustium-core` | Scene graph (Groups, Models, Instances), Shape (copy-on-write 32³ chunks), Palette, material graphs, Commands → Edits, History, raycast and Scene picking, Brush / Fill / Mirror geometry, greedy meshing, the `.ruv`, MagicaVoxel `.vox` and JASC `.pal` readers and writers (pure bytes in, bytes out) | GPU, windowing, async |
 | `rustium-render` | wgpu device and surface, chunk raster with MSAA, ground grid, overlay lines, glass blur and composite, the Render-mode path tracer | windowing, egui |
-| `rustium-app` | the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging, documents (Open / Save, dirty tracking, autosave and recovery, recent files) | — |
+| `rustium-app` | the editor as a library, plus the `rustium` binary: winit lifecycle, egui HUD / Settings / start screen, i18n (PL + EN), camera, input, logging, documents (Open / Save, dirty tracking, autosave and recovery, recent files) | — |
 | `rustium-mcp` | in-process MCP server (streamable HTTP on `127.0.0.1:7420`) and the `--mcp-stdio` bridge; the only crate with tokio | the Scene (it depends on no other Rustium crate) |
 | `rustium-script` | sandboxed Luau scripting through mlua; a run is one `Edit` | GPU, windowing, async |
+| `rustium-web` | the browser entry point (`cdylib`, built with `wasm-pack`): panic hook and console logging, then `rustium_app::web::run`; empty off `wasm32` | everything but `rustium-app` |
 | `rustium-platform` | Win32 `WM_NCHITTEST` for the frameless window (Snap Layouts over the maximize button, native title-bar drag and resize edges); a no-op off Windows; the only crate with `unsafe` | everything else |
 
 ## Data flow of one frame
@@ -209,6 +211,22 @@ UI thread: user_event → McpHost::drain → automation::handle → Editor::exec
 Everything in core and render is in voxel space (one unit = one voxel, Y up). Metres appear only in the
 interface, through the Scene's Voxel size. Interface sizes are logical points; the app converts glass
 rects to physical pixels with egui's `pixels_per_point` before handing them to the renderer.
+
+## Web build
+
+The same crates build for `wasm32-unknown-unknown` ([ADR 0015](docs/adr/0015-web-build.md), [docs/web.md](docs/web.md)).
+`scripts/build-web.sh` builds `rustium-web` with `wasm-pack` next to `web/index.html`, which checks for WebGPU and loads
+the module; `rustium_app::web::run` then runs the usual `App` on the page's `<canvas id="rustium">`.
+
+- **No threads.** File jobs run when they are submitted (`files::Io` keeps its interface); Material pipelines are created
+  on the spot and their error scope is awaited with `wasm-bindgen-futures`. Anything that blocks on the GPU
+  (`OfflineRenderer`, `read_image`) is compiled for native targets only.
+- **Asynchronous GPU.** `resumed` creates the canvas and requests the GPU; `UserEvent::GpuReady` assembles `Running`.
+- **Platform gaps** are `cfg(target_arch = "wasm32")` at module level (logging, MCP host, scripts, render jobs, which
+  get a `JobHandle` with no values) or `crate::DESKTOP` in the interface (window buttons, title bar, resize edges,
+  autosave, graphics pickers, MCP tab). Picked files are handed to the file jobs by name; written files become
+  downloads; settings go to local storage.
+- **Time** comes from `web-time`, which is `std::time` on native targets.
 
 ## Runtime plugins
 

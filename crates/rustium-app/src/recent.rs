@@ -11,7 +11,7 @@ use crate::settings::data_dir;
 /// Most files remembered.
 pub(crate) const MAX_RECENT: usize = 8;
 
-/// One remembered file and the name of its Scene's root Node, shown as secondary text.
+/// One remembered file and the names of the first Nodes of its Scene, shown as secondary text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RecentFile {
     pub(crate) path: PathBuf,

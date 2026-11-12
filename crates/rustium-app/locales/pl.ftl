@@ -670,3 +670,19 @@ rtip-dolly = Przybliża lub oddala kamerę.
 rtip-focus = Kliknij model, aby ustawić odległość ostrości.
 rtip-sun = Przeciągnij, aby ustawić kierunek światła słonecznego.
 rtip-region = Renderuje tylko przeciągnięty prostokąt.
+
+# Edit animations and tool hints
+setting-edit-animation = Animacja edycji
+edit-animation-ghost = Duch
+edit-animation-pop = Pop
+edit-animation-from-wall = Ze ściany
+edit-animation-wave = Fala
+edit-animation-flash = Błysk
+edit-animation-reduced = Animacje są ograniczone, więc edycja zawsze błyska.
+edit-animation-off = Animacje są wyłączone, więc edycja nie jest animowana.
+mirror-centre = Środek
+mirror-centre-hint = Ustaw płaszczyzny lustra na środku modelu w obecnym kształcie
+block-no-target = Tu nie ma nic dla tego narzędzia
+block-no-voxel = Tu nie ma voxela
+block-not-selected = Najpierw zaznacz voxele, potem je przeciągnij
+block-no-color = Tu nie ma koloru

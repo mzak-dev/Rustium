@@ -12,8 +12,8 @@ use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_platform::{HitRegions, Platform};
 use rustium_render::{
-    AdapterChoice, CameraUniform, GlassRect, GpuContext, GpuPreferences, LineVertex, ModelDraw, RayTracing, TraceFrame,
-    ViewportFrame, ViewportRenderer,
+    AdapterChoice, CameraUniform, CubeInstance, GlassRect, GpuContext, GpuPreferences, LineVertex, ModelDraw,
+    RayTracing, TraceFrame, ViewportFrame, ViewportRenderer,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use rustium_render::{available_adapters, startup_fallback};
@@ -29,6 +29,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::{Icon, Window, WindowId};
 
 use crate::camera::OrbitCamera;
+use crate::edit_anim::{self, Animator};
 use crate::editor::Editor;
 use crate::effects_preview::{self, Preview};
 use crate::files::{self, Document, Io, Pending};
@@ -173,6 +174,9 @@ struct Running {
     ui: UiState,
     i18n: I18n,
     mesh: ChunkMesh,
+    /// Edit animations in the 3D view, timed on `clock`.
+    animator: Animator,
+    clock: Instant,
     preview: Preview,
     sample_counts: Vec<u32>,
     adapter_name: String,
@@ -422,6 +426,8 @@ impl Running {
             ui,
             i18n: I18n::new(settings.language),
             mesh: ChunkMesh::default(),
+            animator: Animator::default(),
+            clock: Instant::now(),
             preview: Preview::default(),
             sample_counts,
             adapter_name,
@@ -547,6 +553,7 @@ impl Running {
                 return Ok(true);
             }
         }
+        self.animate_edits(settings);
         self.upload_dirty_chunks();
         self.sync_render();
 
@@ -554,7 +561,8 @@ impl Running {
             .viewport_output
             .get(&ViewportId::ROOT)
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
-        let compiling = *self.viewport.material_status() == rustium_render::CompileStatus::Compiling;
+        let compiling =
+            *self.viewport.material_status() == rustium_render::CompileStatus::Compiling || self.animator.is_moving();
         let settling = self.ui.mode != Mode::Render && self.viewport.is_settling();
         let repaint_delay =
             if compiling || settling || (self.ui.mode == Mode::Render && self.ui.render.is_accumulating()) {
@@ -600,10 +608,10 @@ impl Running {
 
         self.update_platform(&glass, pixels_per_point);
 
-        let lines = if self.ui.mode == Mode::Effects {
-            Vec::new()
+        let (lines, cubes) = if self.ui.mode == Mode::Effects {
+            (Vec::new(), Vec::new())
         } else {
-            self.overlay_lines(settings)
+            (self.overlay_lines(settings), self.overlay_cubes(settings))
         };
         let glass_rects: Vec<GlassRect> = glass
             .iter()
@@ -633,6 +641,7 @@ impl Running {
             background,
             show_grid: settings.show_grid && self.ui.mode != Mode::Effects,
             lines: &lines,
+            cubes: &cubes,
             glass: &glass_rects,
             blur: settings.translucent_panels,
             trace: self.trace_frame(pixels_per_point),
@@ -810,6 +819,26 @@ impl Running {
         self.ui.toast = Some(toast);
     }
 
+    /// Feeds the Editor's changes to the edit animations and remeshes chunks whose animated cells settled.
+    fn animate_edits(&mut self, settings: &Settings) {
+        let now = self.clock.elapsed().as_secs_f64();
+        let animation = edit_anim::effective(settings.motion, settings.edit_animation);
+        let palette = self.editor.scene.palette().clone();
+        let color = |id| {
+            palette.get(id).map_or([1.0; 3], |color| {
+                color.color.map(|channel| (f32::from(channel) / 255.0).powf(2.2))
+            })
+        };
+        for event in self.editor.take_events() {
+            self.animator.handle(event, animation, now, color);
+        }
+        self.animator.tick(now);
+        let remesh = self.animator.take_remesh();
+        if !remesh.is_empty() {
+            self.editor.mark_dirty(remesh);
+        }
+    }
+
     fn upload_dirty_chunks(&mut self) {
         let placements = self.editor.scene.placements();
         let (reset, chunks) = self.editor.take_dirty(&placements);
@@ -821,7 +850,22 @@ impl Running {
             let Some(shape) = self.editor.scene.shape(shape_id) else {
                 continue;
             };
-            mesh_chunk(shape, coord, self.editor.transparency(), &mut self.mesh);
+            // Cells in the middle of an edit animation are drawn by the animator instead.
+            let hidden = if self.animator.hides_any(shape_id) {
+                self.animator.hidden(shape_id, coord)
+            } else {
+                Vec::new()
+            };
+            if hidden.is_empty() {
+                mesh_chunk(shape, coord, self.editor.transparency(), &mut self.mesh);
+            } else {
+                mesh_chunk(
+                    &shape.with_hidden(hidden),
+                    coord,
+                    self.editor.transparency(),
+                    &mut self.mesh,
+                );
+            }
             self.viewport.upload_chunk(&self.gpu, shape_id, coord, &self.mesh);
         }
     }
@@ -1081,6 +1125,39 @@ impl Running {
             sun: Vec3::new(0.45, 0.8, 0.35).normalize().extend(0.0).to_array(),
             grid: [major, extent, centre.x, centre.z],
         }
+    }
+
+    /// Boxes drawn with the Models: the edit animations, the cells the Tool would change and the face it acts on.
+    fn overlay_cubes(&self, settings: &Settings) -> Vec<CubeInstance> {
+        let linear = |rgb: [u8; 3]| rgb.map(|channel| (f32::from(channel) / 255.0).powf(2.2));
+        let accent = linear(settings.accent.rgb());
+        let now = self.clock.elapsed().as_secs_f64();
+        let mut cubes = self.animator.cubes(now, &self.editor.scene.placements());
+        if let Some(cells) = self.editor.preview_cells() {
+            let look = edit_anim::Look {
+                alpha: 0.22,
+                outline: 0.5,
+                overlay: true,
+                ..edit_anim::Look::FULL
+            };
+            cubes.extend(
+                cells
+                    .into_iter()
+                    .map(|cell| edit_anim::cube(cell, &look, accent, |point| point, |vector| vector)),
+            );
+        }
+        if let Some((cell, face)) = self.editor.hover_face() {
+            // A thin slab on the face, a little off it so it does not fight the voxel's own face.
+            let normal = face.normal().as_vec3();
+            let look = edit_anim::Look {
+                scale: Vec3::ONE - normal.abs() * 0.98,
+                offset: normal * 0.5,
+                alpha: 0.45,
+                ..edit_anim::Look::FULL
+            };
+            cubes.push(edit_anim::cube(cell, &look, accent, |point| point, |vector| vector));
+        }
+        cubes
     }
 
     fn overlay_lines(&self, settings: &Settings) -> Vec<LineVertex> {

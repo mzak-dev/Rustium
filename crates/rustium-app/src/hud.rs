@@ -757,7 +757,10 @@ fn focus_action(hud: &mut Hud<'_>, action: Action) {
             }
         }
         Action::StepOut => {
-            if !hud.editor.selection.is_empty() {
+            if hud.editor.is_stroking() {
+                // Escape in the middle of a gesture takes it back.
+                hud.editor.cancel();
+            } else if !hud.editor.selection.is_empty() {
                 hud.editor.selection = rustium_core::Selection::new();
             } else if !hud.editor.node_selection.is_empty() && !hud.editor.focus_is_model() {
                 hud.editor.node_selection.clear();

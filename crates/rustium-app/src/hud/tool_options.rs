@@ -88,6 +88,13 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                         hud.editor.mirror[axis] = !hud.editor.mirror[axis];
                     }
                 }
+                if hud.editor.mirror.contains(&true)
+                    && widgets::text_button(ui, &hud.tr("mirror-centre"), 56.0, Look::Plain, true)
+                        .on_hover_text(hud.tr("mirror-centre-hint"))
+                        .clicked()
+                {
+                    hud.editor.centre_mirror();
+                }
             });
         },
     );

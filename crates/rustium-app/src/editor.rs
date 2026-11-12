@@ -1061,8 +1061,13 @@ impl Editor {
         let signed = if drag.tool == VoxelTool::Attach { along } else { -along };
         // The pointer stays inside the outermost layer.
         let depth = (self.brush.size as f32 + signed.floor()).clamp(1.0, Brush::MAX_SIZE as f32);
-        // The clamp keeps it within 1..=MAX_SIZE, so the conversion is exact.
-        drag.depth = depth as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a whole number within 1..=MAX_SIZE"
+        )]
+        let depth = depth as u32;
+        drag.depth = depth;
         drag
     }
 

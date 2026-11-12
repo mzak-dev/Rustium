@@ -10,7 +10,9 @@ use crate::hud::widgets::{self, Look};
 use crate::hud::{self, AppCommand, Glass, Hud};
 use crate::icons::Icon;
 use crate::mcp::{McpStatus, McpTransport, permission_key};
-use crate::settings::{Accent, Backend, FrameLimit, Language, Motion, OrbitStyle, RayTracingMode, Settings};
+use crate::settings::{
+    Accent, Backend, EditAnimation, FrameLimit, Language, Motion, OrbitStyle, RayTracingMode, Settings,
+};
 use crate::theme;
 
 /// Sections of the Settings window.
@@ -651,6 +653,7 @@ fn interface(ui: &mut Ui, hud: &mut Hud<'_>) {
             true,
         );
     });
+    edit_animation(ui, i18n, settings);
     row(ui, &i18n.tr("setting-shortcut-letters"), None, |ui| {
         widgets::switch(ui, &mut settings.shortcut_letters, true);
     });
@@ -672,6 +675,46 @@ fn interface(ui: &mut Ui, hud: &mut Hud<'_>) {
                 .custom_formatter(|value, _| trimmed(value)),
         );
     });
+}
+
+/// The Edit animation list and, under it, a small scene that plays the animation under the pointer in the list (or
+/// the chosen one). Only Motion Full plays the chosen animation, so the list is greyed out otherwise.
+fn edit_animation(ui: &mut Ui, i18n: &crate::i18n::I18n, settings: &mut Settings) {
+    let full = settings.motion == Motion::Full;
+    let hint = match settings.motion {
+        Motion::Full => None,
+        Motion::Reduced => Some(i18n.tr("edit-animation-reduced")),
+        Motion::Off => Some(i18n.tr("edit-animation-off")),
+    };
+    let mut hovered = None;
+    row(ui, &i18n.tr("setting-edit-animation"), hint.as_deref(), |ui| {
+        ui.add_enabled_ui(full, |ui| {
+            egui::ComboBox::from_id_salt("edit-animation")
+                .width(150.0)
+                .selected_text(i18n.tr(settings.edit_animation.message_key()))
+                .show_ui(ui, |ui| {
+                    for animation in EditAnimation::ALL {
+                        let response = ui.selectable_value(
+                            &mut settings.edit_animation,
+                            animation,
+                            i18n.tr(animation.message_key()),
+                        );
+                        if response.hovered() {
+                            hovered = Some(animation);
+                        }
+                    }
+                });
+        });
+    });
+    let shown = crate::edit_anim::effective(settings.motion, hovered.unwrap_or(settings.edit_animation));
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 120.0), Sense::hover());
+    let frame = Rect::from_center_size(rect.center(), vec2(rect.width().min(260.0), rect.height() - 8.0));
+    ui.painter().rect_filled(frame, 8, Color32::from_black_alpha(70));
+    let time = ui.input(|input| input.time);
+    crate::edit_anim::paint_preview(&ui.painter().with_clip_rect(frame), frame.shrink(6.0), shown, time);
+    if shown.is_some() {
+        ui.ctx().request_repaint();
+    }
 }
 
 fn viewport(ui: &mut Ui, hud: &mut Hud<'_>) {

@@ -107,14 +107,29 @@ impl Section {
 }
 
 const CARD: egui::Vec2 = vec2(900.0, 600.0);
+/// Space kept between the card and the window edge.
+const CARD_GAP: f32 = 12.0;
+/// Below this card width the sidebar and footer shrink.
+const COMPACT_WIDTH: f32 = 700.0;
+const ROW_HEIGHT: f32 = 50.0;
+
+/// The card size that fits the window; the rows scroll when it gets small.
+fn card_size(screen: Rect) -> egui::Vec2 {
+    vec2(
+        CARD.x.min((screen.width() - 2.0 * CARD_GAP).max(240.0)),
+        CARD.y.min((screen.height() - 2.0 * CARD_GAP).max(200.0)),
+    )
+}
 
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     let Some(section) = hud.ui.settings_section else {
         return;
     };
     let before = hud.settings.clone();
+    let query = hud.ui.settings_search.trim().to_lowercase();
+    ctx.data_mut(|data| data.insert_temp(Id::unique("settings-query"), query));
     let screen = ctx.content_rect();
-    let card = Rect::from_center_size(screen.center(), CARD);
+    let card = Rect::from_center_size(screen.center(), card_size(screen));
     hud.glass.push(Glass {
         rect: screen,
         radius: 0.0,
@@ -138,7 +153,8 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 StrokeKind::Inside,
             );
             ui.scope_builder(UiBuilder::new().max_rect(card).sense(Sense::click()), |ui| {
-                let nav = Rect::from_min_size(card.min, vec2(212.0, card.height()));
+                let compact = card.width() < COMPACT_WIDTH;
+                let nav = Rect::from_min_size(card.min, vec2(if compact { 150.0 } else { 212.0 }, card.height()));
                 ui.painter().rect_filled(
                     nav,
                     egui::CornerRadius {
@@ -156,7 +172,7 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 );
                 navigation(ui, hud, nav.shrink2(vec2(10.0, 14.0)), section);
                 let content = Rect::from_min_max(egui::pos2(nav.right(), card.top()), card.max);
-                body(ui, hud, content, section);
+                body(ui, hud, content, section, compact);
             });
         });
     if *hud.settings != before {
@@ -165,6 +181,8 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
 }
 
 fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
+    // A short card has no room for the logo footer and gives the entries less height.
+    let tight = rect.height() < 400.0;
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         egui::Frame::new()
@@ -185,19 +203,29 @@ fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
                     );
                 });
             });
-        ui.add_space(10.0);
-        let query = hud.ui.settings_search.to_lowercase();
-        for section in Section::ALL {
-            let matches = query.is_empty()
-                || hud.tr(section.title_key()).to_lowercase().contains(&query)
-                || section
-                    .row_keys()
-                    .iter()
-                    .any(|key| hud.tr(key).to_lowercase().contains(&query));
-            if !matches {
-                continue;
-            }
-            let (row, response) = ui.allocate_exact_size(vec2(rect.width(), 36.0), Sense::click());
+        ui.add_space(if tight { 4.0 } else { 10.0 });
+        let query = hud.ui.settings_search.trim().to_lowercase();
+        let matching: Vec<Section> = Section::ALL
+            .into_iter()
+            .filter(|section| {
+                query.is_empty()
+                    || hud.tr(section.title_key()).to_lowercase().contains(&query)
+                    || section
+                        .row_keys()
+                        .iter()
+                        .any(|key| hud.tr(key).to_lowercase().contains(&query))
+            })
+            .collect();
+        // Searching jumps to the first section that has a match, where the matching rows are highlighted.
+        let mut current = current;
+        if let Some(first) = matching.first().filter(|_| !matching.contains(&current)) {
+            current = *first;
+            hud.ui.settings_section = Some(current);
+            ui.ctx().request_repaint();
+        }
+        for section in matching {
+            let (row, response) =
+                ui.allocate_exact_size(vec2(rect.width(), if tight { 30.0 } else { 36.0 }), Sense::click());
             let selected = section == current;
             let fill = if selected {
                 theme::ACTIVE
@@ -228,6 +256,9 @@ fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
                 hud.ui.settings_section = Some(section);
             }
         }
+        if tight {
+            return;
+        }
         let footer = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 42.0), rect.max);
         ui.painter().hline(
             footer.x_range(),
@@ -253,22 +284,27 @@ fn navigation(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, current: Section) {
     });
 }
 
-fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section) {
+fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section, compact: bool) {
+    let pad = if compact { 16.0 } else { 28.0 };
     let header = Rect::from_min_size(rect.min, vec2(rect.width(), 74.0));
     let footer = Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 58.0), rect.max);
     let rows = Rect::from_min_max(
-        egui::pos2(rect.left() + 28.0, header.bottom()),
-        egui::pos2(rect.right() - 28.0, footer.top()),
+        egui::pos2(rect.left() + pad, header.bottom()),
+        egui::pos2(rect.right() - pad, footer.top()),
     );
 
-    ui.scope_builder(UiBuilder::new().max_rect(header.shrink2(vec2(28.0, 20.0))), |ui| {
+    ui.scope_builder(UiBuilder::new().max_rect(header.shrink2(vec2(pad, 20.0))), |ui| {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
+                ui.set_max_width((rect.width() - 2.0 * pad - 44.0).max(60.0));
                 ui.label(RichText::new(hud.tr(section.title_key())).font(theme::bold(22.0)));
-                ui.label(
-                    RichText::new(hud.tr(&format!("{}-description", section.title_key())))
-                        .size(12.0)
-                        .color(theme::MUTED),
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(hud.tr(&format!("{}-description", section.title_key())))
+                            .size(12.0)
+                            .color(theme::MUTED),
+                    )
+                    .truncate(),
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -300,7 +336,7 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section) {
         footer.top(),
         Stroke::new(1.0, Color32::from_white_alpha(20)),
     );
-    ui.scope_builder(UiBuilder::new().max_rect(footer.shrink2(vec2(28.0, 13.0))), |ui| {
+    ui.scope_builder(UiBuilder::new().max_rect(footer.shrink2(vec2(pad, 13.0))), |ui| {
         ui.horizontal_centered(|ui| {
             if widgets::text_button(ui, &hud.tr("settings-reset-section"), 32.0, Look::On, true).clicked() {
                 hud.settings.reset_section(section);
@@ -309,42 +345,133 @@ fn body(ui: &mut Ui, hud: &mut Hud<'_>, rect: Rect, section: Section) {
                 if widgets::text_button(ui, &hud.tr("settings-done"), 32.0, Look::Accent, true).clicked() {
                     hud.ui.settings_section = None;
                 }
-                ui.label(
-                    RichText::new(hud.tr("settings-apply-now"))
-                        .size(11.0)
-                        .color(theme::SUBTLE),
-                );
+                if !compact {
+                    ui.label(
+                        RichText::new(hud.tr("settings-apply-now"))
+                            .size(11.0)
+                            .color(theme::SUBTLE),
+                    );
+                }
             });
         });
     });
 }
 
 /// One settings row: label (and hint) on the left, the control on the right.
+///
+/// The control is laid out first, so a long hint wraps in the width that is left of it.
 pub(crate) fn row(ui: &mut Ui, label: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
-    let top = ui.cursor().top();
-    ui.horizontal(|ui| {
-        ui.set_min_height(50.0);
-        ui.vertical(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new(label).size(13.0));
-            if let Some(hint) = hint {
-                ui.label(
-                    RichText::new(hint)
-                        .size(11.0)
-                        .color(Color32::from_rgb(0x8e, 0x98, 0xa6)),
-                );
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-    });
-    let bottom = ui.cursor().top();
-    let width = ui.available_width();
-    let _ = top;
+    const GAP: f32 = 16.0;
+    const HINT: Color32 = Color32::from_rgb(0x8e, 0x98, 0xa6);
+    let area = ui.available_rect_before_wrap();
+    // A wide control (or a narrow window) puts the control under the text instead of beside it. The width of the
+    // control is only known after it is drawn, so the decision uses the previous frame.
+    let width_id = Id::unique(("settings-row-width", label));
+    let last_width: f32 = ui.ctx().data(|data| data.get_temp(width_id)).unwrap_or(0.0);
+    let stacked = last_width > area.width() * 0.6;
+
+    let painter = ui.painter().clone();
+    let text_at = |wrap: f32| {
+        let label_galley = painter.layout(label.to_owned(), egui::FontId::proportional(13.0), theme::TEXT, wrap);
+        let hint_galley =
+            hint.map(|hint| painter.layout(hint.to_owned(), egui::FontId::proportional(11.0), HINT, wrap));
+        let height = label_galley.size().y + hint_galley.as_ref().map_or(0.0, |galley| galley.size().y + 2.0);
+        (label_galley, hint_galley, height)
+    };
+    let control_layout = egui::Layout::right_to_left(egui::Align::Center);
+    let (label_galley, hint_galley, text_height, control_ui, height, top);
+    if stacked {
+        (label_galley, hint_galley, text_height) = text_at(area.width());
+        let strip = Rect::from_min_size(area.min + vec2(0.0, text_height + 14.0), vec2(area.width(), 34.0));
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("settings-row", label))
+                .max_rect(strip)
+                .layout(control_layout),
+        );
+        control(&mut child);
+        control_ui = child;
+        height = text_height + 14.0 + 34.0 + 8.0;
+        top = area.top() + 7.0;
+    } else {
+        let strip = Rect::from_min_size(area.min, vec2(area.width(), ROW_HEIGHT));
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .id_salt(("settings-row", label))
+                .max_rect(strip)
+                .layout(control_layout),
+        );
+        control(&mut child);
+        let wrap = (child.min_rect().left().min(area.right()) - GAP - area.left()).max(96.0);
+        control_ui = child;
+        (label_galley, hint_galley, text_height) = text_at(wrap);
+        height = ROW_HEIGHT.max(text_height + 14.0);
+        top = area.top() + (height - text_height) / 2.0;
+    }
+    let control_width = control_ui.min_rect().width();
+    if (control_width - last_width).abs() > 0.5 {
+        ui.ctx().data_mut(|data| data.insert_temp(width_id, control_width));
+        ui.ctx().request_repaint();
+    }
+
+    let query: String = ui
+        .ctx()
+        .data(|data| data.get_temp(Id::unique("settings-query")))
+        .unwrap_or_default();
+    let row_rect = Rect::from_min_size(area.min, vec2(area.width(), height));
+    if !query.is_empty() && label.to_lowercase().contains(&query) {
+        ui.painter().rect_filled(
+            row_rect.shrink2(vec2(-8.0, 3.0)),
+            8,
+            ui.visuals().selection.bg_fill.gamma_multiply(0.16),
+        );
+    }
+    let label_height = label_galley.size().y;
+    ui.painter()
+        .galley(egui::pos2(area.left(), top), label_galley, theme::TEXT);
+    if let Some(galley) = hint_galley {
+        ui.painter()
+            .galley(egui::pos2(area.left(), top + label_height + 2.0), galley, HINT);
+    }
     ui.painter().hline(
-        ui.cursor().left()..=ui.cursor().left() + width,
-        bottom,
+        row_rect.x_range(),
+        row_rect.bottom(),
         Stroke::new(1.0, Color32::from_white_alpha(18)),
     );
+    ui.advance_cursor_after_rect(row_rect);
+}
+
+/// A number with at most two decimals and no trailing zeros: `25`, `0.3`, `6.25`.
+fn trimmed(value: f64) -> String {
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// A bordered, right-aligned monospace number field like the mockup's value inputs.
+pub(crate) fn number_field(ui: &mut Ui, drag: DragValue<'_>) {
+    egui::Frame::new()
+        .fill(theme::FIELD)
+        .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(10, 0))
+        .show(ui, |ui| {
+            ui.set_width(84.0);
+            ui.set_height(30.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let style = ui.style_mut();
+                style.override_font_id = Some(egui::FontId::monospace(12.0));
+                for state in [
+                    &mut style.visuals.widgets.inactive,
+                    &mut style.visuals.widgets.hovered,
+                    &mut style.visuals.widgets.active,
+                ] {
+                    state.bg_fill = Color32::TRANSPARENT;
+                    state.weak_bg_fill = Color32::TRANSPARENT;
+                    state.bg_stroke = Stroke::NONE;
+                }
+                ui.add(drag);
+            });
+        });
 }
 
 fn general(ui: &mut Ui, hud: &mut Hud<'_>) {
@@ -372,10 +499,12 @@ fn general(ui: &mut Ui, hud: &mut Hud<'_>) {
         &i18n.tr("setting-default-voxel-size"),
         Some(&i18n.tr("setting-default-voxel-size-hint")),
         |ui| {
-            ui.add(
+            number_field(
+                ui,
                 DragValue::new(&mut settings.default_voxel_size_cm)
                     .range(0.5..=1000.0)
                     .speed(0.25)
+                    .custom_formatter(|value, _| trimmed(value))
                     .suffix(" cm"),
             );
         },
@@ -389,14 +518,15 @@ fn general(ui: &mut Ui, hud: &mut Hud<'_>) {
         },
     );
     row(ui, &i18n.tr("setting-autosave-interval"), None, |ui| {
-        ui.add(
+        number_field(
+            ui,
             DragValue::new(&mut settings.autosave_minutes)
                 .range(1..=60)
                 .suffix(" min"),
         );
     });
     row(ui, &i18n.tr("setting-undo-steps"), None, |ui| {
-        ui.add(DragValue::new(&mut settings.undo_steps).range(10..=2000));
+        number_field(ui, DragValue::new(&mut settings.undo_steps).range(10..=2000));
     });
 }
 
@@ -424,13 +554,27 @@ fn interface(ui: &mut Ui, hud: &mut Hud<'_>) {
             }
         },
     );
+    // The scale applies on release: zooming while the handle is dragged moves the slider under the pointer.
+    let draft = &mut hud.ui.scale_draft;
     row(ui, &i18n.tr("setting-ui-scale"), None, |ui| {
-        ui.label(widgets::mono(format!("{}%", settings.ui_scale_percent), 12.0));
-        ui.add(
-            egui::Slider::new(&mut settings.ui_scale_percent, 75..=200)
+        let mut value = draft.unwrap_or(settings.ui_scale_percent);
+        ui.label(widgets::mono(format!("{value}%"), 12.0));
+        ui.spacing_mut().slider_width = 168.0;
+        ui.visuals_mut().widgets.inactive.bg_fill = Color32::from_white_alpha(40);
+        let response = ui.add(
+            egui::Slider::new(&mut value, 75..=200)
                 .step_by(25.0)
+                .trailing_fill(true)
                 .show_value(false),
         );
+        if response.is_pointer_button_down_on() {
+            *draft = Some(value);
+        } else {
+            *draft = None;
+            if value != settings.ui_scale_percent {
+                settings.ui_scale_percent = value;
+            }
+        }
     });
     row(
         ui,
@@ -456,12 +600,13 @@ fn interface(ui: &mut Ui, hud: &mut Hud<'_>) {
         widgets::switch(ui, &mut settings.shortcut_letters, true);
     });
     row(ui, &i18n.tr("setting-tooltip-delay"), None, |ui| {
-        ui.add(
+        number_field(
+            ui,
             DragValue::new(&mut settings.tooltip_delay_seconds)
                 .range(0.0..=2.0)
                 .speed(0.05)
                 .suffix(" s")
-                .max_decimals(2),
+                .custom_formatter(|value, _| trimmed(value)),
         );
     });
 }
@@ -487,9 +632,9 @@ fn viewport(ui: &mut Ui, hud: &mut Hud<'_>) {
         },
     );
     row(ui, &i18n.tr("setting-background"), None, |ui| {
-        ui.color_edit_button_srgb(&mut settings.background);
         let [r, g, b] = settings.background;
         ui.label(widgets::mono(format!("#{r:02X}{g:02X}{b:02X}"), 12.0));
+        ui.color_edit_button_srgb(&mut settings.background);
     });
     row(ui, &i18n.tr("setting-ground-grid"), None, |ui| {
         widgets::switch(ui, &mut settings.show_grid, true);
@@ -498,10 +643,12 @@ fn viewport(ui: &mut Ui, hud: &mut Hud<'_>) {
         widgets::switch(ui, &mut settings.show_volume_bounds, true);
     });
     row(ui, &i18n.tr("setting-fov"), None, |ui| {
-        ui.add(
+        number_field(
+            ui,
             DragValue::new(&mut settings.field_of_view_degrees)
                 .range(20.0..=110.0)
                 .speed(0.5)
+                .custom_formatter(|value, _| trimmed(value))
                 .suffix("°"),
         );
     });
@@ -626,7 +773,7 @@ fn mcp(ui: &mut Ui, hud: &mut Hud<'_>) {
         &i18n.tr("setting-mcp-port"),
         Some(&i18n.tr("setting-mcp-port-hint")),
         |ui| {
-            ui.add(DragValue::new(&mut settings.mcp.port).range(1024..=65535).speed(1));
+            number_field(ui, DragValue::new(&mut settings.mcp.port).range(1024..=65535).speed(1));
         },
     );
     for permission in Permission::ALL {

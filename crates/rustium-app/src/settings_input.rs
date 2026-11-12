@@ -28,6 +28,8 @@ struct Pending {
     action: Action,
     chord: Chord,
     others: Vec<Action>,
+    /// Whether the pane has been scrolled to the banner yet.
+    revealed: bool,
 }
 
 /// How a keymap file dialog ended.
@@ -109,17 +111,29 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
                 .color(theme::SUBTLE),
         );
         ui.add_space(2.0);
-        egui::Grid::new(("bindings", group.message_key()))
-            .num_columns(2)
-            .spacing(vec2(28.0, 0.0))
-            .show(ui, |ui| {
-                for pair in actions.chunks(2) {
+        // One grid per pair keeps the conflict banner right under the row that is being rebound.
+        let spacing = std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+        for (index, pair) in actions.chunks(2).enumerate() {
+            egui::Grid::new(("bindings", group.message_key(), index))
+                .num_columns(2)
+                .spacing(vec2(28.0, 0.0))
+                .show(ui, |ui| {
                     for action in pair {
                         binding(ui, hud, *action);
                     }
                     ui.end_row();
-                }
-            });
+                });
+            if hud
+                .ui
+                .keymap_ui
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pair.contains(&pending.action))
+            {
+                pending_banner(ui, hud);
+            }
+        }
+        ui.spacing_mut().item_spacing.y = spacing;
         ui.add_space(8.0);
     }
     if query.is_empty() {
@@ -128,7 +142,6 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
         ui.label(widgets::muted(i18n.tr("keymap-no-match")).size(12.0));
     }
 
-    pending_banner(ui, hud);
     let any_conflict = Action::all()
         .iter()
         .any(|action| hud.settings.keymap.has_conflict(*action));
@@ -152,8 +165,9 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
         Some(&i18n.tr("setting-rebind-hint")),
         |ui| {
             let idle = hud.ui.keymap_ui.job.is_none();
-            import = widgets::text_button(ui, &i18n.tr("keymap-import"), 32.0, Look::Plain, idle).clicked();
+            // The row lays out right to left: the last button added is the leftmost.
             export = widgets::text_button(ui, &i18n.tr("keymap-export"), 32.0, Look::Plain, idle).clicked();
+            import = widgets::text_button(ui, &i18n.tr("keymap-import"), 32.0, Look::Plain, idle).clicked();
         },
     );
     if import {
@@ -257,7 +271,12 @@ fn handle_capture(ctx: &Context, hud: &mut Hud<'_>) {
             if others.is_empty() {
                 hud.settings.keymap.set(action, Some(chord));
             } else {
-                hud.ui.keymap_ui.pending = Some(Pending { action, chord, others });
+                hud.ui.keymap_ui.pending = Some(Pending {
+                    action,
+                    chord,
+                    others,
+                    revealed: false,
+                });
             }
         }
     }
@@ -284,7 +303,7 @@ fn pending_banner(ui: &mut Ui, hud: &mut Hud<'_>) {
         ],
     );
     let mut decision = None;
-    egui::Frame::new()
+    let frame = egui::Frame::new()
         .fill(CONFLICT.gamma_multiply(0.14))
         .stroke(Stroke::new(1.0, CONFLICT))
         .corner_radius(8)
@@ -303,6 +322,10 @@ fn pending_banner(ui: &mut Ui, hud: &mut Hud<'_>) {
                 }
             });
         });
+    if let Some(pending) = hud.ui.keymap_ui.pending.as_mut().filter(|pending| !pending.revealed) {
+        pending.revealed = true;
+        frame.response.scroll_to_me(Some(egui::Align::Center));
+    }
     match decision {
         Some(true) => hud.settings.keymap.swap(action, chord),
         Some(false) => hud.settings.keymap.take_over(action, chord),

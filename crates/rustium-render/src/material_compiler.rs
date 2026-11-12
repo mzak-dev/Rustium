@@ -90,7 +90,7 @@ pub fn compile_materials(graphs: &[MaterialGraph]) -> Result<CompiledMaterials, 
         emitter.params.push(0.0);
     }
     generated.push_str(
-        "fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>) -> Surface {\n\
+        "fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>, local_position: vec3<f32>, local_normal: vec3<f32>) -> Surface {\n\
          \x20   let color = material_table.colors[color_index];\n\
          \x20   var surface: Surface;\n\
          \x20   switch (color.graph & 0xffffu) {\n",
@@ -98,11 +98,11 @@ pub fn compile_materials(graphs: &[MaterialGraph]) -> Result<CompiledMaterials, 
     for index in 1..graphs.len() {
         let _ = writeln!(
             generated,
-            "        case {index}u: {{ surface = material_{index}(color.albedo, position, normal); }}"
+            "        case {index}u: {{ surface = material_{index}(color.albedo, position, normal, local_position, local_normal); }}"
         );
     }
     generated.push_str(
-        "        default: { surface = material_0(color.albedo, position, normal); }\n\
+        "        default: { surface = material_0(color.albedo, position, normal, local_position, local_normal); }\n\
          \x20   }\n\
          \x20   return surface;\n\
          }\n",
@@ -117,7 +117,7 @@ pub fn compile_materials(graphs: &[MaterialGraph]) -> Result<CompiledMaterials, 
     })
 }
 
-const EMPTY_MATERIAL: &str = "fn material_0(albedo: vec3<f32>, position: vec3<f32>, normal: vec3<f32>) -> Surface {\n\
+const EMPTY_MATERIAL: &str = "fn material_0(albedo: vec3<f32>, position: vec3<f32>, normal: vec3<f32>, local_position: vec3<f32>, local_normal: vec3<f32>) -> Surface {\n\
      \x20   var surface: Surface;\n\
      \x20   surface.base_color = albedo;\n\
      \x20   surface.normal = normal;\n\
@@ -184,8 +184,12 @@ impl Emitter {
         }
         let mut out = format!(
             "// Material {index}: {}\n\
-             fn material_{index}(albedo: vec3<f32>, position: vec3<f32>, normal: vec3<f32>) -> Surface {{\n{body}",
-            graph.name.replace(['\n', '\r'], " ")
+             fn material_{index}(albedo: vec3<f32>, position: vec3<f32>, normal: vec3<f32>, local_position: vec3<f32>, local_normal: vec3<f32>) -> Surface {{\n{body}",
+            graph
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '_' })
+                .collect::<String>()
         );
         out.push_str("    var surface: Surface;\n");
         if let Some(surface) = graph.surface_output() {
@@ -246,6 +250,18 @@ impl Emitter {
             InputValue::Position => "position".to_owned(),
             InputValue::Normal => "normal".to_owned(),
             InputValue::VoxelColor => "albedo".to_owned(),
+        }
+    }
+
+    /// Like [`Emitter::input`] for the Vector input of Noise, Cells and Gradient: while the input holds its default
+    /// Position, the node's Space option (Model / World, a runtime parameter) picks the Model-local or the Scene
+    /// position. A linked or constant vector is used as it is.
+    fn spatial_input(&mut self, graph: &MaterialGraph, node: &GraphNode, socket: u8, space: &str) -> String {
+        let vector = self.input(graph, node, socket);
+        if vector == "position" {
+            format!("select(position, local_position, {space} < 0.5)")
+        } else {
+            vector
         }
     }
 
@@ -325,23 +341,23 @@ impl Emitter {
                 let _ = writeln!(out, "    let {v0} = {value};");
             }
             GraphNodeKind::Noise => {
-                let vector = self.input(graph, node, 0);
                 let scale = self.param(node, 0).scalar();
                 let detail = self.param(node, 1).scalar();
                 let seed = self.param(node, 2).scalar();
-                let _space = self.param(node, 3);
+                let space = self.param(node, 3).scalar();
+                let vector = self.spatial_input(graph, node, 0, &space);
                 let per_voxel = self.param(node, 4).scalar();
                 let _ = writeln!(
                     out,
-                    "    let {v0} = noise_pattern({vector}, normal, {scale}, i32({detail}), u32({seed}), {per_voxel} > 0.5);"
+                    "    let {v0} = noise_pattern({vector}, select(normal, local_normal, {space} < 0.5), {scale}, i32({detail}), u32({seed}), {per_voxel} > 0.5);"
                 );
             }
             GraphNodeKind::Cells => {
-                let vector = self.input(graph, node, 0);
                 let scale = self.param(node, 0).scalar();
                 let randomness = self.param(node, 1).scalar();
                 let seed = self.param(node, 2).scalar();
-                let _space = self.param(node, 3);
+                let space = self.param(node, 3).scalar();
+                let vector = self.spatial_input(graph, node, 0, &space);
                 let cells = format!("c{}", id.get());
                 let _ = writeln!(
                     out,
@@ -351,10 +367,10 @@ impl Emitter {
                 );
             }
             GraphNodeKind::Gradient => {
-                let vector = self.input(graph, node, 0);
                 let axis = self.param(node, 0).scalar();
                 let range = self.param(node, 1).vec2();
-                let _space = self.param(node, 2);
+                let space = self.param(node, 2).scalar();
+                let vector = self.spatial_input(graph, node, 0, &space);
                 let _ = writeln!(out, "    let {v0} = gradient_pattern({vector}, i32({axis}), {range});");
             }
             GraphNodeKind::EdgeWear => {
@@ -468,6 +484,42 @@ mod tests {
         assert!(compiled.generated.contains("default: { surface = material_0("));
         assert!(compiled.shader_source().contains("fn evaluate_material("));
         assert!(!compiled.shader_source().contains(MARKER));
+    }
+
+    #[test]
+    fn the_space_option_picks_the_model_position_at_run_time() {
+        let graph = SampleMaterial::Grass.build();
+        let compiled = compile(graph.clone());
+        assert!(
+            compiled.generated.contains("select(position, local_position, mp("),
+            "a Gradient on its default Position reads the Space parameter"
+        );
+        // Space is a number, so switching it must not change the source.
+        let noise = graph
+            .nodes()
+            .iter()
+            .find(|node| node.kind == GraphNodeKind::Gradient)
+            .unwrap()
+            .id;
+        let mut world = graph;
+        world
+            .apply_edit(&GraphEdit::SetParam {
+                node: noise,
+                param: 2,
+                value: ParamValue::Choice(1),
+            })
+            .unwrap();
+        let other = compile(world);
+        assert_eq!(compiled.generated, other.generated);
+        assert_ne!(compiled.params, other.params);
+    }
+
+    #[test]
+    fn material_names_cannot_break_out_of_the_comment() {
+        let mut graph = MaterialGraph::blank("x");
+        graph.name = "a\u{2028}b\u{85}c\u{e9}\nd".to_owned();
+        let compiled = compile(graph);
+        assert!(compiled.generated.contains("// Material 1: a_b_c__d\n"));
     }
 
     #[test]

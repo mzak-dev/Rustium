@@ -20,7 +20,11 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
 2. Brush gestures become `rustium_core::Command`s; `apply` returns an `Edit` (before/after `Arc<Chunk>`s, plus a snapshot of the node graph when the tree
    changed). A gesture folds its Edits into one History step. Tools act inside the Focus: voxel Tools on the
    Model in Focus, Select box and Move on the child Nodes of a Group in Focus.
-3. Chunks touched by Edits (plus neighbours, for culling and AO) are remeshed on the CPU and uploaded per Shape.
+3. Chunks touched by Edits (plus neighbours, for culling and AO) are remeshed on the CPU and uploaded per Shape. The
+   mesher takes a `Transparency` table (Color to the Material it belongs to when that Material has transmission or
+   a Volume output): an opaque voxel keeps its face next to a transparent one, faces between voxels of one
+   transparent Material are culled, and transparent voxels do not occlude. The Editor rebuilds the table when
+   Materials change and remeshes everything if it differs.
    Each visible Model is drawn as one instance of its Shape's chunks with its Transform and a dim factor
    (everything outside the Focus is dimmed).
 4. `ViewportRenderer` draws the scene into an offscreen MSAA target, blurs it at quarter resolution and
@@ -94,15 +98,19 @@ Scene upload and traversal are separate: the software DDA and the hardware ray-q
   are swapped in together with their numbers, and a shader that fails to compile keeps the old ones and reports
   `CompileStatus::Error` (`ViewportRenderer::material_status`, shown as the "Compiled" chip).
   The Palette is a small uniform (`GpuMaterialTable`, binding 1).
-  **Contract:** `fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>) -> Surface`
+  **Contract:** `fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>, local_position: vec3<f32>, local_normal: vec3<f32>) -> Surface`
   in `shaders/material.wgsl` is the only code that reads Color and Material data; both renderers shade through it.
   `Surface` now also carries `volume_density` and `volume_color` (the Volume output) for the M5 haze and glass work,
   and a normal that the Voxel bevel may have bent (the raster shades with it). Inputs the node library needs beyond
   the signature: `position` is in voxels, so the voxel cell, the distance to the voxel edge (Edge wear, Voxel bevel,
   per-voxel Noise) follow from `position` and `normal` alone; the private `material_ao` is set by the raster pass from
   the mesh's per-vertex occlusion and stays 1 in the path tracer, whose bounce light already darkens corners.
-  Approximations: the Space option of Noise, Cells and Gradient (Model / World) is stored but both read the Scene
-  position. "Casts shadow" only affects the path tracer (the raster viewport has no shadows). Raster shows emission
+  `local_position` and `local_normal` are the same point and face normal in the Model's Shape space (before its
+  Transform); a Noise, Cells or Gradient whose Vector input holds its default Position reads them when its Space
+  option is Model (a runtime parameter, so flipping it does not recompile) and the Scene `position` when it is World.
+  The raster passes the mesh position from the vertex stage; the path tracer derives it from the hit Model's record
+  in `shade()` (shared by the software and the ray-query traversal, which both report `Hit::model`); a linked or
+  constant vector is used as is. Approximations: "Casts shadow" only affects the path tracer (the raster viewport has no shadows). Raster shows emission
   unlit.
 - **Raster transparency** (`shaders/raster.wgsl`, `taa.rs`, `shaders/taa.wgsl`, ADR 0006): a fragment whose Material
   has transmission or a Volume output is kept with a probability (its coverage: tint, a Fresnel term and the haze

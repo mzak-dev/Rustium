@@ -1493,6 +1493,49 @@ fn a_material_that_does_not_cast_shadows_leaves_the_floor_lit() {
 }
 
 #[test]
+fn glass_lets_part_of_the_sun_through_to_the_floor() {
+    let gpu = gpu_or_skip!();
+    let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        sun_height: 40.0,
+        samples: 48,
+        ..bright_setup()
+    };
+    let build = |transmission: f32| {
+        let mut scene = Scene::new();
+        fill(&mut scene, IVec3::new(-12, 0, -12), IVec3::new(12, 0, 12), id(3));
+        fill(&mut scene, IVec3::new(-2, 1, -2), IVec3::new(1, 4, 1), id(37));
+        shade(
+            &mut scene,
+            37,
+            SurfaceConstants {
+                transmission,
+                roughness: 0.0,
+                ..SurfaceConstants::MATTE
+            },
+        );
+        scene
+    };
+    let shadowed_spot = camera.pixel(Vec3::new(-4.0, 1.0, 3.0));
+    let lit_spot = camera.pixel(Vec3::new(5.0, 1.0, 5.0));
+    let opaque = render(&gpu, &build(0.0), &camera, &setup);
+    let glass = render(&gpu, &build(1.0), &camera, &setup);
+    dump("glass-shadow", &glass);
+    let (dark, light) = (luminance(&opaque, shadowed_spot), luminance(&opaque, lit_spot));
+    assert!(
+        dark * 1.5 < light,
+        "an opaque block shadows the floor: {dark} against {light}"
+    );
+    let (dim, light) = (area_luminance(&glass, shadowed_spot), area_luminance(&glass, lit_spot));
+    assert!(
+        dim > light * 0.45 && dim > dark * 1.5,
+        "the shadow of clear glass is light: {dim} against {light} (opaque {dark})"
+    );
+    assert_backends_agree("glass-shadow", &gpu, &build(1.0), &camera, &setup, None);
+}
+
+#[test]
 fn an_opaque_material_with_an_empty_volume_output_still_casts_a_shadow() {
     let gpu = gpu_or_skip!();
     let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));

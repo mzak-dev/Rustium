@@ -18,16 +18,17 @@ fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model:
     return result;
 }
 
-// The fraction of sunlight that gets along the ray: 1.0 in the open, 0.0 when a voxel that casts shadows is in the
-// way, in between when it crosses haze (see MODE_SHADOW).
-fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+// The sunlight that gets along the ray: 1.0 in the open, 0.0 when a voxel that casts shadows is in the way, in between
+// when it crosses haze or glass (see MODE_SHADOW).
+fn shadow_light(origin: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    shadow_tint = vec3<f32>(1.0);
     var optical = 0.0;
     for (var index = 0u; index < params.options.w; index += 1u) {
         let hit = trace_model(index, origin, dir, MODE_SHADOW, 0u);
         if (hit.hit) {
-            return 0.0;
+            return vec3<f32>(0.0);
         }
         optical += hit.optical;
     }
-    return exp(-optical);
+    return shadow_tint * exp(-optical);
 }

@@ -140,7 +140,7 @@ fn toon_shade(point: vec3<f32>, hit: Hit, surface: Surface) -> vec3<f32> {
     let cos_sun = dot(normal, sun);
     var lit = 0.0;
     if (cos_sun > 0.0) {
-        lit = cos_sun * sun_visibility(point + normal * EPS, sun);
+        lit = cos_sun * luminance(sun_visibility(point + normal * EPS, sun));
     }
     var band = 0.0;
     if (lit > 0.65) {

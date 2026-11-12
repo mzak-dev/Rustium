@@ -10,10 +10,13 @@ struct Dither {
 
 @group(0) @binding(2) var<uniform> dither: Dither;
 
-// Interleaved gradient noise (Jimenez): a cheap, well spread per-pixel threshold in 0..1; `frame` shifts the pattern.
+// Interleaved gradient noise (Jimenez) gives every pixel its own offset; the frame then walks the threshold along
+// the golden-ratio sequence, which spreads the thresholds of one pixel evenly over time (a low-discrepancy sequence),
+// so the temporal average of the dither converges much faster than with random shifts and no pattern stays behind.
 fn dither_threshold(pixel: vec2<f32>, frame: f32) -> f32 {
-    let shifted = pixel + vec2<f32>(5.588238 * frame);
-    return fract(52.9829189 * fract(dot(shifted, vec2<f32>(0.06711056, 0.00583715))));
+    let offset = fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+    let step = frame - 4096.0 * floor(frame / 4096.0);
+    return fract(offset + 0.6180339887 * step);
 }
 
 // Fraction of the light the voxel's surface stops: an opaque Material 1, clear glass a little (its tint, a trace of

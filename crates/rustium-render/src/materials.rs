@@ -13,13 +13,13 @@ pub struct GpuColor {
     /// Linear base color.
     pub albedo: [f32; 3],
     /// Bits 0..16: index of the Color's material graph. Bit 16 is set when the Material does not cast shadows, bit 17
-    /// when it has a Volume output (haze dims shadow rays instead of stopping them).
+    /// when it has a Volume output and a see-through Surface (haze dims shadow rays instead of stopping them).
     pub graph: u32,
 }
 
 /// The Material does not cast shadows (`COLOR_NO_SHADOW` in `material.wgsl`).
 const FLAG_NO_SHADOW: u32 = 1 << 16;
-/// The Material has a Volume output (`COLOR_VOLUMETRIC` in `material.wgsl`).
+/// The Material is see-through haze: a Volume output on a transmitting Surface (`COLOR_VOLUMETRIC` in `material.wgsl`).
 const FLAG_VOLUMETRIC: u32 = 1 << 17;
 
 const _: () = assert!(size_of::<GpuColor>() == 16);
@@ -61,7 +61,8 @@ impl GpuMaterialTable {
                 if !found.casts_shadow {
                     packed |= FLAG_NO_SHADOW;
                 }
-                if found.volume_output().is_some() {
+                // Shadow rays only dim in a see-through voxel; an opaque Surface with a Volume output still blocks.
+                if found.volume_output().is_some() && found.transmits() {
                     packed |= FLAG_VOLUMETRIC;
                 }
             }

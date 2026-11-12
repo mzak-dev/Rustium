@@ -421,9 +421,12 @@ impl MaterialGraph {
     /// The raster pass turns on its dithered transparency only for such Materials, and the mesher keeps the faces
     /// of opaque voxels that touch them.
     pub fn is_transparent(&self) -> bool {
-        if self.volume_output().is_some() {
-            return true;
-        }
+        self.volume_output().is_some() || self.transmits()
+    }
+
+    /// Whether the Surface output lets light through: a transmission above zero, or a linked transmission input.
+    /// A Volume output on an opaque Surface only adds a medium inside the voxel; it does not make it see-through.
+    pub fn transmits(&self) -> bool {
         let Some(surface) = self.surface_output() else {
             return false;
         };

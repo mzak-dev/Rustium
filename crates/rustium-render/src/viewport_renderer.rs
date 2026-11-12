@@ -138,6 +138,10 @@ struct TaaState {
     previous: Option<([[f32; 4]; 4], [f32; 4])>,
     /// Edits or Material changes since the last frame: the history is trusted less for one frame.
     edited: bool,
+    /// The Models of the last frame: moving, turning or dimming one drops the history (its pixels would ghost).
+    models: Vec<ModelDraw>,
+    /// A view change the renderer cannot see in the matrix (another projection or viewport): drop the history.
+    reset: bool,
 }
 
 /// Weight of the new frame in the history blend while the view changes: about the last ten frames count.
@@ -262,6 +266,8 @@ impl ViewportRenderer {
                 was_active: false,
                 previous: None,
                 edited: false,
+                models: Vec::new(),
+                reset: false,
             },
             has_transparency: false,
         }
@@ -433,6 +439,12 @@ impl ViewportRenderer {
         );
     }
 
+    /// Drops the temporal history: the next frame starts afresh. Call it when the camera projection or the viewport
+    /// changes in a way a view matrix does not show (switching modes, the Effects preview camera).
+    pub fn reset_history(&mut self) {
+        self.taa.reset = true;
+    }
+
     /// Drops every chunk mesh.
     pub fn clear_chunks(&mut self) {
         self.taa.edited = true;
@@ -467,11 +479,18 @@ impl ViewportRenderer {
         let mut taa_uniform = None;
         if temporal {
             let state = &mut self.taa;
-            let cut = state.previous.is_none_or(|(_, eye)| {
-                let moved = glam::Vec3::from_array([eye[0], eye[1], eye[2]])
-                    - glam::Vec3::from_array([frame.camera.eye[0], frame.camera.eye[1], frame.camera.eye[2]]);
-                moved.length() > TAA_CUT_DISTANCE
-            });
+            let models_changed = state.models != frame.models;
+            if models_changed {
+                state.models.clear();
+                state.models.extend_from_slice(frame.models);
+            }
+            let cut = std::mem::take(&mut state.reset)
+                || models_changed
+                || state.previous.is_none_or(|(_, eye)| {
+                    let moved = glam::Vec3::from_array([eye[0], eye[1], eye[2]])
+                        - glam::Vec3::from_array([frame.camera.eye[0], frame.camera.eye[1], frame.camera.eye[2]]);
+                    moved.length() > TAA_CUT_DISTANCE
+                });
             let history = state.was_active && !cut;
             let changed = state
                 .previous

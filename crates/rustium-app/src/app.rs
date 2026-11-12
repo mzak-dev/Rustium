@@ -103,6 +103,8 @@ struct Running {
     window: Arc<Window>,
     gpu: GpuContext,
     viewport: ViewportRenderer,
+    /// The Effects preview the last frame was drawn with (`None` outside Effects): a change drops the TAA history.
+    drawn_preview: Option<PreviewShape>,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
@@ -314,6 +316,7 @@ impl Running {
             window,
             gpu,
             viewport,
+            drawn_preview: None,
             egui_ctx,
             egui_state,
             egui_renderer,
@@ -506,6 +509,12 @@ impl Running {
             .background
             .map(|channel| (f32::from(channel) / 255.0).powf(2.2));
         let effects_view = (self.ui.mode == Mode::Effects).then(|| self.effects_view(pixels_per_point));
+        let preview = effects_view.is_some().then_some(self.ui.effects.preview);
+        if preview != self.drawn_preview {
+            // The preview camera squeezes the projection into its island; history from another view would ghost.
+            self.viewport.reset_history();
+            self.drawn_preview = preview;
+        }
         let models = match &effects_view {
             Some(_) if self.ui.effects.preview != PreviewShape::Model => Preview::draws(),
             _ => self.model_draws(),

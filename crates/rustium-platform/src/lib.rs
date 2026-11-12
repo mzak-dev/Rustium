@@ -33,6 +33,20 @@ impl Platform {
         }
     }
 
+    /// Whether the pointer is over the maximize button. Windows delivers those mouse messages to the frame, not the
+    /// window content, so the interface has to be told in order to highlight the button.
+    #[cfg_attr(not(windows), expect(clippy::unused_self, reason = "nothing is hovered off Windows"))]
+    pub fn maximize_hovered(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.inner.maximize_hovered()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
     /// Tells the platform layer where the window's regions are. Call it every frame; unchanged values are cheap.
     #[cfg_attr(not(windows), expect(clippy::unused_self, reason = "nothing to update off Windows"))]
     pub fn update(&self, regions: &HitRegions) {

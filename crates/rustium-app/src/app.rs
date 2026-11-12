@@ -130,6 +130,8 @@ struct Running {
     title: String,
     /// Win32 hit-testing for Snap Layouts; `None` off Windows.
     platform: Option<Platform>,
+    /// The pointer position egui has was put there by [`Running::show_maximize_hover`].
+    maximize_hover_injected: bool,
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -339,6 +341,7 @@ impl Running {
             splash_was_open: false,
             title: String::new(),
             platform,
+            maximize_hover_injected: false,
         })
     }
 
@@ -375,6 +378,23 @@ impl Running {
         platform.update(&regions);
     }
 
+    /// On Windows the pointer over the maximize button produces non-client messages only, so egui never sees it:
+    /// move its pointer onto the button (and away again) so the button highlights.
+    fn show_maximize_hover(&mut self, raw_input: &mut egui::RawInput) {
+        let hovered = self.platform.as_ref().is_some_and(Platform::maximize_hovered);
+        match (hovered, self.ui.maximize_button) {
+            (true, Some(button)) => {
+                raw_input.events.push(egui::Event::PointerMoved(button.center()));
+                self.maximize_hover_injected = true;
+            }
+            (false, _) if self.maximize_hover_injected => {
+                raw_input.events.push(egui::Event::PointerGone);
+                self.maximize_hover_injected = false;
+            }
+            _ => {}
+        }
+    }
+
     /// Runs the interface, applies its commands and draws one frame. Returns `true` to quit.
     fn redraw(&mut self, settings: &mut Settings) -> Result<bool> {
         self.update_title();
@@ -382,7 +402,8 @@ impl Running {
         if self.handle_io(settings) {
             return Ok(true);
         }
-        let raw_input = self.egui_state.take_egui_input(&self.window);
+        let mut raw_input = self.egui_state.take_egui_input(&self.window);
+        self.show_maximize_hover(&mut raw_input);
         let ctx = self.egui_ctx.clone();
         let maximized = self.window.is_maximized();
         let mut glass = Vec::new();

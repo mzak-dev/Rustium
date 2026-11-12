@@ -117,10 +117,33 @@ struct Hit {
     color_index: u32,
     // Index of the Model that was hit.
     model: u32,
+    // Shadow walks only: optical depth of the haze the ray crossed before the hit (or the end of the walk).
+    optical: f32,
 };
 
+// How `trace_voxels` walks.
+// MODE_NEAREST: the first non-empty voxel. MODE_INSIDE: through voxels of one Material (glass, haze) up to the first
+// voxel of another Material, or air; that is always a hit, a grid edge counts as air (Color 0).
+// MODE_SHADOW: the first voxel that blocks sunlight; voxels whose Material does not cast shadows are skipped and haze
+// only adds to `Hit::optical`.
+const MODE_NEAREST: u32 = 0u;
+const MODE_INSIDE: u32 = 1u;
+const MODE_SHADOW: u32 = 2u;
+// Optical depth beyond which a shadow ray counts as blocked.
+const OPAQUE_DEPTH: f32 = 12.0;
+
 fn miss() -> Hit {
-    return Hit(false, FAR, vec3<f32>(0.0, 1.0, 0.0), 0u, 0u);
+    return Hit(false, FAR, vec3<f32>(0.0, 1.0, 0.0), 0u, 0u, 0.0);
+}
+
+// The face normal for a ray that crossed into its current voxel through `axis` (-1: it started there).
+fn crossing_normal(dir: vec3<f32>, step: vec3<i32>, axis: i32) -> vec3<f32> {
+    var normal = -dir;
+    if (axis >= 0) {
+        normal = vec3<f32>(0.0);
+        normal[axis] = -f32(step[axis]);
+    }
+    return normal;
 }
 
 fn chunk_slot(model: ModelRecord, cell: vec3<i32>) -> u32 {
@@ -135,9 +158,9 @@ fn voxel_in(slot: u32, local: vec3<i32>) -> u32 {
 }
 
 // HOT PATH: runs for every ray segment and Model. Walks the chunk grid of `model` in its Shape's space; empty chunks are skipped in one jump, occupied
-// chunks are walked voxel by voxel. With `inside` != 0 the ray travels through voxels of that Color (glass) and
-// reports the first voxel that differs; otherwise it reports the first non-empty voxel.
-fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
+// chunks are walked voxel by voxel. `mode` picks what counts as a hit (see MODE_*); `inside` is the Material index + 1
+// of the glass or haze the ray travels through in MODE_INSIDE.
+fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside: u32) -> Hit {
     let grid_min = model.grid_min.xyz * CHUNK;
     let size_voxels = vec3<i32>(model.grid_size.xyz) * CHUNK;
     let box_min = vec3<f32>(grid_min);
@@ -153,6 +176,9 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
     let t_enter = max(max(t_lo.x, t_lo.y), max(t_lo.z, 0.0));
     let t_exit = min(t_hi.x, min(t_hi.y, t_hi.z));
     if (t_enter >= t_exit) {
+        if (mode == MODE_INSIDE) {
+            return Hit(true, 0.0, -dir, 0u, 0u, 0.0);
+        }
         return miss();
     }
 
@@ -168,6 +194,7 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
     let delta = abs(inv);
     var t_max = (vec3<f32>(voxel) + select(vec3<f32>(0.0), vec3<f32>(1.0), positive) - origin) * inv;
     var t_cur = t_enter;
+    var optical = 0.0;
 
     for (var iteration = 0; iteration < 4096; iteration += 1) {
         let rel = voxel - grid_min;
@@ -176,6 +203,10 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
         }
         let cell = vec3<i32>(rel.x >> 5u, rel.y >> 5u, rel.z >> 5u);
         let slot = chunk_slot(model, cell);
+        if (slot == 0u && mode == MODE_INSIDE) {
+            // An empty chunk is air: the medium ends here.
+            return Hit(true, t_cur, crossing_normal(dir, step, last_axis), 0u, 0u, 0.0);
+        }
         if (slot == 0u) {
             // Jump to where the ray leaves this empty chunk.
             let cell_min = vec3<f32>(grid_min + cell * CHUNK);
@@ -199,13 +230,29 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
             continue;
         }
         let found = voxel_in(slot, rel - cell * CHUNK);
-        if (select(found != 0u, found != inside, inside != 0u)) {
-            var normal = -dir;
-            if (last_axis >= 0) {
-                normal = vec3<f32>(0.0);
-                normal[last_axis] = -f32(step[last_axis]);
+        if (mode == MODE_INSIDE) {
+            if (found == 0u || color_graph(found) + 1u != inside) {
+                return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, 0.0);
             }
-            return Hit(true, t_cur, normal, found, 0u);
+        } else if (mode == MODE_SHADOW) {
+            if (found != 0u) {
+                let flags = color_flags(found);
+                if ((flags & COLOR_NO_SHADOW) == 0u) {
+                    if ((flags & COLOR_VOLUMETRIC) == 0u) {
+                        return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
+                    }
+                    // Haze dims the light by its density over the stretch of the voxel the ray crosses.
+                    let t_next = min(t_max.x, min(t_max.y, t_max.z));
+                    let centre = vec3<f32>(voxel) + vec3<f32>(0.5);
+                    optical += evaluate_material(found, centre, vec3<f32>(0.0, 1.0, 0.0)).volume_density
+                        * max(t_next - t_cur, 0.0);
+                    if (optical > OPAQUE_DEPTH) {
+                        return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, optical);
+                    }
+                }
+            }
+        } else if (found != 0u) {
+            return Hit(true, t_cur, crossing_normal(dir, step, last_axis), found, 0u, 0.0);
         }
         var axis = 0;
         var t_axis = t_max.x;
@@ -222,17 +269,23 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
         voxel[axis] += step[axis];
         last_axis = axis;
     }
-    return miss();
+    if (mode == MODE_INSIDE) {
+        // The ray left the grid (or the walk ran out): beyond is air.
+        return Hit(true, t_cur, crossing_normal(dir, step, last_axis), 0u, 0u, 0.0);
+    }
+    var result = miss();
+    result.optical = optical;
+    return result;
 }
 
 // Traces `model` (the record of Model `index`, or a one-chunk stand-in for it): the ray is moved into the Model's Shape
 // space (the transforms are signed axis permutations, so lengths and `t` carry over unchanged) and the hit normal is
-// moved back.
-fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
+// moved back. `mode` and `inside` as for `trace_voxels`.
+fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside: u32) -> Hit {
     let moved = origin - model.offset.xyz;
     let local_origin = vec3<f32>(dot(model.column_x.xyz, moved), dot(model.column_y.xyz, moved), dot(model.column_z.xyz, moved));
     let local_dir = vec3<f32>(dot(model.column_x.xyz, dir), dot(model.column_y.xyz, dir), dot(model.column_z.xyz, dir));
-    var result = trace_voxels(model, local_origin, local_dir, inside);
+    var result = trace_voxels(model, local_origin, local_dir, mode, inside);
     if (result.hit) {
         let n = result.normal;
         result.normal = model.column_x.xyz * n.x + model.column_y.xyz * n.y + model.column_z.xyz * n.z;
@@ -241,22 +294,23 @@ fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32
     return result;
 }
 
-fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
-    return trace_record(models[index], index, origin, dir, inside);
+fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32, inside: u32) -> Hit {
+    return trace_record(models[index], index, origin, dir, mode, inside);
 }
 
-// `trace_scene_hit` (nearest hit over all visible Models) and `occluded` (shadow rays) come from the traversal
+// `trace_scene_hit` (nearest hit over all visible Models) and `shadow_transmittance` (the fraction of sunlight
+// along a ray: 0 behind a voxel that casts shadows, dimmed by haze, 1 in the open) come from the traversal
 // variant that is compiled in: trace_dda.wgsl (software) or trace_rq.wgsl (hardware ray query). Both return the same
 // `Hit`, so everything below is shared.
 
 // The nearest surface along the ray: every visible Model, plus the ground plane when it is on. A ray travelling
-// through glass (`inside` != 0) only looks at the Model it is in. Where Models overlap, the earlier one wins.
+// through glass or haze (`inside` = Material index + 1) only looks at the Model it is in. Where Models overlap, the earlier one wins.
 fn trace(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> Hit {
     var result = trace_scene_hit(origin, dir, inside, inside_model);
     if (inside == 0u && params.options.x != 0u && params.style.x != STYLE_WIRE && dir.y < -1.0e-5 && origin.y > params.ground.w) {
         let t_ground = (params.ground.w - origin.y) / dir.y;
         if (t_ground < result.t) {
-            result = Hit(true, t_ground, vec3<f32>(0.0, 1.0, 0.0), GROUND_ID, 0u);
+            result = Hit(true, t_ground, vec3<f32>(0.0, 1.0, 0.0), GROUND_ID, 0u, 0.0);
         }
     }
     return result;
@@ -295,35 +349,116 @@ fn schlick(cos_theta: f32, r0: f32) -> f32 {
 
 // Whether `point` can see the sun along `dir`: 1.0 in the open, 0.0 when something is in the way.
 fn sun_visibility(point: vec3<f32>, dir: vec3<f32>) -> f32 {
-    return select(1.0, 0.0, occluded(point, dir));
+    return shadow_transmittance(point, dir);
 }
 
 fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// Unpolarised Fresnel reflectance of a dielectric interface for light going from index `n_i` into `n_t`: 0 when the
+// indices match, 1 under total internal reflection.
+fn fresnel_dielectric(cos_i: f32, n_i: f32, n_t: f32) -> f32 {
+    let eta = n_i / n_t;
+    let sin2_t = eta * eta * (1.0 - cos_i * cos_i);
+    if (sin2_t >= 1.0) {
+        return 1.0;
+    }
+    let cos_t = sqrt(1.0 - sin2_t);
+    let rs = (n_i * cos_i - n_t * cos_t) / max(n_i * cos_i + n_t * cos_t, 1.0e-6);
+    let rp = (n_t * cos_i - n_i * cos_t) / max(n_t * cos_i + n_i * cos_t, 1.0e-6);
+    return 0.5 * (rs * rs + rp * rp);
+}
+
+// Henyey-Greenstein phase function for the cosine between the directions of travel before and after scattering.
+fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let denominator = 1.0 + g * g - 2.0 * g * cos_theta;
+    return (1.0 - g * g) / (4.0 * PI * pow(max(denominator, 1.0e-4), 1.5));
+}
+
+// A new direction of travel after scattering, distributed by the Henyey-Greenstein function around `dir`.
+fn sample_hg(dir: vec3<f32>, g: f32) -> vec3<f32> {
+    let u = rand();
+    var cos_theta = 1.0 - 2.0 * u;
+    if (abs(g) > 1.0e-3) {
+        let square = (1.0 - g * g) / (1.0 - g + 2.0 * g * u);
+        cos_theta = (1.0 + g * g - square * square) / (2.0 * g);
+    }
+    let sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+    let phi = 2.0 * PI * rand();
+    return basis(dir) * vec3<f32>(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+}
+
+// Forward scattering of haze, shared by the scatter direction and the sun's phase value.
+const HAZE_G: f32 = 0.3;
+
+// Russian roulette: after a few bounces dim paths may end; the survivors are brightened to stay unbiased.
+fn russian_roulette(throughput: ptr<function, vec3<f32>>, bounces: u32) -> bool {
+    if (bounces > 3u) {
+        let value = *throughput;
+        let survive = clamp(max(value.x, max(value.y, value.z)), 0.05, 1.0);
+        if (rand() > survive) {
+            return false;
+        }
+        *throughput = value / survive;
+    }
+    return true;
+}
+
 // HOT PATH: one path through the scene. Returns premultiplied radiance in rgb and coverage in a.
+//
+// The path may travel through a medium: glass or haze voxels of one Material (`medium` = Material index + 1, 0 in
+// open air). Inside it, haze scatters the ray (free-flight distance from the Material's density, sun by next-event
+// estimation) and the first voxel of a different Material is an interface: Fresnel decides between reflecting and
+// refracting, total internal reflection included.
 fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
     var origin = start;
     var dir = start_dir;
     var throughput = vec3<f32>(1.0);
     var color = vec3<f32>(0.0);
     var alpha = 1.0;
-    // The Color of the glass the ray is travelling through, or 0 in open air.
-    var inside = 0u;
-    var inside_model = 0u;
+    var medium = 0u;
+    var medium_color = 0u;
+    var medium_model = 0u;
+    var medium_ior = 1.0;
     var bounces = 0u;
     var specular = true;
+    // The ray has not been bent or scattered since the camera, so a sky behind it is the background.
+    var straight = true;
     let max_bounces = params.image.w;
 
-    for (var segment = 0u; segment < (max_bounces + 1u) * 2u + 2u; segment += 1u) {
+    for (var segment = 0u; segment < (max_bounces + 1u) * 3u + 2u; segment += 1u) {
         if (bounces > max_bounces) {
             break;
         }
-        let hit = trace(origin, dir, inside, inside_model);
+        let hit = trace(origin, dir, medium, medium_model);
+
+        if (medium != 0u) {
+            // Haze: sample where the ray scatters; the Material's colour is the albedo.
+            let haze = evaluate_material(medium_color, origin, -dir);
+            if (haze.volume_density > 0.0) {
+                let flight = -log(max(1.0 - rand(), 1.0e-7)) / haze.volume_density;
+                if (flight < hit.t || !hit.hit) {
+                    let at = origin + dir * flight;
+                    throughput *= min(haze.volume_color, vec3<f32>(1.0));
+                    let sun = sun_sample();
+                    color += throughput * params.sun_color.rgb
+                        * (PI * hg_phase(dot(dir, sun), HAZE_G) * shadow_transmittance(at, sun));
+                    dir = sample_hg(dir, HAZE_G);
+                    origin = at;
+                    bounces += 1u;
+                    specular = false;
+                    straight = false;
+                    if (!russian_roulette(&throughput, bounces)) {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
 
         if (!hit.hit) {
-            if (bounces == 0u && params.options.y == 1u) {
+            if (straight && params.options.y == 1u) {
                 alpha = 0.0;
             } else if (bounces == 0u && params.style.x == STYLE_WIRE) {
                 color = wire_background();
@@ -336,27 +471,15 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
         let point = origin + dir * hit.t;
         let facing = max(dot(-dir, hit.normal), 0.0);
 
-        // Leaving glass: refract out or reflect back inside.
-        if (inside != 0u) {
-            let glass = evaluate_material(inside, point, hit.normal);
-            let ratio = glass.ior;
-            let sin2_t = ratio * ratio * (1.0 - facing * facing);
-            let r0 = pow((1.0 - ratio) / (1.0 + ratio), 2.0);
-            if (sin2_t >= 1.0 || rand() < schlick(sqrt(max(1.0 - sin2_t, 0.0)), r0)) {
-                dir = reflect(dir, hit.normal);
-                origin = point + hit.normal * EPS;
-            } else {
-                dir = refract(dir, hit.normal, ratio);
-                origin = point - hit.normal * EPS;
-                inside = 0u;
-            }
-            bounces += 1u;
-            specular = true;
-            continue;
-        }
-
+        // Color 0 only comes back from inside a medium: the medium ended and air follows.
+        let air = hit.color_index == 0u;
         var surface: Surface;
-        if (hit.color_index == GROUND_ID) {
+        if (air) {
+            surface.base_color = vec3<f32>(1.0);
+            surface.normal = hit.normal;
+            surface.transmission = 1.0;
+            surface.ior = 1.0;
+        } else if (hit.color_index == GROUND_ID) {
             surface.base_color = params.ground.rgb;
             surface.normal = hit.normal;
             surface.roughness = 1.0;
@@ -384,7 +507,7 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             let open_sun = max(sun.y, 0.0) * luminance(params.sun_color.rgb);
             let open_sky = 0.5 * luminance(params.sky_horizon.rgb + params.sky_zenith.rgb);
             let lit = open_sun * sun_visibility(point + up * EPS, sun)
-                + open_sky * select(1.0, 0.0, occluded(point + up * EPS, cosine_hemisphere(up)));
+                + open_sky * shadow_transmittance(point + up * EPS, cosine_hemisphere(up));
             let ratio = clamp(lit / max(open_sun + open_sky, 1.0e-4), 0.0, 1.0);
             if (params.options.y == 1u) {
                 color = vec3<f32>(0.0);
@@ -396,21 +519,57 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
         }
 
         let r1 = rand();
-        if (r1 < surface.transmission) {
-            // Glass: reflect or refract at the surface.
-            let r0 = pow((1.0 - surface.ior) / (1.0 + surface.ior), 2.0);
-            if (rand() < schlick(facing, r0)) {
-                dir = reflect(dir, normal);
-                origin = point + normal * EPS;
-            } else {
-                dir = refract(dir, normal, 1.0 / surface.ior);
-                if (surface.roughness > 0.02) {
-                    dir = normalize(dir + surface.roughness * surface.roughness * 0.5 * unit_sphere());
+        var bounced = true;
+        if (air || r1 < surface.transmission) {
+            // An interface between the current medium (or air) and the next one: reflect or refract.
+            let n_from = medium_ior;
+            let n_to = select(surface.ior, 1.0, air);
+            var roughness = surface.roughness;
+            if (air) {
+                roughness = evaluate_material(medium_color, point, hit.normal).roughness;
+            }
+            // Rough glass: the microfacet normal is the face normal scattered by the roughness.
+            var facet = hit.normal;
+            let alpha_r = roughness * roughness;
+            if (alpha_r > 1.0e-4) {
+                let scattered = normalize(hit.normal + alpha_r * unit_sphere());
+                if (dot(scattered, -dir) > 0.05) {
+                    facet = scattered;
                 }
-                origin = point - normal * EPS;
-                inside = hit.color_index;
-                inside_model = hit.model;
-                throughput *= surface.base_color;
+            }
+            let cos_i = max(dot(-dir, facet), 0.0);
+            var refracted = refract(dir, facet, n_from / n_to);
+            if (dot(refracted, hit.normal) >= 0.0 || dot(refracted, refracted) < 0.25) {
+                refracted = refract(dir, hit.normal, n_from / n_to);
+            }
+            let can_refract = dot(refracted, refracted) > 0.25;
+            if (!can_refract || rand() < fresnel_dielectric(cos_i, n_from, n_to)) {
+                var mirror = reflect(dir, facet);
+                if (dot(mirror, hit.normal) <= 0.0) {
+                    mirror = reflect(dir, hit.normal);
+                }
+                dir = mirror;
+                origin = point + hit.normal * EPS;
+                straight = false;
+            } else {
+                // A straight pass (same index, no roughness) is not a bounce, so fog and clear sheets cost nothing.
+                bounced = abs(n_from - n_to) > 1.0e-4 || alpha_r > 1.0e-4;
+                straight = straight && !bounced;
+                dir = normalize(refracted);
+                origin = point - hit.normal * EPS;
+                if (air) {
+                    medium = 0u;
+                    medium_ior = 1.0;
+                } else {
+                    // Glass is tinted by its base color; haze that does not bend light is tinted by its scattering.
+                    if (surface.ior > 1.001 || surface.volume_density <= 0.0) {
+                        throughput *= surface.base_color;
+                    }
+                    medium = color_graph(hit.color_index) + 1u;
+                    medium_color = hit.color_index;
+                    medium_model = hit.model;
+                    medium_ior = surface.ior;
+                }
             }
             specular = true;
         } else if (r1 < surface.transmission + (1.0 - surface.transmission) * surface.metallic) {
@@ -424,11 +583,13 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             origin = point + normal * EPS;
             throughput *= surface.base_color;
             specular = true;
+            straight = false;
         } else if (rand() < schlick(facing, 0.04) * clamp(1.0 - surface.roughness, 0.0, 1.0)) {
             // Clear coat on glossy dielectrics.
             dir = reflect(dir, normal);
             origin = point + normal * EPS;
             specular = true;
+            straight = false;
         } else {
             // Diffuse: sun by next-event estimation, everything else by a cosine-weighted bounce.
             let sun = sun_sample();
@@ -442,15 +603,13 @@ fn radiance(start: vec3<f32>, start_dir: vec3<f32>) -> vec4<f32> {
             origin = point + normal * EPS;
             throughput *= surface.base_color;
             specular = false;
+            straight = false;
         }
-        bounces += 1u;
-
-        if (bounces > 3u) {
-            let survive = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 1.0);
-            if (rand() > survive) {
-                break;
-            }
-            throughput /= survive;
+        if (bounced) {
+            bounces += 1u;
+        }
+        if (!russian_roulette(&throughput, bounces)) {
+            break;
         }
     }
     return vec4<f32>(min(color, vec3<f32>(24.0)), alpha);

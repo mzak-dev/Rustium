@@ -10,8 +10,15 @@
 // One Color of the Palette: linear base color and the index of its Material.
 struct ColorEntry {
     albedo: vec3<f32>,
+    // Bits 0..16: index of the Color's Material. Bit 16 (COLOR_NO_SHADOW): the Material does not cast shadows.
+    // Bit 17 (COLOR_VOLUMETRIC): the Material has a Volume output, so shadow rays are dimmed by its haze instead of
+    // stopped.
     graph: u32,
 };
+
+const COLOR_GRAPH_MASK: u32 = 0xffffu;
+const COLOR_NO_SHADOW: u32 = 0x10000u;
+const COLOR_VOLUMETRIC: u32 = 0x20000u;
 
 struct MaterialTable {
     colors: array<ColorEntry, 256>,
@@ -21,6 +28,16 @@ struct MaterialTable {
 // The constants of every node of every Material, flattened by the compiler (a node's slots are literals in the
 // generated code, so editing a number only rewrites this buffer; editing the graph's shape recompiles).
 @group(0) @binding(9) var<storage, read> material_params: array<f32>;
+
+// The Material index of a Color.
+fn color_graph(color_index: u32) -> u32 {
+    return material_table.colors[color_index].graph & COLOR_GRAPH_MASK;
+}
+
+// The shadow and haze flags of a Color's Material (COLOR_NO_SHADOW, COLOR_VOLUMETRIC).
+fn color_flags(color_index: u32) -> u32 {
+    return material_table.colors[color_index].graph & ~COLOR_GRAPH_MASK;
+}
 
 // The Surface and Volume outputs of a Material.
 struct Surface {

@@ -11,7 +11,7 @@
 
 use glam::{IVec3, Mat4, Vec3};
 use rustium_core::{
-    Brush, ColorId, Command, Face, HitTarget, Mirror, NodeId, Orientation, RayHit, SampleMaterial, Scene,
+    Brush, ColorId, Command, Face, GraphEdit, GraphNodeKind, HitTarget, InputValue, Mirror, NodeId, Orientation, RayHit, SampleMaterial, Scene,
     SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
@@ -1128,4 +1128,204 @@ fn benchmark_software_against_hardware() {
             SIZE * 2
         );
     }
+}
+
+/// Gives Color `color` a Material that is transparent haze: no reflection, `density` per voxel, `scattering` as albedo.
+fn make_haze(scene: &mut Scene, color: u8, density: f32, scattering: [f32; 3]) -> u32 {
+    shade(
+        scene,
+        color,
+        SurfaceConstants {
+            transmission: 1.0,
+            roughness: 0.0,
+            ior: 1.0,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    let index = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+    let add = Command::EditMaterial {
+        index,
+        edit: GraphEdit::AddNode {
+            kind: GraphNodeKind::VolumeOutput,
+            position: [0.0, 0.0],
+        },
+    };
+    apply(scene, &add).unwrap();
+    let node = scene.material_graphs()[index as usize].volume_output().unwrap().id;
+    for (input, value) in [(0, InputValue::Float(density)), (1, InputValue::Color(scattering))] {
+        let set = Command::EditMaterial {
+            index,
+            edit: GraphEdit::SetInput { node, input, value },
+        };
+        apply(scene, &set).unwrap();
+    }
+    index
+}
+
+fn bright_setup() -> Setup {
+    Setup {
+        sky: Sky::Clear,
+        ground: Ground::None,
+        sun_height: 45.0,
+        samples: 48,
+        ..Setup::default()
+    }
+}
+
+fn box_camera() -> Camera {
+    Camera::looking_at(Vec3::new(0.0, 4.0, 18.0), Vec3::new(0.0, 3.0, 0.0))
+}
+
+#[test]
+fn a_glass_box_refracts_and_stays_plausibly_bright() {
+    let gpu = gpu_or_skip!();
+    let camera = box_camera();
+    let setup = Setup {
+        ground: Ground::Studio,
+        ..bright_setup()
+    };
+    let build = |transmission: f32| {
+        let mut scene = Scene::new();
+        fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 6, 3), id(1));
+        shade(
+            &mut scene,
+            1,
+            SurfaceConstants {
+                transmission,
+                roughness: 0.0,
+                ..SurfaceConstants::MATTE
+            },
+        );
+        scene
+    };
+    let glass = render(&gpu, &build(1.0), &camera, &setup);
+    dump("glass-box", &glass);
+    let opaque = render(&gpu, &build(0.0), &camera, &setup);
+    let empty = render(&gpu, &Scene::new(), &camera, &setup);
+    let centre = camera.pixel(Vec3::new(0.0, 3.5, 3.5));
+    let (through, solid, open) = (
+        area_luminance(&glass, centre),
+        area_luminance(&opaque, centre),
+        area_luminance(&empty, centre),
+    );
+    assert!(
+        (through - solid).abs() > 0.05 * open.max(solid),
+        "glass {through} differs from opaque {solid}"
+    );
+    assert!(
+        through > 0.05 * open && through < 3.0 * open.max(0.2),
+        "glass {through} against open view {open}"
+    );
+    assert!(glass.rgba.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn glass_voxels_of_one_material_have_no_faces_between_them() {
+    let gpu = gpu_or_skip!();
+    let camera = box_camera();
+    let setup = Setup {
+        ground: Ground::Studio,
+        ..bright_setup()
+    };
+    let build = |split: bool| {
+        let mut scene = Scene::new();
+        fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 6, 3), id(1));
+        if split {
+            fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 6, 0), id(2));
+        }
+        shade(
+            &mut scene,
+            1,
+            SurfaceConstants {
+                transmission: 1.0,
+                roughness: 0.0,
+                ..SurfaceConstants::MATTE
+            },
+        );
+        let graph = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+        apply(&mut scene, &Command::AssignGraph { id: id(2), graph }).unwrap();
+        scene
+    };
+    let whole = render(&gpu, &build(false), &camera, &setup);
+    let split = render(&gpu, &build(true), &camera, &setup);
+    let centre = camera.pixel(Vec3::new(0.0, 3.5, 3.5));
+    let (a, b) = (area_luminance(&whole, centre), area_luminance(&split, centre));
+    // The two Colors have their own tints, so allow for that.
+    assert!(b > a * 0.6 && b < a * 1.6, "split {b} against whole {a}");
+}
+
+#[test]
+fn a_haze_box_dims_what_is_behind_it() {
+    let gpu = gpu_or_skip!();
+    let camera = box_camera();
+    let setup = bright_setup();
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 6, 3), id(1));
+    // Pure absorption: the box takes light away and adds none.
+    make_haze(&mut scene, 1, 0.5, [0.0, 0.0, 0.0]);
+    let hazy = render(&gpu, &scene, &camera, &setup);
+    dump("haze-box", &hazy);
+    let clear = render(&gpu, &Scene::new(), &camera, &setup);
+    let centre = camera.pixel(Vec3::new(0.0, 3.5, 0.0));
+    let (dim, open) = (area_luminance(&hazy, centre), area_luminance(&clear, centre));
+    // Seven voxels of density 0.5 transmit exp(-3.5), about 3 percent.
+    assert!(dim < open * 0.25, "haze {dim} against open sky {open}");
+    assert!(hazy.rgba.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn scattering_haze_changes_the_view_through_it() {
+    let gpu = gpu_or_skip!();
+    let camera = box_camera();
+    let setup = Setup {
+        ground: Ground::Studio,
+        ..bright_setup()
+    };
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-3, 1, -3), IVec3::new(3, 6, 3), id(1));
+    make_haze(&mut scene, 1, 0.4, [0.9, 0.95, 1.0]);
+    let foggy = render(&gpu, &scene, &camera, &setup);
+    dump("fog-box", &foggy);
+    let empty = render(&gpu, &Scene::new(), &camera, &setup);
+    let spot = camera.pixel(Vec3::new(0.0, 3.0, 0.0));
+    let (in_fog, open) = (area_luminance(&foggy, spot), area_luminance(&empty, spot));
+    assert!((in_fog - open).abs() > 0.05 * open, "fog {in_fog} changes the view {open}");
+    assert!(foggy.rgba.iter().all(|value| value.is_finite()));
+}
+
+#[test]
+fn a_material_that_does_not_cast_shadows_leaves_the_floor_lit() {
+    let gpu = gpu_or_skip!();
+    let camera = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(0.0, 2.0, 0.0));
+    let setup = Setup {
+        ground: Ground::Studio,
+        sun_height: 40.0,
+        samples: 48,
+        ..bright_setup()
+    };
+    let build = |casts: bool| {
+        let mut scene = Scene::new();
+        fill(&mut scene, IVec3::new(-12, 0, -12), IVec3::new(12, 0, 12), id(3));
+        fill(&mut scene, IVec3::new(-2, 1, -2), IVec3::new(1, 4, 1), id(37));
+        shade(&mut scene, 37, SurfaceConstants::MATTE);
+        let index = u32::try_from(scene.material_graphs().len()).unwrap() - 1;
+        let command = Command::SetCastsShadow {
+            index,
+            casts_shadow: casts,
+        };
+        apply(&mut scene, &command).unwrap();
+        scene
+    };
+    let shadowed_spot = camera.pixel(Vec3::new(-4.0, 1.0, 3.0));
+    let lit_spot = camera.pixel(Vec3::new(5.0, 1.0, 5.0));
+    let with = render(&gpu, &build(true), &camera, &setup);
+    let without = render(&gpu, &build(false), &camera, &setup);
+    assert!(luminance(&with, shadowed_spot) * 1.5 < luminance(&with, lit_spot));
+    dump("noshadow-with", &with);
+    dump("noshadow-without", &without);
+    let (dark, light) = (luminance(&without, shadowed_spot), luminance(&without, lit_spot));
+    assert!(
+        dark > light * 0.8,
+        "without a shadow the floor stays lit: {dark} against {light}"
+    );
 }

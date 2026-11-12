@@ -93,7 +93,7 @@ pub fn compile_materials(graphs: &[MaterialGraph]) -> Result<CompiledMaterials, 
         "fn evaluate_material(color_index: u32, position: vec3<f32>, normal: vec3<f32>) -> Surface {\n\
          \x20   let color = material_table.colors[color_index];\n\
          \x20   var surface: Surface;\n\
-         \x20   switch color.graph {\n",
+         \x20   switch (color.graph & 0xffffu) {\n",
     );
     for index in 1..graphs.len() {
         let _ = writeln!(

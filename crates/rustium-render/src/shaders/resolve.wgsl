@@ -9,6 +9,8 @@ struct Resolve {
     // x: 1 when the source holds demodulated light that must get its albedo back, y: outline width in pixels,
     // z: samples per pixel accumulated so far, w: pass (0 beauty, others are traced as display-ready colours).
     options: vec4<u32>,
+    // x: lens radius in voxels (0 = pinhole), y: focus distance in voxels.
+    lens: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> resolve: Resolve;
@@ -59,6 +61,26 @@ fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// Radius in pixels of the blur depth of field gives a surface at `distance` from the camera; 0 for a pinhole. The
+// guides (normal, distance, albedo) come from the pinhole ray through the pixel's centre, so where the picture is
+// blurred they no longer describe it and the denoiser has to trust them less.
+fn defocus_blur(pixel: vec2<i32>, hit_distance: f32) -> f32 {
+    if (resolve.lens.x <= 0.0 || hit_distance > SKY_DISTANCE) {
+        return 0.0;
+    }
+    let radius = resolve.lens.x * abs(hit_distance - resolve.lens.y) / max(resolve.lens.y, 1.0e-3);
+    let footprint = distance(position_of(pixel + vec2<i32>(1, 0), hit_distance), position_of(pixel, hit_distance));
+    return radius / max(footprint, 1.0e-4);
+}
+
+// The albedo the denoiser divides by: the pinhole albedo fades to white as the pixel gets blurred, because a blurred
+// colour is a mix of surfaces and no single albedo describes it.
+fn effective_albedo(pixel: vec2<i32>) -> vec3<f32> {
+    let albedo = textureLoad(albedo_texture, pixel, 0).rgb;
+    let blur = defocus_blur(pixel, textureLoad(geometry, pixel, 0).w);
+    return mix(albedo, vec3<f32>(1.0), clamp(blur * 0.5, 0.0, 1.0));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn demodulate(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= resolve.image.x || id.y >= resolve.image.y) {
@@ -66,7 +88,7 @@ fn demodulate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let pixel = snap(vec2<i32>(id.xy));
     let light = textureLoad(source, pixel, 0);
-    let albedo = max(textureLoad(albedo_texture, pixel, 0).rgb, vec3<f32>(MIN_ALBEDO));
+    let albedo = max(effective_albedo(pixel), vec3<f32>(MIN_ALBEDO));
     textureStore(destination, vec2<i32>(id.xy), vec4<f32>(light.rgb / albedo, light.a));
 }
 
@@ -81,6 +103,8 @@ fn atrous(id: vec2<u32>, spacing: i32) {
     let centre_albedo = textureLoad(albedo_texture, snap(pixel), 0).rgb;
     let centre_position = position_of(pixel, centre_geometry.w);
     let centre_sky = centre_geometry.w > SKY_DISTANCE;
+    // Blurred surfaces: the guides are loosened by the blur radius so the filter can average across the blur.
+    let centre_blur = defocus_blur(snap(pixel), centre_geometry.w);
     let centre_luminance = luminance(centre.rgb);
     // Fewer samples mean more noise, so the colour term gets looser.
     let sigma_color = clamp(2.5 / sqrt(f32(max(resolve.options.z, 1u))), 0.12, 1.0);
@@ -95,15 +119,19 @@ fn atrous(id: vec2<u32>, spacing: i32) {
             let other_geometry = textureLoad(geometry, snap(other_pixel), 0);
             let other_albedo = textureLoad(albedo_texture, snap(other_pixel), 0).rgb;
             var weight = weights[dx + 2] * weights[dy + 2];
-            if ((other_geometry.w > SKY_DISTANCE) != centre_sky) {
+            let relax = 1.0 + max(centre_blur, defocus_blur(snap(other_pixel), other_geometry.w));
+            let across_sky = (other_geometry.w > SKY_DISTANCE) != centre_sky;
+            if (across_sky && relax < 3.0) {
                 continue;
             }
-            if (!centre_sky) {
-                weight *= pow(max(dot(centre_geometry.xyz, other_geometry.xyz), 0.0), 32.0);
+            // Across a blurred silhouette only the colour says what belongs together.
+            if (!centre_sky && !across_sky) {
+                // The normal stops mattering where the blur is wider than a few pixels.
+                weight *= mix(pow(max(dot(centre_geometry.xyz, other_geometry.xyz), 0.0), 32.0), 1.0, clamp((relax - 1.0) * 0.25, 0.0, 1.0));
                 let off_plane = abs(dot(position_of(other_pixel, other_geometry.w) - centre_position, centre_geometry.xyz));
-                weight *= exp(-off_plane / (0.25 + 0.004 * centre_geometry.w));
+                weight *= exp(-off_plane / ((0.25 + 0.004 * centre_geometry.w) * relax));
                 let albedo_gap = centre_albedo - other_albedo;
-                weight *= exp(-dot(albedo_gap, albedo_gap) / 0.02);
+                weight *= exp(-dot(albedo_gap, albedo_gap) / (0.02 * relax * relax));
             }
             let difference = luminance(other.rgb) - centre_luminance;
             weight *= exp(-difference * difference / (sigma_color * sigma_color * (centre_luminance * centre_luminance + 0.25)));
@@ -177,7 +205,7 @@ fn finish(@builtin(global_invocation_id) id: vec3<u32>) {
     let source_pixel = snap(pixel);
     var color = textureLoad(source, source_pixel, 0);
     if (resolve.options.x == 1u) {
-        let albedo = max(textureLoad(albedo_texture, source_pixel, 0).rgb, vec3<f32>(MIN_ALBEDO));
+        let albedo = max(effective_albedo(source_pixel), vec3<f32>(MIN_ALBEDO));
         color = vec4<f32>(color.rgb * albedo, color.a);
     }
     // View passes were traced as display-ready colours: no outlines on them.

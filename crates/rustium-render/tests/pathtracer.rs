@@ -781,6 +781,52 @@ fn depth_of_field_blurs_what_is_off_the_focal_plane() {
 }
 
 #[test]
+fn denoising_works_through_depth_of_field_without_fringes() {
+    let gpu = gpu_or_skip!();
+    let (scene, _) = showpiece();
+    let eye = Vec3::new(14.0, 14.0, 20.0);
+    let camera = Camera::looking_at(eye, Vec3::new(0.0, 1.0, 0.0));
+    let lens = ThinLens {
+        eye: eye.to_array(),
+        radius: 1.5,
+        focus_distance: 12.0,
+    };
+    let setup = Setup {
+        ground: Ground::Studio,
+        samples: 8,
+        lens: Some(lens),
+        ..Setup::default()
+    };
+    let noisy = render(&gpu, &scene, &camera, &setup);
+    let clean = render(&gpu, &scene, &camera, &Setup { denoise: true, ..setup });
+    dump("dof-denoise-off", &noisy);
+    dump("dof-denoise-on", &clean);
+    // A patch of defocused floor far from the focal plane.
+    let (cx, cy) = camera.pixel(Vec3::new(8.0, 1.0, 6.0));
+    let patch = |image: &TraceImage| {
+        let mut values = Vec::new();
+        for y in cy - 5..=cy + 5 {
+            for x in cx - 5..=cx + 5 {
+                values.push(luminance(image, (x, y)));
+            }
+        }
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / values.len() as f32;
+        (mean, variance.sqrt())
+    };
+    let ((noisy_mean, noisy_spread), (clean_mean, clean_spread)) = (patch(&noisy), patch(&clean));
+    assert!(
+        clean_spread < noisy_spread * 0.7,
+        "defocused noise {noisy_spread} should drop, got {clean_spread}"
+    );
+    assert!(
+        (clean_mean / noisy_mean - 1.0).abs() < 0.15,
+        "mean {noisy_mean} against {clean_mean}"
+    );
+    assert!(clean.rgba.iter().all(|value| value.is_finite()));
+}
+
+#[test]
 fn aov_passes_show_albedo_normals_and_depth() {
     let gpu = gpu_or_skip!();
     let (scene, camera) = showpiece();

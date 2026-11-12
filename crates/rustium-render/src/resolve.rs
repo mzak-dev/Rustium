@@ -16,9 +16,11 @@ struct Params {
     inv_view_proj: [[f32; 4]; 4],
     image: [u32; 4],
     options: [u32; 4],
+    /// x: lens radius in voxels (0 is a pinhole), y: focus distance in voxels.
+    lens: [f32; 4],
 }
 
-const _: () = assert!(size_of::<Params>() == 96);
+const _: () = assert!(size_of::<Params>() == 112);
 
 /// What one resolve needs to know.
 #[derive(Debug, Clone, Copy)]
@@ -29,18 +31,17 @@ pub(crate) struct ResolveInput {
     pub(crate) denoise: bool,
     pub(crate) pass: RenderPass,
     pub(crate) samples: u32,
-    /// Whether depth of field is on.
-    pub(crate) defocus: bool,
+    /// Lens radius and focus distance in voxels when depth of field is on.
+    pub(crate) lens: Option<(f32, f32)>,
     /// Edge length in pixels of one block of the Pixel style.
     pub(crate) block: u32,
 }
 
 impl ResolveInput {
     /// The Wire style keeps its one-pixel lines, which the denoiser would smear; view passes are display colours with
-    /// no lighting noise; and with depth of field the pinhole G-buffer would stop the blur at the sharp edges and leave
-    /// a dark fringe.
+    /// no lighting noise.
     pub(crate) fn denoises(&self) -> bool {
-        self.denoise && self.style != RenderStyle::Wire && self.pass == RenderPass::Beauty && !self.defocus
+        self.denoise && self.style != RenderStyle::Wire && self.pass == RenderPass::Beauty
     }
 }
 
@@ -328,6 +329,7 @@ impl Resolver {
                 input.samples,
                 input.pass.index(),
             ],
+            lens: input.lens.map_or([0.0; 4], |(radius, focus)| [radius, focus, 0.0, 0.0]),
         };
         queue.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
         let groups = (input.size.0.div_ceil(WORKGROUP), input.size.1.div_ceil(WORKGROUP));
@@ -378,7 +380,7 @@ mod tests {
             denoise: true,
             pass: RenderPass::Beauty,
             samples: 1,
-            defocus: false,
+            lens: None,
             block: 2,
         };
         assert!(!input.denoises());

@@ -243,7 +243,10 @@ impl TraceFrame {
             denoise: self.denoise,
             pass: self.pass,
             samples,
-            defocus: self.lens.is_some_and(|lens| lens.radius > 0.0),
+            lens: self
+                .lens
+                .filter(|lens| lens.radius > 0.0)
+                .map(|lens| (lens.radius, lens.focus_distance)),
             block,
         }
     }

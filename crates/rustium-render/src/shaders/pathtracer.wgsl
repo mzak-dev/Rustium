@@ -720,7 +720,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let position = vec2<f32>(id.xy) + vec2<f32>(rand(), rand()) * spread;
             var ray = primary_ray(position);
             ray = thin_lens(ray);
-            sum += radiance(ray.origin, ray.dir);
+            sum += limit_fireflies(radiance(ray.origin, ray.dir));
             let passes = first_hit_passes(ray);
             sum_albedo += passes.albedo;
             sum_normal += passes.normal;

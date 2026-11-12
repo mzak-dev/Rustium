@@ -31,6 +31,19 @@ fn pixel_centre(pixel: vec2<u32>) -> vec2<f32> {
     return vec2<f32>(pixel) + vec2<f32>(0.5);
 }
 
+// Depth of field scatters paths over the aperture, so now and then one finds a very bright light that the average of a
+// few samples cannot hide: a firefly. With the lens on, a sample brighter than this (relative luminance) is scaled
+// down to it, keeping its colour.
+const DEFOCUS_SAMPLE_LIMIT: f32 = 10.0;
+
+fn limit_fireflies(sample_color: vec4<f32>) -> vec4<f32> {
+    let brightness = luminance(sample_color.rgb);
+    if (params.lens.z < 0.5 || brightness <= DEFOCUS_SAMPLE_LIMIT) {
+        return sample_color;
+    }
+    return vec4<f32>(sample_color.rgb * (DEFOCUS_SAMPLE_LIMIT / brightness), sample_color.a);
+}
+
 // Thin lens: the point where the ray crosses the focal plane stays, the ray's start moves over the aperture disc.
 fn thin_lens(ray: Ray) -> Ray {
     if (params.lens.z < 0.5) {

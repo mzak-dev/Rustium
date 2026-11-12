@@ -223,6 +223,7 @@ pub(crate) struct Hud<'frame> {
     pub(crate) logo: &'frame egui::TextureHandle,
     pub(crate) maximized: bool,
     pub(crate) adapter_name: &'frame str,
+    pub(crate) adapters: &'frame [rustium_render::AdapterChoice],
     /// The traversal the viewport's path tracer runs, and whether the GPU could run the hardware one.
     pub(crate) trace_engine: TraceEngine,
     pub(crate) ray_query_supported: bool,
@@ -324,7 +325,7 @@ pub(crate) const ISLAND_GAP: f32 = 8.0;
 /// The narrowest a bottom-centre island gets; the bottom corner islands leave this much room.
 const CENTRE_MIN: f32 = 385.0;
 /// Number of layouts an island can shrink through, from 0 (full) up.
-pub(crate) const FIT_LEVELS: usize = 4;
+pub(crate) const FIT_LEVELS: usize = 5;
 
 /// How compact an island is drawn and how wide each layout turned out to be.
 #[derive(Debug, Default)]
@@ -774,12 +775,12 @@ mod fit_tests {
     fn widths_come_back_when_an_earlier_key_returns() {
         let mut fit = Fit::default();
         fit.switch_key(1);
-        fit.widths = [300.0, 200.0, 0.0, 0.0];
+        fit.widths = [300.0, 200.0, 0.0, 0.0, 0.0];
         fit.switch_key(2);
         assert_eq!(fit.widths, [0.0; FIT_LEVELS], "a new key has nothing measured");
-        fit.widths = [320.0, 0.0, 0.0, 0.0];
+        fit.widths = [320.0, 0.0, 0.0, 0.0, 0.0];
         fit.switch_key(1);
-        assert_eq!(fit.widths, [300.0, 200.0, 0.0, 0.0], "no level is measured again");
+        assert_eq!(fit.widths, [300.0, 200.0, 0.0, 0.0, 0.0], "no level is measured again");
         fit.switch_key(2);
         assert_eq!(fit.widths[0], 320.0);
     }

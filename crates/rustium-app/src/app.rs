@@ -770,6 +770,7 @@ impl Running {
         self.viewport.poll_materials(&self.gpu);
         let mode = self.ui.mode;
         if mode == Mode::Render {
+            self.ui.render.image_limits = rustium_render::trace_image_limits(self.gpu.device());
             if self.last_mode != Mode::Render || self.trace_revision != Some(self.editor.revision) {
                 self.viewport.upload_trace_scene(&self.gpu, &self.editor.scene);
                 self.trace_revision = Some(self.editor.revision);
@@ -839,7 +840,7 @@ impl Running {
                 .collect(),
         };
         if let Some(message) = self.image_too_large(&outputs) {
-            self.ui.toast = Some(Toast::new(message.clone(), true));
+            // Shown under the Output tab only: a toast would cover the frame's size label.
             self.ui.render.message = Some(message);
             return;
         }
@@ -855,6 +856,11 @@ impl Running {
         let renderer = self.viewport.offline_renderer(&self.gpu);
         let scene = self.editor.scene.clone();
         self.ui.render.message = None;
+        self.ui.render.failure_key = match kind {
+            JobKind::Image => "save-failed",
+            JobKind::Turntable => "video-failed",
+            JobKind::Queue => "queue-failed",
+        };
         self.ui.render.job = Some(render_job::spawn(spec, renderer, scene));
     }
 
@@ -930,7 +936,7 @@ impl Running {
             SaveOutcome::Failed(reason) => (
                 Some(
                     self.i18n
-                        .tr_args("save-failed", &[("reason", FluentValue::from(reason))]),
+                        .tr_args(self.ui.render.failure_key, &[("reason", FluentValue::from(reason))]),
                 ),
                 true,
             ),

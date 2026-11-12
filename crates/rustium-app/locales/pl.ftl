@@ -441,6 +441,7 @@ dialog-export-vox = Eksportuj plik MagicaVoxel
 dialog-export-palette = Eksportuj paletę
 file-type-scene = Scena Rustium
 file-saved = Zapisano { $name }
+file-open-busy = Najpierw odpowiedz na otwarte pytanie, potem otwórz ponownie { $name }
 file-exported = Wyeksportowano { $name }
 palette-imported = Zaimportowano kolorów: { $count }
 file-error-open = Nie można otworzyć { $name }: { $reason }

@@ -440,6 +440,7 @@ dialog-export-vox = Export a MagicaVoxel file
 dialog-export-palette = Export the palette
 file-type-scene = Rustium scene
 file-saved = Saved { $name }
+file-open-busy = Answer the open question first, then open { $name } again
 file-exported = Exported { $name }
 palette-imported = Imported { $count } colors
 file-error-open = Cannot open { $name }: { $reason }

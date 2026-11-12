@@ -187,8 +187,9 @@ impl Running {
         match (prompt, answer) {
             (Prompt::Unsaved(action), PromptAnswer::Primary) => {
                 if self.doc.saving {
-                    // A save is still running; saving again now would drop `action`. Ask again once it is done.
-                    self.ui.prompt = Some(Prompt::Unsaved(action));
+                    // A save is still running; saving again now would drop `action`. It continues when that save
+                    // has finished.
+                    self.doc.after_save = Some(action);
                 } else {
                     self.save(Some(action), false);
                 }
@@ -252,12 +253,21 @@ impl Running {
                 } => {
                     if origin != Origin::Recovery && self.edited_since_accepting() {
                         // The Scene was edited while the file was being chosen or read: ask before replacing it.
+                        let name = path
+                            .as_deref()
+                            .or(source.as_deref())
+                            .map(display_name)
+                            .unwrap_or_default();
                         let again = match origin {
                             Origin::File => path.map(|path| Pending::Open(Some(path))),
                             _ => source.map(Pending::Import),
                         };
-                        if let (Some(again), None) = (again, &self.ui.prompt) {
-                            self.ui.prompt = Some(Prompt::Unsaved(again));
+                        match (again, &self.ui.prompt) {
+                            (Some(again), None) => self.ui.prompt = Some(Prompt::Unsaved(again)),
+                            _ => {
+                                // Another question is open; the file is not dropped silently.
+                                self.say("file-open-busy", &[("name", FluentValue::from(name))], false);
+                            }
                         }
                         continue;
                     }
@@ -276,7 +286,11 @@ impl Running {
                     if document == self.doc.id() {
                         self.doc.mark_saved(path, revision);
                         if let Some(action) = then {
+                            self.doc.after_save = None;
                             quit |= self.perform(action, settings);
+                        } else if let Some(action) = self.doc.after_save.take() {
+                            // Edits made while the save ran are asked about again.
+                            quit |= self.request(action, settings);
                         }
                     } else {
                         // The file was written, but another document is open now: it must not take this path.
@@ -300,22 +314,19 @@ impl Running {
                 }
                 IoOutcome::Autosaved(revision) => debug!(revision, "recovery copy written"),
                 IoOutcome::RecentChecked(items) => self.ui.recent = items,
-                IoOutcome::Cancelled(document) => {
-                    if document == Some(self.doc.id()) {
-                        self.doc.saving = false;
-                    }
-                }
+                IoOutcome::Cancelled(document) => self.doc.save_ended(document),
                 IoOutcome::Failed {
                     operation,
                     path,
                     message,
-                } => self.report_failure(operation, &path, &message),
+                    document,
+                } => self.report_failure(operation, &path, &message, document),
             }
         }
         quit
     }
 
-    fn report_failure(&mut self, operation: Operation, path: &Path, message: &str) {
+    fn report_failure(&mut self, operation: Operation, path: &Path, message: &str, document: Option<u64>) {
         let key = match operation {
             Operation::Open => "file-error-open",
             Operation::Save => "file-error-save",
@@ -329,7 +340,7 @@ impl Running {
             }
         };
         if operation == Operation::Save {
-            self.doc.saving = false;
+            self.doc.save_ended(document);
         }
         if operation == Operation::Open && !path.is_file() {
             // A file that is gone does not belong in the recent list any more.

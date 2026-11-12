@@ -24,7 +24,9 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
    Each visible Model is drawn as one instance of its Shape's chunks with its Transform and a dim factor
    (everything outside the Focus is dimmed).
 4. `ViewportRenderer` draws the scene into an offscreen MSAA target, blurs it at quarter resolution and
-   composites it onto the surface through an sRGB view, showing the blur under every glass island.
+   composites it onto the surface through an sRGB view, showing the blur under every glass island. When a Color of
+   the Palette uses a transparent Material, the scene is drawn with dithering and a jittered projection and resolved
+   by the temporal pass (see Raster transparency).
 5. egui paints the interface on top through the non-sRGB view of the same surface texture.
 
 ## Path tracer (Render mode)
@@ -40,21 +42,42 @@ Scene upload and traversal are separate: the software DDA and the hardware ray-q
   acceleration structures when the hardware engine is on.
 - **Traversal** (`shaders/pathtracer.wgsl`, `trace_model` / `trace_voxels`; software loop in `trace_dda.wgsl`): the ray is moved into each Model's
   Shape space and walked with a two-level DDA. Empty chunks are skipped in one jump, occupied ones are walked
-  voxel by voxel; the nearest hit over all Models wins, earlier Models first where they overlap. With `inside` set, the same walk travels through glass or haze voxels
-  and stops at the first different voxel. Hot paths are marked `HOT PATH` in the shader and in
+  voxel by voxel; the nearest hit over all Models wins, earlier Models first where they overlap. `trace_voxels` has three modes (`MODE_*`): nearest voxel; *inside*, which
+  travels through the voxels of one Material (glass or haze, identified by Material index, so voxels of two Colors with
+  the same Material have no face between them) and always ends in a hit on the first voxel of another Material, or on
+  air (Color 0, also at a chunk or grid edge); and *shadow*, which skips voxels of Materials that do not cast shadows
+  and only dims the ray by the density of haze voxels (`Hit::optical`). Hot paths are marked `HOT PATH` in the shader and in
   `PathTracer::encode`.
 - **Ray-query backend** (`ray_scene.rs`, `shaders/trace_rq.wgsl`): `pathtracer.wgsl` calls `trace_scene_hit()` and
-  `occluded()`, which come from `trace_dda.wgsl` (software) or `trace_rq.wgsl` (hardware); the shader module is
+  `shadow_transmittance()`, which come from `trace_dda.wgsl` (software) or `trace_rq.wgsl` (hardware); the shader module is
   composed from the shared body plus one of them. Hardware builds one BLAS per Shape of procedural boxes, one per
   occupied chunk, and a TLAS with one instance per visible Model (Transform as the instance matrix, instance index
   = Model index, custom data = where the Shape's boxes start). A candidate box runs the same `trace_voxels` on a
   one-cell view of the chunk grid, so hits are identical. BLASes are rebuilt only when a Shape's chunk set
   changes. `RayTracing` (Auto, Software, Hardware) is the preference, `TraceEngine` the result; `GpuContext`
-  requests `EXPERIMENTAL_RAY_QUERY` only when the adapter has it. Rays inside glass use the DDA in both engines.
+  requests `EXPERIMENTAL_RAY_QUERY` only when the adapter has it. Rays inside glass or haze use the DDA in both engines; shadow rays walk every chunk box the query reports
+  (no early out, haze adds up per chunk) in the hardware engine.
   Settings → Performance sets it, the Render inspector's Engine row shows the active one.
-- **Shading**: next-event sun sampling (soft cone), cosine-weighted diffuse bounces, metal, clear-coat, glass
-  (Fresnel + refraction, tinted by the base color), emission found by path hits, an analytic sky with presets, and
-  a ground of None, Studio or Shadow catcher.
+- **Shading**: next-event sun sampling (soft cone), cosine-weighted diffuse bounces, metal, clear-coat, glass and
+  haze, emission found by path hits, an analytic sky with presets, and a ground of None, Studio or Shadow catcher.
+- **Glass and haze** (`radiance` in `pathtracer.wgsl`): a path carries a *medium* (the Material it travels through, 0 =
+  air). Hitting a voxel whose Surface output has transmission starts an interface: exact dielectric Fresnel between
+  the current index and the Material's IOR (so IOR 1 reflects nothing), total internal reflection, a roughness-scattered
+  microfacet normal for rough glass, and the base color as a tint when entering. Inside the medium the walk reports
+  the first voxel of another Material, which is another interface (glass in glass, glass on air) or an opaque surface
+  that is shaded from inside. A Material with a Volume output is a homogeneous medium per segment: the free-flight
+  distance is sampled from the density at the segment's start (spatially varying density is therefore evaluated where
+  a ray enters or scatters, not along the ray), a scatter multiplies the throughput by the scattering colour, adds the
+  sun by next-event estimation with a Henyey-Greenstein phase (g = 0.3) and shadow transmittance, and continues with a
+  sampled direction. Haze with transmission 1 and IOR 1 is pure fog: its interfaces are straight passes that do not
+  count as bounces, and a path that is never bent still sees a transparent background as transparent. Surfaces with
+  Volume but no transmission stay opaque (the surface decides). Russian roulette runs after every event. Clay turns
+  glass and haze into grey solids; Toon and Wire shade the first hit only; the G-buffer gives glass and haze a white
+  albedo so the denoiser does not divide the background by the tint.
+- **Casts shadow**: the Colors table carries per-Color flags next to the Material index (bit 16: does not cast shadows,
+  bit 17: Material has a Volume output). Shadow rays skip no-shadow voxels, dim by density when crossing haze (opaque
+  beyond optical depth 12) and stop at everything else; sun next-event estimation, the shadow catcher and the Toon
+  shading use them. Bounce light is not affected: a path that reaches a voxel still shades it.
 - **Materials**: a Scene holds Materials as node graphs (`MaterialGraph`, index 0 is the Default material); each
   Palette Color points at one (`Color::graph`). `rustium-core` owns the data: typed sockets (Color / Vector / Float,
   any converts to any), per-input constants, links (one per input, no cycles), frames, Bypass, stable node ids, the
@@ -79,8 +102,20 @@ Scene upload and traversal are separate: the software DDA and the hardware ray-q
   per-voxel Noise) follow from `position` and `normal` alone; the private `material_ao` is set by the raster pass from
   the mesh's per-vertex occlusion and stays 1 in the path tracer, whose bounce light already darkens corners.
   Approximations: the Space option of Noise, Cells and Gradient (Model / World) is stored but both read the Scene
-  position, and "Casts shadow" is stored on the Material but neither renderer reads it yet. Raster shows emission
-  unlit and treats transmission as opaque until M5.
+  position. "Casts shadow" only affects the path tracer (the raster viewport has no shadows). Raster shows emission
+  unlit.
+- **Raster transparency** (`shaders/raster.wgsl`, `taa.rs`, `shaders/taa.wgsl`, ADR 0006): a fragment whose Material
+  has transmission or a Volume output is kept with a probability (its coverage: tint, a Fresnel term and the haze
+  density as if two voxels thick) and discarded otherwise, by interleaved gradient noise that moves every frame; kept
+  fragments write depth, so no sorting is needed. While any Palette Color is transparent the projection is jittered
+  (Halton 2,3, 8 frames), the scene resolves into a raw target and the TAA pass blends it with the reprojected history
+  (position from depth and last frame's view-projection) clamped to the 5x5 neighbourhood, which keeps what moved from
+  ghosting; the history is Rgba16Float, ping-ponged. The history weight is 1/10 while the view changes, shrinks to 1/32
+  once the image is still, jumps to 0.35 after an edit or Material change, and the history is dropped on size or MSAA
+  change, a camera cut (eye jump over 48 voxels) or when TAA was off. `ViewportRenderer::is_settling` tells the app to
+  keep redrawing for ~40 frames after a change. MSAA stays on for edges; overlay lines and the grid are drawn in the
+  same pass, so they are resolved with the scene. The Settings mock has only the MSAA row in its Anti-aliasing section,
+  so there is no TAA switch.
 - **Accumulation**: one pass per frame writes `prev + (sample - prev) / n` into an `Rgba32Float` texture,
   ping-ponging two textures. Any change to camera, scene, Palette, light, size, bounces, region, style or lens
   restarts accumulation (`TraceKey`). The same pass writes a G-buffer on its first sample (normal and distance,
@@ -103,7 +138,9 @@ Scene upload and traversal are separate: the software DDA and the hardware ray-q
 - `tests/pathtracer.rs` renders tiny scenes headless on a real GPU (skipped without an adapter);
   `RUSTIUM_DUMP_DIR=<dir>` also writes them as PNGs.
 
-Known limits: no light sampling for emissive voxels (small emitters are noisy), a dense chunk grid capped at 4M
+Known limits: no light sampling for emissive voxels (small emitters are noisy), haze density is sampled per
+  medium segment (not integrated along the ray), glass casts no caustics (a no-shadow Material is simply skipped by
+  shadow rays), a dense chunk grid capped at 4M
 cells, one sample per pixel per frame. The denoiser is spatial only (no temporal reuse) and a lens
 of real size would not blur a voxel model, so the aperture is a scale-free stand-in (`aperture_radius_voxels`).
 

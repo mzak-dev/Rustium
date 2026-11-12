@@ -234,7 +234,7 @@ fn left_side(ui: &mut egui::Ui, hud: &Hud<'_>, card: Rect, elapsed: f32, animate
 
 fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
     let left = if has_art(card) { ART_WIDTH + 12.0 } else { 36.0 };
-    let top = if card.height() >= 420.0 { 44.0 } else { 28.0 };
+    let top = if card.height() >= 420.0 { 40.0 } else { 26.0 };
     let content = Rect::from_min_max(card.min + vec2(left, top), card.max - vec2(36.0, 18.0));
     let close = Rect::from_min_size(pos2(card.right() - 40.0, card.top() + 12.0), vec2(28.0, 28.0));
     let close_response = ui.interact(close, Id::unique("splash-close"), Sense::click());
@@ -249,12 +249,16 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
     }
 
     ui.scope_builder(UiBuilder::new().max_rect(content), |ui| {
-        ui.spacing_mut().item_spacing.y = 6.0;
+        // Spacing is explicit so the blocks sit where the mockup puts them.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let title = if card.height() >= 420.0 { 46.0 } else { 36.0 };
         ui.label(
             RichText::new(hud.tr("app-name"))
-                .font(theme::bold(if card.height() >= 420.0 { 46.0 } else { 36.0 }))
+                .font(theme::bold(title))
+                .line_height(Some(title))
                 .color(theme::TEXT),
         );
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new(hud.tr("splash-subtitle")).color(theme::MUTED).size(13.0));
             egui::Frame::new()
@@ -265,7 +269,7 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                     ui.label(widgets::mono(env!("CARGO_PKG_VERSION"), 11.0).color(theme::MUTED))
                 });
         });
-        ui.add_space(22.0);
+        ui.add_space(26.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             let width = (content.width() - 8.0) / 2.0;
@@ -307,15 +311,20 @@ fn right_side(ui: &mut egui::Ui, hud: &mut Hud<'_>, card: Rect, load: f32) {
                 hud.send(AppCommand::Open(None));
             }
         });
-        ui.add_space(18.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(hud.tr("splash-recent").to_uppercase())
-                    .size(10.0)
-                    .color(theme::SUBTLE),
-            );
-        });
+        ui.add_space(20.0);
+        egui::Frame::new()
+            .inner_margin(egui::Margin {
+                left: 8,
+                ..egui::Margin::ZERO
+            })
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(hud.tr("splash-recent").to_uppercase())
+                        .size(10.0)
+                        .color(theme::SUBTLE),
+                );
+            });
+        ui.add_space(4.0);
         let list_height = (content.bottom() - 40.0 - ui.cursor().top()).max(0.0);
         recent_list(ui, hud, list_height);
     });
@@ -376,7 +385,7 @@ fn recent_list(ui: &mut egui::Ui, hud: &mut Hud<'_>, max_height: f32) {
     egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for item in &hud.ui.recent {
-            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::click());
+            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
             let (name_color, note_color) = if item.exists {
                 (theme::TEXT, theme::SUBTLE)
             } else {

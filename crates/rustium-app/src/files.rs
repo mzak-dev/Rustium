@@ -579,10 +579,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn root_name(scene: &Scene) -> String {
-    scene
+/// The names of the first Nodes under the Scene root, shown next to the file on the start screen.
+pub(crate) fn scene_summary(scene: &Scene) -> String {
+    let names: Vec<&str> = scene
         .node(NodeId::ROOT)
-        .map_or_else(String::new, |root| root.name().to_owned())
+        .map(|root| {
+            root.children()
+                .iter()
+                .filter_map(|id| scene.node(*id))
+                .map(rustium_core::Node::name)
+                .filter(|name| !name.is_empty())
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.join(", ")
 }
 
 fn failure(operation: Operation, path: &Path, error: impl std::fmt::Display) -> IoOutcome {
@@ -664,7 +675,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                     let _ = fs::remove_file(recovery);
                 }
                 IoOutcome::Saved {
-                    name: root_name(&scene),
+                    name: scene_summary(&scene),
                     path,
                     document,
                     revision,
@@ -810,8 +821,8 @@ mod tests {
         let mut scene = Scene::new();
         apply(
             &mut scene,
-            &Command::Rename {
-                node: NodeId::ROOT,
+            &Command::NewModel {
+                parent: NodeId::ROOT,
                 name: "Hut".to_owned(),
             },
         )
@@ -826,7 +837,7 @@ mod tests {
         });
         assert!(matches!(
             outcome,
-            Some(IoOutcome::Saved { revision: 7, then: Some(Pending::New), ref name, .. }) if name == "Hut"
+            Some(IoOutcome::Saved { revision: 7, then: Some(Pending::New), ref name, .. }) if name == "Hut, Model"
         ));
         assert!(!recovery.exists());
         let outcome = run(IoJob::Load { path });
@@ -834,7 +845,7 @@ mod tests {
             unreachable!("the file should load");
         };
         assert_eq!(origin, Origin::File);
-        assert_eq!(root_name(&scene), "Hut");
+        assert_eq!(scene_summary(&scene), "Hut, Model");
         let _ = fs::remove_dir_all(dir);
     }
 

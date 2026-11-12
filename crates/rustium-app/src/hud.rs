@@ -1,6 +1,7 @@
 //! The viewport-first HUD from the Final mockups: floating glass islands over a full-window viewport.
 
 mod corners;
+mod cursors;
 mod effects;
 mod effects_bars;
 mod effects_canvas;
@@ -15,6 +16,7 @@ mod render_viewport;
 mod scene_tree;
 mod toast;
 mod tool_options;
+mod tool_wheel;
 mod toolbar;
 mod top_left;
 mod top_right;
@@ -25,6 +27,7 @@ pub(crate) mod widgets;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+pub(crate) use cursors::CursorUi;
 pub(crate) use effects::{EffectsState, GraphTool, PreviewShape};
 pub(crate) use effects_bars::preview_view_rect;
 use egui::{Align2, Color32, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
@@ -87,6 +90,8 @@ pub(crate) struct UiState {
     pub(crate) text_focus_before: bool,
     /// Where the Tool wheel is open, in points.
     pub(crate) tool_wheel: Option<Pos2>,
+    /// Viewport cursor bookkeeping.
+    pub(crate) cursor: CursorUi,
     /// Where a marquee drag started, in points.
     pub(crate) marquee: Option<Pos2>,
     /// Groups collapsed in the Scene tree.
@@ -128,6 +133,7 @@ impl UiState {
             scale_draft: None,
             text_focus_before: false,
             tool_wheel: None,
+            cursor: CursorUi::default(),
             marquee: None,
             collapsed: HashSet::new(),
             renaming: None,
@@ -468,11 +474,12 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
         shortcuts(ctx, hud);
     }
     prompt::show(ctx, hud);
+    cursors::update(ctx, hud);
     hud.ui.text_focus_before = ctx.egui_wants_keyboard_input();
 }
 
-/// Whether something that closes on Escape is open: an egui popup or menu, the Tool wheel, a Scene tree rename or
-/// one of the Effects popups.
+/// Whether something that closes on Escape is open: an egui popup or menu, the Tool wheel (any mode), a Scene tree
+/// rename or one of the Effects popups.
 fn escape_owner_open(ctx: &Context, hud: &Hud<'_>) -> bool {
     egui::Popup::is_any_open(ctx)
         || (hud.ui.mode == Mode::Model && hud.ui.palette_open)
@@ -536,6 +543,19 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         }
         return;
     }
+
+    hud.ui.cursor.pointer = pointer.filter(|_| resize.is_none() && (response.contains_pointer() || response.dragged()));
+    // The Tool wheel of the current mode owns the pointer while it is open.
+    if let Some(centre) = hud.ui.tool_wheel {
+        hud.editor.clear_hover();
+        tool_wheel::show(ctx, hud, centre);
+        return;
+    }
+    let busy = hud.editor.is_stroking() || hud.ui.effects.gesture.is_some() || egui::Popup::is_any_open(ctx);
+    if response.secondary_clicked() && !busy {
+        hud.ui.tool_wheel = pointer;
+    }
+
 
     if hud.ui.mode == Mode::Render {
         render_viewport::input(ctx, hud, &response, pointer);

@@ -33,6 +33,10 @@ Vocabulary is defined in [GLOSSARY.md](GLOSSARY.md); decisions and their reasons
    by the temporal pass (see Raster transparency).
 5. egui paints the interface on top through the non-sRGB view of the same surface texture.
 
+## Viewport cursors and the Tool wheel
+
+`cursor.rs` maps a small context (active Tool, what lies under the pointer, buttons, modifiers) to a `CursorSpec` (kind, state Normal / Pressed / Forbidden, extras) with pure `resolve_model`, `resolve_render` and `resolve_effects`, and draws it with the egui painter on the top layer while the system cursor is hidden (`CursorIcon::None`). `hud/cursors.rs` gathers the context at the end of each frame, only when the pointer is over the 3D view, node canvas or render frame; with Settings → Interface → Custom cursors off the same spec picks the closest system `CursorIcon`. "Forbidden" comes from `Editor::tool_block`, which mirrors the checks of `Editor::press`. `hud/tool_wheel.rs` is the one RMB wheel for all three modes (the item list depends on the mode).
+
 ## Path tracer (Render mode)
 
 Render mode swaps the raster pass for a progressive compute-shader path tracer ([ADR 0001](docs/adr/0001-hybrid-renderer.md)).

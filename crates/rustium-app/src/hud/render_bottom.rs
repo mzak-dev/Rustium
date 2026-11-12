@@ -296,10 +296,11 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                 };
                 let all = [
                     ("LMB".to_owned(), left),
+                    ("RMB".to_owned(), "hint-tool-wheel"),
                     ("MMB".to_owned(), "hint-pan"),
                     (hud.tr("hint-wheel"), "hint-dolly"),
                 ];
-                for (button, key) in all.into_iter().take(3 - usize::from(hints_level)) {
+                for (button, key) in all.into_iter().take(4 - usize::from(hints_level)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label(widgets::mono(button, 11.0).color(theme::TEXT));

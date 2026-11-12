@@ -73,6 +73,7 @@ impl Section {
                 "setting-translucent",
                 "setting-motion",
                 "setting-shortcut-letters",
+                "setting-custom-cursors",
                 "setting-tooltip-delay",
             ],
             Self::Viewport => &[
@@ -599,6 +600,14 @@ fn interface(ui: &mut Ui, hud: &mut Hud<'_>) {
     row(ui, &i18n.tr("setting-shortcut-letters"), None, |ui| {
         widgets::switch(ui, &mut settings.shortcut_letters, true);
     });
+    row(
+        ui,
+        &i18n.tr("setting-custom-cursors"),
+        Some(&i18n.tr("setting-custom-cursors-hint")),
+        |ui| {
+            widgets::switch(ui, &mut settings.custom_cursors, true);
+        },
+    );
     row(ui, &i18n.tr("setting-tooltip-delay"), None, |ui| {
         number_field(
             ui,

@@ -18,6 +18,7 @@ use super::effects::{
     self, EffectsTab, Gesture, GraphTool, WireEnd, core_text, graph_edit, kind_label, locked, rgb, snap, unit_color,
     wire_color,
 };
+use crate::cursor::{CanvasDrag, CanvasHit, EffectsCtx, PointerInput};
 use crate::theme;
 
 pub(crate) const MIN_ZOOM: f32 = 0.3;
@@ -925,9 +926,6 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     let pan_tool = hud.ui.effects.tool == GraphTool::Pan || space;
     if response.dragged_by(PointerButton::Middle) || (pan_tool && response.dragged_by(PointerButton::Primary)) {
         hud.ui.effects.pan += response.drag_delta();
-        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if pan_tool && response.hovered() {
-        ctx.set_cursor_icon(egui::CursorIcon::Grab);
     }
 
     let origin = ctx.input(|input| input.pointer.press_origin()).or(pointer);
@@ -961,6 +959,95 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
         hud.ui.effects.frame_label = Some((id, label, true));
         hud.ui.effects.frame_selection = Some(id);
     }
+}
+
+/// The cursor context at `pointer`: what is under it, what is being dragged and which Tool is active.
+pub(super) fn cursor_context(ctx: &Context, hud: &Hud<'_>, pointer: Pos2, input: PointerInput) -> EffectsCtx {
+    let space = ctx.input(|input| input.key_down(Key::Space));
+    let hit = hit_test(hud, pointer);
+    let under = match hit {
+        Hit::Socket(end) => CanvasHit::Socket(socket_tint(hud, end)),
+        Hit::Widget(_, _, Widget::Scrub { .. } | Widget::Pair { .. }, _) => CanvasHit::Scrub,
+        Hit::Widget(..) => CanvasHit::Click,
+        Hit::Node(_) | Hit::FrameHeader(_) => CanvasHit::Grab,
+        Hit::FrameCorner(_) => CanvasHit::FrameCorner,
+        Hit::FrameBody(_) | Hit::Empty => CanvasHit::Empty,
+    };
+    let drag = match &hud.ui.effects.gesture {
+        None => CanvasDrag::None,
+        Some(Gesture::Move { .. }) => CanvasDrag::Move,
+        Some(Gesture::Box { .. }) => CanvasDrag::Box,
+        Some(Gesture::Cut { .. }) => CanvasDrag::Cut,
+        Some(Gesture::Resize { .. }) => CanvasDrag::Resize,
+        Some(Gesture::Scrub { .. }) => CanvasDrag::Scrub,
+        Some(Gesture::Wire { from }) => CanvasDrag::Wire {
+            tint: socket_tint(hud, *from),
+            target_ok: match hit {
+                Hit::Socket(end) => Some(wire_accepts(hud, *from, end)),
+                _ => None,
+            },
+        },
+    };
+    EffectsCtx {
+        tool: hud.ui.effects.tool,
+        space: space && !ctx.egui_wants_keyboard_input(),
+        input,
+        locked: locked(hud),
+        under,
+        drag,
+    }
+}
+
+/// The wire color of the type of the socket `end`.
+fn socket_tint(hud: &Hud<'_>, end: WireEnd) -> [u8; 3] {
+    let ty = effects::current(hud).and_then(|graph| match end {
+        WireEnd::Output(output) => graph.node(output.node).and_then(|node| {
+            node.kind
+                .spec()
+                .outputs
+                .get(usize::from(output.socket))
+                .map(|socket| socket.ty)
+        }),
+        WireEnd::Input(input) => graph.node(input.node).and_then(|node| {
+            node.kind
+                .spec()
+                .inputs
+                .get(usize::from(input.socket))
+                .map(|socket| socket.ty)
+        }),
+    });
+    ty.map_or([0xa6, 0xaf, 0xbc], rustium_core::SocketType::wire_color)
+}
+
+/// Whether dropping a wire started at `from` on the socket `onto` would connect: opposite sides of two different
+/// nodes, and no cycle.
+fn wire_accepts(hud: &Hud<'_>, from: WireEnd, onto: WireEnd) -> bool {
+    let ((WireEnd::Output(output), WireEnd::Input(input)) | (WireEnd::Input(input), WireEnd::Output(output))) =
+        (from, onto)
+    else {
+        return false;
+    };
+    let Some(graph) = effects::current(hud) else {
+        return false;
+    };
+    if output.node == input.node {
+        return false;
+    }
+    // A cycle appears when the node that would read the link already feeds the node that would write it.
+    let mut stack = vec![input.node];
+    let mut seen = vec![input.node];
+    while let Some(node) = stack.pop() {
+        for link in graph.links().iter().filter(|link| link.from.node == node) {
+            if link.to.node == output.node {
+                return false;
+            }
+            if !seen.contains(&link.to.node) {
+                seen.push(link.to.node);
+                stack.push(link.to.node);
+            }
+        }
+    }
+    true
 }
 
 fn zoom_input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, pointer: Option<Pos2>) {

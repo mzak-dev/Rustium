@@ -43,6 +43,11 @@ pub(crate) fn layout(ctx: &Context, hud: &mut Hud<'_>) {
     hud.ui.render.frame_rect = Some([left, block_top + LABEL_HEIGHT, width, height]);
 }
 
+/// Whether `point` is inside the 16:9 frame.
+pub(super) fn frame_contains(hud: &Hud<'_>, point: Pos2) -> bool {
+    frame_of(hud).is_some_and(|frame| frame.contains(point))
+}
+
 fn frame_of(hud: &Hud<'_>) -> Option<Rect> {
     let [x, y, width, height] = hud.ui.render.frame_rect?;
     Some(Rect::from_min_size(pos2(x, y), vec2(width, height)))

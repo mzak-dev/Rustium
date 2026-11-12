@@ -275,7 +275,12 @@ fn parse(bytes: &[u8]) -> Result<VoxFile, FileError> {
     Ok(file)
 }
 
-/// The orientation a MagicaVoxel rotation byte stands for, in MagicaVoxel's axes.
+/// The orientation a MagicaVoxel rotation byte stands for, in MagicaVoxel's axes, as the images of the three axes.
+///
+/// The byte encodes a row-major signed permutation matrix `M` that is applied as `M * v`: bits 0-1 hold the
+/// column of the non-zero entry in the first row, bits 2-3 the one in the second row, and bits 4, 5 and 6 are
+/// the signs (set means negative) of the first, second and third row. The returned vectors are the columns of
+/// `M`, i.e. where `M` sends X, Y and Z.
 fn rotation_columns(byte: u8) -> Option<[IVec3; 3]> {
     let first = usize::from(byte & 3);
     let second = usize::from((byte >> 2) & 3);
@@ -285,7 +290,7 @@ fn rotation_columns(byte: u8) -> Option<[IVec3; 3]> {
     }
     let mut columns = [IVec3::ZERO; 3];
     for (row, (axis, bit)) in [(first, 4), (second, 5), (third, 6)].into_iter().enumerate() {
-        columns[row][axis] = if byte & (1 << bit) == 0 { 1 } else { -1 };
+        columns[axis][row] = if byte & (1 << bit) == 0 { 1 } else { -1 };
     }
     Some(columns)
 }
@@ -538,6 +543,7 @@ impl Writer {
 
 struct ExportModel {
     name: String,
+    hidden: bool,
     size: IVec3,
     translation: IVec3,
     voxels: Vec<[u8; 4]>,
@@ -546,7 +552,7 @@ struct ExportModel {
 /// Bakes every placed Model into MagicaVoxel cells and cuts them into models of at most 256 voxels per side.
 fn export_models(scene: &Scene) -> Vec<ExportModel> {
     let mut models = Vec::new();
-    for placement in scene.placements() {
+    for (placement, hidden) in scene.placements_with_hidden() {
         let Some(shape) = scene.shape(placement.shape) else {
             continue;
         };
@@ -586,6 +592,7 @@ fn export_models(scene: &Scene) -> Vec<ExportModel> {
                 .collect();
             models.push(ExportModel {
                 name: name.clone(),
+                hidden,
                 size,
                 translation: min + size / 2,
                 voxels,
@@ -641,11 +648,14 @@ pub fn export_vox(scene: &Scene) -> Result<Vec<u8>, FileError> {
         let transform_id = i32::try_from(2 + index * 2).unwrap_or(0);
         let mut transform = Writer { bytes: Vec::new() };
         transform.i32(transform_id);
-        if model.name.is_empty() {
-            transform.dict(&[]);
-        } else {
-            transform.dict(&[("_name", &model.name)]);
+        let mut attributes: Vec<(&str, &str)> = Vec::new();
+        if !model.name.is_empty() {
+            attributes.push(("_name", &model.name));
         }
+        if model.hidden {
+            attributes.push(("_hidden", "1"));
+        }
+        transform.dict(&attributes);
         transform.i32(transform_id + 1);
         transform.i32(-1);
         transform.i32(0);
@@ -824,7 +834,7 @@ mod tests {
         chunks.push(ngrp(1, &[2, 4]));
         chunks.push(ntrn(2, 3, Some("left"), None, "10 0 0"));
         chunks.push(nshp(3, 0));
-        // Quarter turn about Z: x -> y, y -> -x, z -> z.
+        // Quarter turn about Z (MagicaVoxel rows (0 1 0), (-1 0 0), (0 0 1)): x -> -y, y -> x, z -> z.
         chunks.push(ntrn(4, 5, Some("right"), Some("33"), "0 20 0"));
         chunks.push(nshp(5, 0));
         chunks.push(rgba());
@@ -843,9 +853,36 @@ mod tests {
         let voxels = world_voxels(&scene);
         // left: lower corner (-1,-1,-1)+(10,0,0) = (9,-1,-1) -> Y up (9,-1,0).
         assert!(voxels.contains(&([9, -1, 0], 3)), "{voxels:?}");
-        // right: rotated (-1,-1,-1) cell (corner) -> centre (-.5,-.5,-.5) -> (.5,-.5,-.5), +(0,20,0) = (.5,19.5,-.5)
-        // -> cell (0,19,-1) -> Y up (0,-1,-20).
-        assert!(voxels.contains(&([0, -1, -20], 3)), "{voxels:?}");
+        // right: the cell (-1,-1,-1) has its centre at (-.5,-.5,-.5); x -> -y and y -> x give (-.5,.5,-.5),
+        // +(0,20,0) = (-.5,20.5,-.5) -> cell (-1,20,-1) -> Y up (-1,-1,-21).
+        assert!(voxels.contains(&([-1, -1, -21], 3)), "{voxels:?}");
+    }
+
+    /// Imports a 5x5x5 model holding one voxel at `cell`, placed with the rotation byte `rotation`.
+    fn rotated_single_voxel(cell: [u8; 3], rotation: &str) -> BTreeSet<([i32; 3], u8)> {
+        let mut chunks = model([5, 5, 5], &[[cell[0], cell[1], cell[2], 4]]);
+        chunks.push(ntrn(0, 1, None, None, "0 0 0"));
+        chunks.push(ngrp(1, &[2]));
+        chunks.push(ntrn(2, 3, Some("m"), Some(rotation), "0 0 0"));
+        chunks.push(nshp(3, 0));
+        chunks.push(rgba());
+        world_voxels(&import_vox(&file(&chunks), "r").unwrap())
+    }
+
+    #[test]
+    fn a_quarter_turn_instance_imports_the_way_magicavoxel_turns_it() {
+        // The voxel with centre (1.5, .5, .5) about the model centre (cell index 2). _r 17 is
+        // M = ((0 -1 0), (1 0 0), (0 0 1)) applied as M * v, so X -> Y: the centre becomes (-.5, 1.5, .5),
+        // which is the cell (1, 3, 2) of the file.
+        assert_eq!(
+            rotated_single_voxel([3, 2, 2], "17"),
+            rotated_single_voxel([1, 3, 2], "4")
+        );
+        // _r 33 is M = ((0 1 0), (-1 0 0), (0 0 1)): the centre becomes (.5, -1.5, .5), the cell (2, 0, 2).
+        assert_eq!(
+            rotated_single_voxel([3, 2, 2], "33"),
+            rotated_single_voxel([2, 0, 2], "4")
+        );
     }
 
     #[test]
@@ -905,6 +942,23 @@ mod tests {
     }
 
     #[test]
+    fn hidden_models_are_exported_as_hidden() {
+        let mut scene = Scene::new();
+        let node = scene.node(NodeId::ROOT).unwrap().children()[0];
+        let shape = scene.node(node).and_then(Node::shape).unwrap();
+        scene
+            .shape_mut(shape)
+            .unwrap()
+            .set(IVec3::new(1, 2, 3), ColorId::new(2));
+        Arc::make_mut(&mut scene.graph).get_mut(node).unwrap().hidden = true;
+        let loaded = import_vox(&export_vox(&scene).unwrap(), "hidden").unwrap();
+        let model = loaded.node(NodeId::ROOT).unwrap().children()[0];
+        assert!(loaded.node(model).unwrap().is_hidden());
+        let imported = loaded.shape(loaded.node(model).and_then(Node::shape).unwrap()).unwrap();
+        assert_eq!(imported.voxels().count(), 1);
+    }
+
+    #[test]
     fn an_empty_scene_cannot_be_exported() {
         assert!(export_vox(&Scene::new()).is_err());
     }
@@ -912,7 +966,10 @@ mod tests {
     #[test]
     fn rotation_bytes_decode_to_signed_permutations() {
         assert_eq!(rotation_columns(4), Some([IVec3::X, IVec3::Y, IVec3::Z]));
-        assert_eq!(rotation_columns(33), Some([IVec3::Y, IVec3::NEG_X, IVec3::Z]));
+        // 17 is the quarter turn about Z that sends X to Y (rows: (0 -1 0), (1 0 0), (0 0 1)).
+        assert_eq!(rotation_columns(17), Some([IVec3::Y, IVec3::NEG_X, IVec3::Z]));
+        // 33 turns the other way: X goes to -Y.
+        assert_eq!(rotation_columns(33), Some([IVec3::NEG_Y, IVec3::X, IVec3::Z]));
         assert_eq!(rotation_columns(0), None, "two rows on the same axis");
         assert_eq!(rotation_columns(255), None);
     }

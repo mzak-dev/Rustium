@@ -202,31 +202,47 @@ impl Scene {
     /// Every visible Model in drawing order (hidden Nodes and their descendants are skipped).
     pub fn placements(&self) -> Vec<Placement> {
         let mut result = Vec::new();
-        self.collect_placements(NodeId::ROOT, Transform::IDENTITY, &mut result);
+        self.collect_placements(NodeId::ROOT, Transform::IDENTITY, false, &mut result);
+        result.into_iter().map(|(placement, _)| placement).collect()
+    }
+
+    /// Every Model in drawing order, hidden ones included, each with whether it is hidden (itself or through an
+    /// ancestor).
+    pub fn placements_with_hidden(&self) -> Vec<(Placement, bool)> {
+        let mut result = Vec::new();
+        self.collect_placements(NodeId::ROOT, Transform::IDENTITY, true, &mut result);
         result
     }
 
-    fn collect_placements(&self, id: NodeId, parent: Transform, out: &mut Vec<Placement>) {
+    fn collect_placements(
+        &self,
+        id: NodeId,
+        parent: Transform,
+        include_hidden: bool,
+        out: &mut Vec<(Placement, bool)>,
+    ) {
         let Some(node) = self.node(id) else {
             return;
         };
-        if node.hidden {
+        if node.hidden && !include_hidden {
             return;
         }
+        let hidden = self.is_hidden(id);
         let transform = parent.compose(node.transform);
         match node.kind() {
             crate::node::NodeKind::Group { children } => {
                 for child in children {
-                    self.collect_placements(*child, transform, out);
+                    self.collect_placements(*child, transform, include_hidden, out);
                 }
             }
             crate::node::NodeKind::Model { shape } => {
-                out.push(Placement {
+                let placement = Placement {
                     node: id,
                     shape: *shape,
                     transform,
                     rank: u32::try_from(out.len()).unwrap_or(u32::MAX),
-                });
+                };
+                out.push((placement, hidden));
             }
         }
     }

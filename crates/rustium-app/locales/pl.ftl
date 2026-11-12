@@ -304,15 +304,14 @@ hint-draw-region = Zaznacz obszar
 
 ## Render inspector
 style = Styl
-style-traced = Ray tracing
+style-traced = Śledzony
 style-clay = Glina
 style-toon = Komiks
 style-pixel = Piksel
 style-wire = Siatka
 engine = Silnik
-engine-path-tracing = Path tracing
-engine-software = DDA programowo
-engine-hardware = ray query sprzętowo
+engine-active-software = programowo
+engine-active-hardware = sprzętowo
 samples = Próbki
 bounces = Odbicia
 denoise = Odszumianie
@@ -338,9 +337,9 @@ format = Format
 background = Tło
 background-keep = Zachowaj
 background-transparent = Przezroczyste
-turntable = Obrotówka
+turntable = Obrót 360°
 save-image = Zapisz obraz
-queue-shots = Kolejkuj wszystkie ujęcia
+queue-shots = Kolejkuj ujęcia
 save-done = Zapisano { $path }
 save-failed = Nie udało się zapisać obrazu: { $reason }
 save-failed-readback = Nic jeszcze nie wyrenderowano, więc nie ma obrazu do zapisu.
@@ -352,7 +351,11 @@ style-wire-hint = Jasne linie wzdłuż krawędzi wokseli na ciemnym tle
 denoise-hint = Wygładza szum niedokończonego renderu bez rozmywania krawędzi; działa też na zapisanych obrazach
 exposure = Ekspozycja
 focus-hint = Odległość do ostrej płaszczyzny. Narzędziem Wybierz punkt ostrości kliknij ją na modelu.
-frames = klatek
+frames-count = { $count ->
+    [one] { $count } klatka
+    [few] { $count } klatki
+   *[many] { $count } klatek
+}
 save-video = Zapisz wideo
 save-image-hint = Zapisz obraz z ekranu do pliku
 save-video-hint = Wyrenderuj wideo, w którym kamera okrąża model raz dookoła
@@ -373,7 +376,7 @@ render-resume = Wznów
 render-again = Renderuj ponownie
 render-button-hint = Rozpocznij lub wstrzymaj renderowanie
 add-shot = Dodaj ujęcie z bieżącego widoku
-shots-full = Wszystkie pięć ujęć jest zajętych
+shots-full = Wszystkich pięć ujęć jest zajętych
 shot-name = Ujęcie { $n }
 shot-tooltip = { $name }, { $size }
 shot-modified = Zmieniono po zapisaniu. Kliknij, aby wrócić do zapisanego widoku, albo kliknij prawym przyciskiem, aby go zaktualizować.

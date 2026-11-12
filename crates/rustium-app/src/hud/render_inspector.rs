@@ -1,6 +1,6 @@
 //! Render mode, right island: the Render, Camera, Light and Output tabs.
 
-use egui::{Color32, DragValue, Grid, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
+use egui::{Color32, DragValue, FontId, Grid, Response, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
 use rustium_render::{Ground, RenderStyle, Sky, TraceEngine};
 
 use super::widgets::{self, Look};
@@ -9,6 +9,7 @@ use crate::icons::Icon;
 use crate::render_mode::{
     APERTURE_RANGE, Backdrop, EXPOSURE_RANGE, ImageFormat, RenderTab, SIDE_RANGE, TURNTABLE_RANGE, ViewProjection,
 };
+use crate::settings::RayTracingMode;
 use crate::theme;
 
 pub(crate) const TABS: [(RenderTab, &str); 4] = [
@@ -28,41 +29,82 @@ pub(crate) fn content(ui: &mut Ui, hud: &mut Hud<'_>) {
 }
 
 fn caption(ui: &mut Ui, text: &str) {
-    ui.add_space(12.0);
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(12.0);
         ui.label(RichText::new(text.to_uppercase()).color(theme::SUBTLE).size(10.0));
     });
 }
 
-fn properties(ui: &mut Ui, id: &str, add_rows: impl FnOnce(&mut Ui)) {
+/// Width of the label column of a property grid.
+const LABEL_WIDTH: f32 = 92.0;
+
+/// A grid of labelled rows; `add_rows` gets the width the value column leaves, so fields can fill it.
+fn properties(ui: &mut Ui, id: &str, add_rows: impl FnOnce(&mut Ui, f32)) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
+            let field_width = (ui.available_width() - LABEL_WIDTH - 8.0).max(60.0);
             Grid::new(id)
                 .num_columns(2)
-                .min_col_width(76.0)
+                .min_col_width(LABEL_WIDTH)
                 .spacing(vec2(8.0, 7.0))
-                .show(ui, add_rows);
+                .show(ui, |ui| add_rows(ui, field_width));
         });
 }
 
-/// A read-only field with a dropdown chevron, like the mockup's Engine and Sky selectors.
-fn static_select(ui: &mut Ui, text: &str) {
-    egui::Frame::new()
-        .fill(theme::FIELD)
-        .stroke(Stroke::new(1.0, theme::FIELD_BORDER))
-        .corner_radius(7)
-        .inner_margin(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(text);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(11.0, 11.0), Sense::hover());
-                    Icon::ChevronDown.paint(ui.painter(), rect, theme::MUTED);
-                });
-            });
-        });
+/// A bordered number field in the mono font, `width` wide, like the mockup's `.fld`.
+fn number(ui: &mut Ui, width: f32, enabled: bool, drag: DragValue<'_>) -> Response {
+    ui.scope(|ui| {
+        let visuals = ui.visuals_mut();
+        for widget in [
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+        ] {
+            widget.bg_fill = theme::FIELD;
+            widget.weak_bg_fill = theme::FIELD;
+            widget.bg_stroke = Stroke::new(1.0, theme::FIELD_BORDER);
+            widget.corner_radius = egui::CornerRadius::same(7);
+        }
+        ui.style_mut().override_font_id = Some(FontId::monospace(11.5));
+        ui.add_enabled_ui(enabled, |ui| ui.add_sized([width, 26.0], drag)).inner
+    })
+    .inner
+}
+
+/// A full-width dropdown field with a chevron, like the mockup's `.selb`; open its menu with
+/// [`egui::Popup::menu`] on the response.
+fn select(ui: &mut Ui, width: f32, text: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        7,
+        theme::FIELD,
+        Stroke::new(
+            1.0,
+            if response.hovered() {
+                theme::MUTED
+            } else {
+                theme::FIELD_BORDER
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_center() + vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(12.0),
+        theme::TEXT,
+    );
+    Icon::ChevronDown.paint(
+        painter,
+        egui::Rect::from_center_size(rect.right_center() - vec2(14.0, 0.0), vec2(11.0, 11.0)),
+        theme::MUTED,
+    );
+    response
 }
 
 /// One isometric cube thumbnail of the Style row (28 × 28 view box).
@@ -132,7 +174,7 @@ fn style_row(ui: &mut Ui, hud: &mut Hud<'_>) {
         .inner_margin(egui::Margin {
             left: 8,
             right: 8,
-            top: 6,
+            top: 0,
             bottom: 10,
         })
         .show(ui, |ui| {
@@ -155,7 +197,7 @@ fn style_row(ui: &mut Ui, hud: &mut Hud<'_>) {
                     } else if response.hovered() {
                         painter.rect_filled(rect, 8, theme::HOVER);
                     }
-                    let dim = if selected { 1.0 } else { 0.45 };
+                    let dim = 1.0;
                     let origin = pos2(rect.center().x - 14.0, rect.top() + 4.0);
                     let point = |x: f32, y: f32| origin + vec2(x, y);
                     let outline = Stroke::new(1.4, look.outline.gamma_multiply(dim));
@@ -205,30 +247,65 @@ fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         hud.tr("bounces"),
         hud.tr("denoise"),
     ];
-    let engine = format!(
-        "{} \u{b7} {}",
-        hud.tr("engine-path-tracing"),
-        hud.tr(match hud.trace_engine {
-            TraceEngine::Software => "engine-software",
-            TraceEngine::Hardware => "engine-hardware",
-        })
-    );
+    let active = hud.tr(match hud.trace_engine {
+        TraceEngine::Software => "engine-active-software",
+        TraceEngine::Hardware => "engine-active-hardware",
+    });
+    let automatic = hud.tr("backend-automatic");
+    let options = [
+        (RayTracingMode::Automatic, automatic.clone(), true),
+        (RayTracingMode::Software, hud.tr("ray-tracing-software"), true),
+        (
+            RayTracingMode::Hardware,
+            hud.tr("ray-tracing-hardware"),
+            hud.ray_query_supported,
+        ),
+    ];
+    let mode = hud.settings.ray_tracing;
+    let engine = match mode {
+        RayTracingMode::Automatic => format!("{automatic} \u{b7} {active}"),
+        _ => options
+            .iter()
+            .find(|(candidate, _, _)| *candidate == mode)
+            .map_or_else(String::new, |(_, name, _)| name.clone()),
+    };
     let denoise_hint = hud.tr("denoise-hint");
-    properties(ui, "render-tab", |ui| {
+    let mut chosen = mode;
+    properties(ui, "render-tab", |ui, width| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
-        static_select(ui, &engine);
+        let button = select(ui, width, &engine);
+        egui::Popup::menu(&button).show(|ui| {
+            ui.set_min_width(180.0);
+            for (candidate, name, enabled) in &options {
+                ui.add_enabled_ui(*enabled, |ui| ui.selectable_value(&mut chosen, *candidate, name));
+            }
+        });
         ui.end_row();
         ui.label(widgets::muted(&labels[1]));
-        ui.add(DragValue::new(&mut render.samples).range(1..=65_536).speed(4.0));
+        number(
+            ui,
+            width,
+            true,
+            DragValue::new(&mut render.samples).range(1..=65_536).speed(4.0),
+        );
         ui.end_row();
         ui.label(widgets::muted(&labels[2]));
-        ui.add(DragValue::new(&mut render.bounces).range(1..=32).speed(0.1));
+        number(
+            ui,
+            width,
+            true,
+            DragValue::new(&mut render.bounces).range(1..=32).speed(0.1),
+        );
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
         widgets::switch(ui, &mut render.denoise, true).on_hover_text(denoise_hint);
         ui.end_row();
     });
+    if chosen != mode {
+        hud.settings.ray_tracing = chosen;
+        hud.send(AppCommand::SettingsChanged);
+    }
 }
 
 fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
@@ -250,13 +327,16 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     let mut focus = hud.ui.render.focus_metres(hud.camera, voxel_size);
     let mut focus_changed = false;
     let mut projection = hud.ui.render.projection;
-    properties(ui, "camera-tab", |ui| {
+    properties(ui, "camera-tab", |ui, width| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
         widgets::segmented(ui, &mut projection, &options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[1]));
-        ui.add(
+        number(
+            ui,
+            width,
+            true,
             DragValue::new(&mut render.lens_mm)
                 .range(crate::render_mode::LENS_RANGE_MM.0..=crate::render_mode::LENS_RANGE_MM.1)
                 .speed(0.3)
@@ -265,7 +345,10 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         );
         ui.end_row();
         ui.label(widgets::muted(&labels[2]));
-        ui.add(
+        number(
+            ui,
+            width,
+            true,
             DragValue::new(&mut render.exposure_ev)
                 .range(EXPOSURE_RANGE.0..=EXPOSURE_RANGE.1)
                 .speed(0.02)
@@ -277,7 +360,9 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         widgets::switch(ui, &mut render.dof, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[4]));
-        ui.add_enabled(
+        number(
+            ui,
+            width,
             render.dof,
             DragValue::new(&mut render.aperture)
                 .range(APERTURE_RANGE.0..=APERTURE_RANGE.1)
@@ -287,16 +372,17 @@ fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         );
         ui.end_row();
         ui.label(widgets::muted(&labels[5]));
-        let response = ui
-            .add_enabled(
-                render.dof,
-                DragValue::new(&mut focus)
-                    .range(0.05..=10_000.0)
-                    .speed(0.02)
-                    .suffix(" m")
-                    .fixed_decimals(2),
-            )
-            .on_hover_text(focus_hint);
+        let response = number(
+            ui,
+            width,
+            render.dof,
+            DragValue::new(&mut focus)
+                .range(0.05..=10_000.0)
+                .speed(0.02)
+                .suffix(" m")
+                .fixed_decimals(2),
+        )
+        .on_hover_text(focus_hint);
         focus_changed = response.changed();
         ui.end_row();
     });
@@ -323,10 +409,13 @@ fn light_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     let sky_names: Vec<(Sky, String)> = Sky::ALL.iter().map(|sky| (*sky, hud.tr(sky_key(*sky)))).collect();
     let mut sky = hud.ui.render.sky;
     let mut ground = hud.ui.render.ground;
-    properties(ui, "light-tab", |ui| {
+    properties(ui, "light-tab", |ui, width| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
-        ui.add(
+        number(
+            ui,
+            width,
+            true,
             DragValue::new(&mut render.sun_turn_degrees)
                 .range(0.0..=360.0)
                 .speed(0.5)
@@ -335,7 +424,10 @@ fn light_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         );
         ui.end_row();
         ui.label(widgets::muted(&labels[1]));
-        ui.add(
+        number(
+            ui,
+            width,
+            true,
             DragValue::new(&mut render.sun_height_degrees)
                 .range(0.0..=90.0)
                 .speed(0.3)
@@ -348,7 +440,7 @@ fn light_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             .iter()
             .find(|(candidate, _)| *candidate == sky)
             .map_or("", |(_, name)| name.as_str());
-        let button = widgets::dropdown_button(ui, current);
+        let button = select(ui, width, current);
         egui::Popup::menu(&button).show(|ui| {
             ui.set_min_width(140.0);
             for (candidate, name) in &sky_names {
@@ -373,6 +465,19 @@ fn sky_key(sky: Sky) -> &'static str {
     }
 }
 
+/// "72 frames" with the plural of the current language.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the count is a whole number within the turntable range"
+)]
+fn frames_label(i18n: &crate::i18n::I18n, count: f64) -> String {
+    i18n.tr_args(
+        "frames-count",
+        &[("count", fluent_bundle::FluentValue::from(count.max(0.0).round() as u32))],
+    )
+}
+
 fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     let labels = [
         hud.tr("size"),
@@ -389,20 +494,28 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         (ImageFormat::Exr, "EXR".to_owned()),
         (ImageFormat::Mp4, "MP4".to_owned()),
     ];
-    let frames_suffix = format!(" {}", hud.tr("frames"));
     let mut format = hud.ui.render.format;
     let mut backdrop = hud.ui.render.backdrop;
-    properties(ui, "output-tab", |ui| {
+    let i18n = hud.i18n;
+    let frames_format = |value: f64, _range: std::ops::RangeInclusive<usize>| frames_label(i18n, value);
+    properties(ui, "output-tab", |ui, width| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
+        let half = (width - 4.0) / 2.0;
         ui.horizontal(|ui| {
-            ui.add(
+            ui.spacing_mut().item_spacing.x = 4.0;
+            number(
+                ui,
+                half,
+                true,
                 DragValue::new(&mut render.size.0)
                     .range(SIDE_RANGE.0..=SIDE_RANGE.1)
                     .speed(4.0),
             );
-            ui.label(widgets::muted("×"));
-            ui.add(
+            number(
+                ui,
+                half,
+                true,
                 DragValue::new(&mut render.size.1)
                     .range(SIDE_RANGE.0..=SIDE_RANGE.1)
                     .speed(4.0),
@@ -416,11 +529,20 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         widgets::segmented(ui, &mut backdrop, &backdrop_options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
-        ui.add(
+        number(
+            ui,
+            width,
+            true,
             DragValue::new(&mut render.turntable_frames)
                 .range(TURNTABLE_RANGE.0..=TURNTABLE_RANGE.1)
                 .speed(0.5)
-                .suffix(frames_suffix),
+                .custom_formatter(frames_format)
+                .custom_parser(|text| {
+                    text.trim()
+                        .split(|c: char| !c.is_ascii_digit())
+                        .find(|part| !part.is_empty())
+                        .and_then(|digits| digits.parse().ok())
+                }),
         );
         ui.end_row();
     });
@@ -429,7 +551,6 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
 
     let running = hud.ui.render.job.is_some();
     let video = format == ImageFormat::Mp4;
-    let ready = !running && (video || hud.ui.render.progress.samples > 0);
     let save_label = hud.tr(if video { "save-video" } else { "save-image" });
     let save_hint = hud.tr(if video { "save-video-hint" } else { "save-image-hint" });
     let queue_label = hud.tr("queue-shots");
@@ -438,28 +559,41 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         ui.add_space(12.0);
         ui.spacing_mut().item_spacing.x = 4.0;
         let half = (ui.available_width() - 12.0 - 4.0) / 2.0;
-        ui.scope(|ui| {
-            ui.set_width(half);
-            let save = widgets::text_button(ui, &save_label, 32.0, Look::On, ready);
-            if save.on_hover_text(save_hint).clicked() {
-                hud.send(AppCommand::SaveImage);
-            }
-        });
-        ui.scope(|ui| {
-            ui.set_width(half);
-            let queue = widgets::text_button(ui, &queue_label, 32.0, Look::On, !running);
-            if queue.on_hover_text(queue_hint).clicked() {
-                hud.send(AppCommand::QueueShots);
-            }
-        });
+        let button = |ui: &mut Ui, label: &str, enabled: bool| {
+            let sense = if enabled { Sense::click() } else { Sense::hover() };
+            let (rect, response) = ui.allocate_exact_size(vec2(half, 32.0), sense);
+            let fill = if !enabled {
+                Color32::TRANSPARENT
+            } else if response.hovered() {
+                theme::HOVER
+            } else {
+                theme::ACTIVE
+            };
+            ui.painter().rect_filled(rect, 7, fill);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(12.0),
+                if enabled { Color32::WHITE } else { theme::DISABLED },
+            );
+            response
+        };
+        if button(ui, &save_label, !running).on_hover_text(save_hint).clicked() {
+            hud.send(AppCommand::SaveImage);
+        }
+        if button(ui, &queue_label, !running).on_hover_text(queue_hint).clicked() {
+            hud.send(AppCommand::QueueShots);
+        }
     });
     job_progress(ui, hud);
     if let Some(message) = &hud.ui.render.message {
         ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(12.0);
-            ui.label(RichText::new(message).color(theme::SOFT).size(11.0));
-        });
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(12, 0))
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(message).color(theme::SOFT).size(11.0)).wrap());
+            });
     }
 }
 

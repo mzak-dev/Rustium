@@ -1,6 +1,6 @@
 //! Render mode, top centre and left: Lens and orbit pivot, and the camera and light tools.
 
-use egui::{Align2, Context, DragValue, FontId, RichText, Stroke, vec2};
+use egui::{Align2, Color32, Context, DragValue, FontId, Sense, Stroke, vec2};
 
 use super::widgets::{self, Look};
 use super::{Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, fit_key, fit_level, island};
@@ -38,11 +38,7 @@ pub(crate) fn options(ctx: &Context, hud: &mut Hud<'_>) {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if level == 0 {
-                    let name = hud.tr(hud.ui.render.tool.message_key());
-                    ui.add_sized(
-                        [112.0, 32.0],
-                        egui::Label::new(RichText::new(name).font(theme::bold(12.0))),
-                    );
+                    tool_chip(ui, hud);
                     widgets::divider(ui, 32.0);
                 }
                 if level < 2 {
@@ -75,6 +71,28 @@ pub(crate) fn options(ctx: &Context, hud: &mut Hud<'_>) {
                 }
             });
         },
+    );
+}
+
+/// The active tool as a chip: its icon and name on a light background.
+fn tool_chip(ui: &mut egui::Ui, hud: &Hud<'_>) {
+    let tool = hud.ui.render.tool;
+    let galley = ui
+        .painter()
+        .layout_no_wrap(hud.tr(tool.message_key()), theme::bold(12.0), Color32::WHITE);
+    let width = (12.0 + 16.0 + 8.0 + galley.size().x + 14.0).max(112.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 7, theme::ACTIVE);
+    tool.icon().paint(
+        painter,
+        egui::Rect::from_center_size(rect.left_center() + vec2(20.0, 0.0), vec2(16.0, 16.0)),
+        Color32::WHITE,
+    );
+    painter.galley(
+        rect.left_center() + vec2(36.0, -galley.size().y / 2.0),
+        galley,
+        Color32::WHITE,
     );
 }
 

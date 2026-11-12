@@ -958,6 +958,18 @@ impl Editor {
         self.material_edit = self.material_edit.take().map(|edit| edit.with_kind(kind));
     }
 
+    /// Takes back the gesture of Material edits in progress as if it never happened: nothing stays in the redo stack
+    /// and the revision returns to `revision`, the one before the gesture, so the document does not look edited.
+    pub(crate) fn roll_back_material_edit(&mut self, revision: u64) {
+        let had_edit = self.material_edit.is_some();
+        self.finish_material_edit();
+        if had_edit {
+            self.undo();
+            self.history.forget_undone();
+        }
+        self.revision = revision;
+    }
+
     /// Ends a Material slider drag: its Edits become one History step.
     pub(crate) fn finish_material_edit(&mut self) {
         if let Some(edit) = self.material_edit.take() {
@@ -1297,6 +1309,32 @@ mod tests {
         editor.undo();
         assert_eq!(editor.history.done().count(), 1);
         assert!(editor.take_palette_dirty());
+    }
+
+    #[test]
+    fn a_rolled_back_gesture_leaves_no_redo_step_and_no_new_revision() {
+        let mut editor = Editor::new(0.25, 50);
+        editor
+            .execute_checked(&Command::AddMaterial {
+                graph: Box::new(rustium_core::MaterialGraph::blank("Test")),
+            })
+            .unwrap();
+        let revision = editor.revision;
+        let done = editor.history.done().count();
+        let surface = editor.scene.material_graphs()[1].surface_output().unwrap().id;
+        let edit = GraphEdit::MoveNodes {
+            nodes: vec![surface],
+            frames: Vec::new(),
+            delta: [10.0, 0.0],
+        };
+        editor.edit_material(1, edit, true).unwrap();
+        editor.roll_back_material_edit(revision);
+        assert_eq!(editor.revision, revision);
+        assert_eq!(editor.history.done().count(), done);
+        assert!(!editor.history.can_redo(), "a half gesture must not be redoable");
+        // Nothing in progress: only the revision is restored.
+        editor.roll_back_material_edit(revision);
+        assert_eq!(editor.history.done().count(), done);
     }
 
     #[test]

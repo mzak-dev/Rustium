@@ -36,4 +36,4 @@ pub use path_tracer::{
     Ground, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame, TraceImage,
     TraceProgress, check_image_size, trace_image_bytes, trace_image_limits,
 };
-pub use viewport_renderer::{CameraUniform, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};
+pub use viewport_renderer::{CameraUniform, CubeInstance, LineVertex, ModelDraw, ViewportFrame, ViewportRenderer};

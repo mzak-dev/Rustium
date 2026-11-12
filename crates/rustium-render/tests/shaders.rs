@@ -128,6 +128,7 @@ fn scene_shaders_are_valid_wgsl() {
     for (name, source) in [
         ("grid", include_str!("../src/shaders/grid.wgsl")),
         ("lines", include_str!("../src/shaders/lines.wgsl")),
+        ("cubes", include_str!("../src/shaders/cubes.wgsl")),
     ] {
         validate(name, &format!("{common}{source}"));
     }

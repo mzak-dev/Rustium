@@ -11,6 +11,7 @@ use tracing::warn;
 use crate::error::Error;
 use crate::material_compiler::{CompileError, compile_materials, default_compiled};
 use crate::materials::MaterialBuffers;
+use crate::ray_scene::RayScene;
 use crate::resolve::{self, ResolveInput, Resolver};
 use crate::trace_scene::TraceScene;
 
@@ -41,6 +42,42 @@ impl Sky {
             Self::Overcast => ([0.42, 0.45, 0.50], [0.62, 0.64, 0.67], [0.45, 0.45, 0.45], 0.30),
             Self::Sunset => ([0.10, 0.18, 0.42], [0.95, 0.48, 0.24], [3.0, 1.45, 0.6], 0.05),
             Self::Night => ([0.008, 0.014, 0.04], [0.03, 0.045, 0.09], [0.25, 0.32, 0.6], 0.04),
+        }
+    }
+}
+
+/// Which traversal finds the nearest hit and shadow rays; settable in Settings → Performance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RayTracing {
+    /// Hardware ray query when the adapter has it, the software DDA otherwise.
+    #[default]
+    Auto,
+    /// The software two-level DDA, which runs on every GPU.
+    Software,
+    /// Hardware ray query (acceleration structures); falls back to software where the adapter lacks it.
+    Hardware,
+}
+
+/// The traversal a [`PathTracer`] actually runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceEngine {
+    /// Two-level DDA in the compute shader.
+    Software,
+    /// Hardware ray query over chunk boxes, voxel DDA inside each box.
+    Hardware,
+}
+
+impl RayTracing {
+    /// The engine this preference gives on `device`: hardware only where the device was opened with ray query.
+    pub fn resolve(self, device: &wgpu::Device) -> TraceEngine {
+        let capable = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        if self == Self::Hardware && !capable {
+            warn!("hardware ray query requested but the device lacks it, using the software tracer");
+        }
+        if capable && self != Self::Software {
+            TraceEngine::Hardware
+        } else {
+            TraceEngine::Software
         }
     }
 }
@@ -297,6 +334,8 @@ struct ResolveKey {
 #[derive(Debug)]
 pub struct PathTracer {
     scene: TraceScene,
+    /// Acceleration structures; present exactly when the engine is [`TraceEngine::Hardware`].
+    rays: Option<RayScene>,
     materials: MaterialBuffers,
     compute_layout: wgpu::BindGroupLayout,
     compute_pipeline_layout: wgpu::PipelineLayout,
@@ -323,7 +362,14 @@ impl PathTracer {
     /// Builds the pipelines; `materials` are the buffers shared with the raster pass and `target_format` the format
     /// of the view [`PathTracer::encode`] draws into. The compute pipeline starts out with only the Default material
     /// compiled; call [`PathTracer::set_materials`] (or let the [`ViewportRenderer`](crate::ViewportRenderer) do it).
-    pub fn new(device: &wgpu::Device, materials: &MaterialBuffers, target_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        materials: &MaterialBuffers,
+        target_format: wgpu::TextureFormat,
+        ray_tracing: RayTracing,
+    ) -> Self {
+        let engine = ray_tracing.resolve(device);
+        let hardware = engine == TraceEngine::Hardware;
         let present_source = format!(
             "{}{}",
             include_str!("shaders/fullscreen.wgsl"),
@@ -356,37 +402,51 @@ impl PathTracer {
         };
         let uniform = wgpu::BufferBindingType::Uniform;
         let storage = wgpu::BufferBindingType::Storage { read_only: true };
+        let mut compute_entries = vec![
+            buffer_entry(0, uniform),
+            buffer_entry(1, uniform),
+            buffer_entry(2, storage),
+            buffer_entry(3, storage),
+            buffer_entry(6, storage),
+            buffer_entry(9, storage),
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            storage_texture_entry(5),
+            storage_texture_entry(7),
+            storage_texture_entry(8),
+        ];
+        if hardware {
+            compute_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::AccelerationStructure { vertex_return: false },
+                count: None,
+            });
+            compute_entries.push(buffer_entry(11, storage));
+        }
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path tracer bind group layout"),
-            entries: &[
-                buffer_entry(0, uniform),
-                buffer_entry(1, uniform),
-                buffer_entry(2, storage),
-                buffer_entry(3, storage),
-                buffer_entry(6, storage),
-                buffer_entry(9, storage),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                storage_texture_entry(5),
-                storage_texture_entry(7),
-                storage_texture_entry(8),
-            ],
+            entries: &compute_entries,
         });
         let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("path tracer pipeline layout"),
             bind_group_layouts: &[Some(&compute_layout)],
             immediate_size: 0,
         });
-        let compute_pipeline =
-            create_compute_pipeline(device, &compute_pipeline_layout, &default_compiled().shader_source());
+        let compute_pipeline = create_compute_pipeline(
+            device,
+            &compute_pipeline_layout,
+            &default_compiled().shader_source(),
+            engine,
+        );
 
         let present_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("path tracer present bind group layout"),
@@ -454,6 +514,7 @@ impl PathTracer {
         };
         Self {
             scene: TraceScene::new(device),
+            rays: hardware.then(|| RayScene::new(device)),
             materials: materials.clone(),
             compute_layout,
             compute_pipeline_layout,
@@ -478,7 +539,24 @@ impl PathTracer {
     /// consume the same chunk data.
     pub fn upload_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &rustium_core::Scene) {
         self.scene.upload(device, queue, scene);
+        if let Some(rays) = &mut self.rays {
+            rays.update(device, queue, &self.scene);
+        }
         self.restart();
+    }
+
+    /// The traversal this tracer runs.
+    pub fn engine(&self) -> TraceEngine {
+        if self.rays.is_some() {
+            TraceEngine::Hardware
+        } else {
+            TraceEngine::Software
+        }
+    }
+
+    /// Counts every replacement of a buffer or acceleration structure the bind groups point at.
+    fn scene_generation(&self) -> u64 {
+        self.scene.generation() + self.rays.as_ref().map_or(0, RayScene::generation)
     }
 
     /// The layout the compute pipeline is built against (for rebuilding it on a worker thread).
@@ -488,7 +566,8 @@ impl PathTracer {
 
     /// Rebuilds the compute pipeline from a complete material module (see `MaterialCompiler::live_source`).
     pub(crate) fn set_material_source(&mut self, device: &wgpu::Device, material_source: &str) {
-        self.compute_pipeline = create_compute_pipeline(device, &self.compute_pipeline_layout, material_source);
+        self.compute_pipeline =
+            create_compute_pipeline(device, &self.compute_pipeline_layout, material_source, self.engine());
     }
 
     /// Swaps in a compute pipeline built from newly compiled Materials and restarts accumulation.
@@ -511,7 +590,12 @@ impl PathTracer {
     ) -> Result<(), CompileError> {
         let compiled = compile_materials(graphs)?;
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipeline = create_compute_pipeline(device, &self.compute_pipeline_layout, &compiled.shader_source());
+        let pipeline = create_compute_pipeline(
+            device,
+            &self.compute_pipeline_layout,
+            &compiled.shader_source(),
+            self.engine(),
+        );
         if let Some(error) = pollster::block_on(scope.pop()) {
             return Err(CompileError::Shader(error.to_string()));
         }
@@ -640,10 +724,10 @@ impl PathTracer {
             .is_none_or(|accumulation| accumulation.size != size)
         {
             self.accumulation = Some(self.create_accumulation(device, size));
-            self.bound_generation = self.scene.generation();
+            self.bound_generation = self.scene_generation();
             self.resolved_for = None;
             self.restart();
-        } else if self.bound_generation != self.scene.generation() {
+        } else if self.bound_generation != self.scene_generation() {
             self.rebuild_groups(device);
         }
         let key = frame.key();
@@ -880,7 +964,7 @@ impl PathTracer {
                 ..accumulation
             });
         }
-        self.bound_generation = self.scene.generation();
+        self.bound_generation = self.scene_generation();
     }
 
     fn compute_groups_for(
@@ -895,51 +979,62 @@ impl PathTracer {
         let geometry_view = gbuffer.geometry.create_view(&wgpu::TextureViewDescriptor::default());
         let albedo_view = gbuffer.albedo.create_view(&wgpu::TextureViewDescriptor::default());
         let compute = |read: usize| {
+            let mut entries = vec![
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.materials.colors().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.scene.pool().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.scene.grids().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.scene.models().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: self.materials.params().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&views[read]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&views[1 - read]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&geometry_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&albedo_view),
+                },
+            ];
+            if let Some(rays) = &self.rays {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: rays.tlas().as_binding(),
+                });
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: rays.chunk_boxes().as_entire_binding(),
+                });
+            }
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("path tracer bind group"),
                 layout: &self.compute_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.params_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.materials.colors().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.scene.pool().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.scene.grids().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.scene.models().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: self.materials.params().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&views[read]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&views[1 - read]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(&geometry_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(&albedo_view),
-                    },
-                ],
+                entries: &entries,
             })
         };
         [compute(0), compute(1)]
@@ -964,10 +1059,16 @@ impl PathTracer {
     }
 }
 
-/// The full WGSL of the path tracer: material module, then the tracer.
-pub(crate) fn compute_shader_source(material_source: &str) -> String {
+/// The full WGSL of the path tracer: material module, the tracer, and the traversal of `engine`. The one place the
+/// shader is composed, so the Material rebuild and the engine switch cannot disagree.
+pub(crate) fn compute_shader_source(material_source: &str, engine: TraceEngine) -> String {
+    let (prefix, traversal) = match engine {
+        TraceEngine::Software => ("", include_str!("shaders/trace_dda.wgsl")),
+        // `enable` directives must come before any declaration.
+        TraceEngine::Hardware => ("enable wgpu_ray_query;\n", include_str!("shaders/trace_rq.wgsl")),
+    };
     format!(
-        "{material_source}{}{}",
+        "{prefix}{material_source}{}{}{traversal}",
         include_str!("shaders/pathtracer.wgsl"),
         include_str!("shaders/trace_style.wgsl")
     )
@@ -977,10 +1078,11 @@ pub(crate) fn create_compute_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     material_source: &str,
+    engine: TraceEngine,
 ) -> wgpu::ComputePipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("path tracer shader"),
-        source: wgpu::ShaderSource::Wgsl(compute_shader_source(material_source).into()),
+        source: wgpu::ShaderSource::Wgsl(compute_shader_source(material_source, engine).into()),
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("path tracer pipeline"),

@@ -4,8 +4,8 @@
 //! Every Shape is uploaded once, however many Models (Instances) show it; each Model record points at its Shape's
 //! grid and carries the Transform that places it in the Scene.
 //!
-//! This module only uploads; traversal lives in `shaders/pathtracer.wgsl`. A hardware ray-query backend would
-//! replace the traversal and build its acceleration structures from the same chunk and Model data.
+//! This module only uploads; traversal lives in `shaders/pathtracer.wgsl`. The ray-query backend (`ray_scene.rs`)
+//! builds its acceleration structures from the same chunk and Model data.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -58,6 +58,8 @@ pub(crate) struct TraceScene {
     models: wgpu::Buffer,
     model_capacity: usize,
     model_count: u32,
+    /// The Shape and record of every Model in the Model list, in list order.
+    placed: Vec<(ShapeId, GpuModel)>,
     resident: HashMap<(ShapeId, ChunkCoord), Resident>,
     free: Vec<u32>,
     next_slot: u32,
@@ -75,6 +77,7 @@ impl TraceScene {
             models: create_models(device, 1),
             model_capacity: 1,
             model_count: 0,
+            placed: Vec::new(),
             resident: HashMap::new(),
             free: Vec::new(),
             next_slot: 0,
@@ -100,6 +103,23 @@ impl TraceScene {
 
     pub(crate) fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The Shape and record of every uploaded Model, in the order the shader indexes them.
+    pub(crate) fn placed(&self) -> &[(ShapeId, GpuModel)] {
+        &self.placed
+    }
+
+    /// Chunk coordinates of `shape` that are in the pool, sorted so equal sets compare equal.
+    pub(crate) fn shape_chunks(&self, shape: ShapeId) -> Vec<ChunkCoord> {
+        let mut coords: Vec<ChunkCoord> = self
+            .resident
+            .keys()
+            .filter(|(owner, _)| *owner == shape)
+            .map(|(_, coord)| *coord)
+            .collect();
+        coords.sort_unstable_by_key(|coord| (coord.0.y, coord.0.z, coord.0.x));
+        coords
     }
 
     /// Brings the GPU copy in line with `scene`: every visible Model, hidden ones skipped. Chunks whose `Arc` did
@@ -215,22 +235,24 @@ impl TraceScene {
         }
 
         // The Model list: every visible Model whose Shape has a grid.
-        let models: Vec<GpuModel> = placements
+        let placed: Vec<(ShapeId, GpuModel)> = placements
             .iter()
             .filter_map(|placement| {
                 let (min, size, start) = *grid_of.get(&placement.shape)?;
                 let [x, y, z] = placement.transform.orientation.columns().map(IVec3::as_vec3);
                 let offset = placement.transform.offset.as_vec3();
-                Some(GpuModel {
+                let record = GpuModel {
                     column_x: [x.x, x.y, x.z, 0.0],
                     column_y: [y.x, y.y, y.z, 0.0],
                     column_z: [z.x, z.y, z.z, 0.0],
                     offset: [offset.x, offset.y, offset.z, 0.0],
                     grid_min: [min.x, min.y, min.z, i32::try_from(start).unwrap_or(0)],
                     grid_size: [size.x, size.y, size.z, 0],
-                })
+                };
+                Some((placement.shape, record))
             })
             .collect();
+        let models: Vec<GpuModel> = placed.iter().map(|(_, record)| *record).collect();
         if models.len() > self.model_capacity {
             self.model_capacity = models.len().next_power_of_two();
             self.models = create_models(device, self.model_capacity);
@@ -240,6 +262,7 @@ impl TraceScene {
             queue.write_buffer(&self.models, 0, bytemuck::cast_slice(&models));
         }
         self.model_count = u32::try_from(models.len()).unwrap_or(0);
+        self.placed = placed;
     }
 }
 

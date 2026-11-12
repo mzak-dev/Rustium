@@ -1,7 +1,8 @@
 // Software path tracer: two-level DDA over a sparse chunk grid per Model (ADR 0001). Concatenated after material.wgsl.
 //
 // Scene data comes from trace_scene.rs (chunk pool, one chunk index grid per Shape, a list of visible Models);
-// everything below is traversal and shading, so a ray-query backend only has to replace `trace`.
+// everything below is shared traversal and shading; the nearest-hit and shadow-ray functions come from trace_dda.wgsl or
+// trace_rq.wgsl.
 
 struct Params {
     // Clip space to voxel space; unprojecting the near and far plane works for perspective and orthographic cameras.
@@ -224,10 +225,10 @@ fn trace_voxels(model: ModelRecord, origin: vec3<f32>, dir: vec3<f32>, inside: u
     return miss();
 }
 
-// Traces Model `index`: the ray is moved into the Model's Shape space (the transforms are signed axis permutations,
-// so lengths and `t` carry over unchanged) and the hit normal is moved back.
-fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
-    let model = models[index];
+// Traces `model` (the record of Model `index`, or a one-chunk stand-in for it): the ray is moved into the Model's Shape
+// space (the transforms are signed axis permutations, so lengths and `t` carry over unchanged) and the hit normal is
+// moved back.
+fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
     let moved = origin - model.offset.xyz;
     let local_origin = vec3<f32>(dot(model.column_x.xyz, moved), dot(model.column_y.xyz, moved), dot(model.column_z.xyz, moved));
     let local_dir = vec3<f32>(dot(model.column_x.xyz, dir), dot(model.column_y.xyz, dir), dot(model.column_z.xyz, dir));
@@ -240,31 +241,18 @@ fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hi
     return result;
 }
 
-// Whether anything blocks the ray (shadow rays).
-fn occluded(origin: vec3<f32>, dir: vec3<f32>) -> bool {
-    for (var index = 0u; index < params.options.w; index += 1u) {
-        if (trace_model(index, origin, dir, 0u).hit) {
-            return true;
-        }
-    }
-    return false;
+fn trace_model(index: u32, origin: vec3<f32>, dir: vec3<f32>, inside: u32) -> Hit {
+    return trace_record(models[index], index, origin, dir, inside);
 }
+
+// `trace_scene_hit` (nearest hit over all visible Models) and `occluded` (shadow rays) come from the traversal
+// variant that is compiled in: trace_dda.wgsl (software) or trace_rq.wgsl (hardware ray query). Both return the same
+// `Hit`, so everything below is shared.
 
 // The nearest surface along the ray: every visible Model, plus the ground plane when it is on. A ray travelling
 // through glass (`inside` != 0) only looks at the Model it is in. Where Models overlap, the earlier one wins.
-// ponytail: loops over all Models per ray; add a BVH over Model bounds when scenes hold hundreds of Models.
 fn trace(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> Hit {
-    var result = miss();
-    if (inside != 0u) {
-        result = trace_model(inside_model, origin, dir, inside);
-    } else {
-        for (var index = 0u; index < params.options.w; index += 1u) {
-            let candidate = trace_model(index, origin, dir, 0u);
-            if (candidate.hit && candidate.t < result.t) {
-                result = candidate;
-            }
-        }
-    }
+    var result = trace_scene_hit(origin, dir, inside, inside_model);
     if (inside == 0u && params.options.x != 0u && params.style.x != STYLE_WIRE && dir.y < -1.0e-5 && origin.y > params.ground.w) {
         let t_ground = (params.ground.w - origin.y) / dir.y;
         if (t_ground < result.t) {

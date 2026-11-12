@@ -12,7 +12,7 @@ use wgpu::naga;
 
 use crate::material_compiler::{CompileError, CompiledMaterials, assemble};
 use crate::materials::MaterialBuffers;
-use crate::path_tracer::{compute_shader_source, create_compute_pipeline};
+use crate::path_tracer::{TraceEngine, compute_shader_source, create_compute_pipeline};
 use crate::viewport_renderer::{create_raster_pair, raster_shader_source};
 
 /// How far the Material shaders are from matching the Scene's Material graphs (the "Compiled" chip).
@@ -40,6 +40,8 @@ pub(crate) struct BuildContext {
     pub(crate) raster_layout: wgpu::PipelineLayout,
     pub(crate) compute_layout: wgpu::PipelineLayout,
     pub(crate) sample_count: u32,
+    /// The traversal the compute pipeline is composed with.
+    pub(crate) engine: TraceEngine,
 }
 
 struct Message {
@@ -179,8 +181,20 @@ impl MaterialCompiler {
 
 /// Validates the shaders with naga (for readable messages), then builds the pipelines inside an error scope.
 fn build(context: &BuildContext, material_source: &str) -> Result<Built, String> {
-    validate("raster", &raster_shader_source(material_source))?;
-    validate("path tracer", &compute_shader_source(material_source))?;
+    validate(
+        "raster",
+        &raster_shader_source(material_source),
+        naga::valid::Capabilities::default(),
+    )?;
+    let capabilities = match context.engine {
+        TraceEngine::Software => naga::valid::Capabilities::default(),
+        TraceEngine::Hardware => naga::valid::Capabilities::default() | naga::valid::Capabilities::RAY_QUERY,
+    };
+    validate(
+        "path tracer",
+        &compute_shader_source(material_source, context.engine),
+        capabilities,
+    )?;
     let scope = context.device.push_error_scope(wgpu::ErrorFilter::Validation);
     let (raster, raster_mirrored) = create_raster_pair(
         &context.device,
@@ -188,7 +202,12 @@ fn build(context: &BuildContext, material_source: &str) -> Result<Built, String>
         context.sample_count,
         material_source,
     );
-    let compute = create_compute_pipeline(&context.device, &context.compute_layout, material_source);
+    let compute = create_compute_pipeline(
+        &context.device,
+        &context.compute_layout,
+        material_source,
+        context.engine,
+    );
     if let Some(error) = pollster::block_on(scope.pop()) {
         return Err(error.to_string());
     }
@@ -200,15 +219,12 @@ fn build(context: &BuildContext, material_source: &str) -> Result<Built, String>
 }
 
 /// Parses and validates `source`; the error is the compiler's message with the offending line.
-pub(crate) fn validate(name: &str, source: &str) -> Result<(), String> {
+pub(crate) fn validate(name: &str, source: &str, capabilities: naga::valid::Capabilities) -> Result<(), String> {
     let module =
         naga::front::wgsl::parse_str(source).map_err(|error| format!("{name}: {}", error.emit_to_string(source)))?;
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::default(),
-    )
-    .validate(&module)
-    .map_err(|error| format!("{name}: {}", error.emit_to_string(source)))?;
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+        .validate(&module)
+        .map_err(|error| format!("{name}: {}", error.emit_to_string(source)))?;
     Ok(())
 }
 
@@ -220,7 +236,7 @@ mod tests {
 
     use super::*;
     use crate::material_compiler::{compile_materials, default_compiled};
-    use crate::path_tracer::PathTracer;
+    use crate::path_tracer::{PathTracer, RayTracing};
     use crate::viewport_renderer::create_scene_layout;
 
     struct Harness {
@@ -235,7 +251,12 @@ mod tests {
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         let buffers = MaterialBuffers::new(&device);
-        let tracer = PathTracer::new(&device, &buffers, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let tracer = PathTracer::new(
+            &device,
+            &buffers,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            RayTracing::Software,
+        );
         let scene_layout = create_scene_layout(&device);
         let raster_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("test raster layout"),
@@ -247,6 +268,7 @@ mod tests {
             raster_layout,
             compute_layout: tracer.compute_pipeline_layout().clone(),
             sample_count: 1,
+            engine: TraceEngine::Software,
         };
         let compiler = MaterialCompiler::new(buffers, default_compiled().generated);
         Some(Harness {

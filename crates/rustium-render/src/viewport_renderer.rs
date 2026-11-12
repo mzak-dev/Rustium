@@ -11,7 +11,7 @@ use crate::material_compiler::{compile_materials, default_compiled};
 use crate::material_pipelines::{BuildContext, CompileStatus, MaterialCompiler};
 use crate::materials::MaterialBuffers;
 use crate::offline::OfflineRenderer;
-use crate::path_tracer::{PathTracer, TraceFrame, TraceImage, TraceProgress};
+use crate::path_tracer::{PathTracer, RayTracing, TraceEngine, TraceFrame, TraceImage, TraceProgress};
 
 /// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
 #[repr(C)]
@@ -148,6 +148,8 @@ pub struct ViewportRenderer {
     targets: Option<SceneTargets>,
     glass: GlassPass,
     tracer: PathTracer,
+    /// The traversal the user asked for; applies to the viewport tracer and to offline renderers.
+    ray_tracing: RayTracing,
 }
 
 impl ViewportRenderer {
@@ -191,7 +193,7 @@ impl ViewportRenderer {
         let line_buffer = create_line_buffer(device, 256);
         let instance_buffer = create_instance_buffer(device, 64);
         let glass = GlassPass::new(device, gpu.surface_srgb_format());
-        let tracer = PathTracer::new(device, &materials, SCENE_FORMAT);
+        let tracer = PathTracer::new(device, &materials, SCENE_FORMAT, RayTracing::Auto);
         let compiler = MaterialCompiler::new(materials.clone(), initial.generated);
         Self {
             sample_count,
@@ -207,6 +209,7 @@ impl ViewportRenderer {
             targets: None,
             glass,
             tracer,
+            ray_tracing: RayTracing::Auto,
         }
     }
 
@@ -268,7 +271,29 @@ impl ViewportRenderer {
             raster_layout: self.pipeline_layout.clone(),
             compute_layout: self.tracer.compute_pipeline_layout().clone(),
             sample_count: self.sample_count,
+            engine: self.tracer.engine(),
         }
+    }
+
+    /// The traversal the viewport's path tracer runs.
+    pub fn trace_engine(&self) -> TraceEngine {
+        self.tracer.engine()
+    }
+
+    /// Picks the path tracer's traversal. Returns `true` when that replaced the tracer, which then holds no Scene:
+    /// call [`ViewportRenderer::upload_trace_scene`] again. The new tracer builds its pipeline from the live Material
+    /// source, and a build in flight for the old engine is restarted.
+    pub fn set_ray_tracing(&mut self, gpu: &GpuContext, ray_tracing: RayTracing) -> bool {
+        self.ray_tracing = ray_tracing;
+        if ray_tracing.resolve(gpu.device()) == self.tracer.engine() {
+            return false;
+        }
+        self.tracer = PathTracer::new(gpu.device(), &self.materials, SCENE_FORMAT, ray_tracing);
+        self.tracer
+            .set_material_source(gpu.device(), &self.compiler.live_source());
+        let context = self.build_context(gpu);
+        self.compiler.restart_pending(&context);
+        true
     }
 
     /// Uploads every visible Model's Shape for the path tracer and restarts it. Cheap for unchanged chunks.
@@ -281,7 +306,7 @@ impl ViewportRenderer {
     /// it), and holds no Scene until [`OfflineRenderer::upload_scene`] is called.
     pub fn offline_renderer(&self, gpu: &GpuContext) -> OfflineRenderer {
         let materials = self.materials.snapshot(gpu.device(), gpu.queue());
-        let mut tracer = PathTracer::new(gpu.device(), &materials, SCENE_FORMAT);
+        let mut tracer = PathTracer::new(gpu.device(), &materials, SCENE_FORMAT, self.ray_tracing);
         tracer.set_material_source(gpu.device(), &self.compiler.live_source());
         OfflineRenderer::new(gpu.device().clone(), gpu.queue().clone(), tracer)
     }

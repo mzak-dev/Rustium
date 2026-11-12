@@ -66,13 +66,7 @@ impl GpuContext {
             kind = ?adapter_info.device_type,
             "graphics adapter"
         );
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("rustium device"),
-                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-                ..Default::default()
-            })
-            .await?;
+        let (device, queue) = request_device(&adapter).await?;
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .unwrap_or_else(|| fallback_config(width, height));
@@ -119,6 +113,11 @@ impl GpuContext {
     /// Name and backend of the adapter in use.
     pub fn adapter_info(&self) -> wgpu::AdapterInfo {
         self.adapter.get_info()
+    }
+
+    /// Whether the device was opened with hardware ray query, so [`RayTracing::Hardware`](crate::RayTracing) works.
+    pub fn supports_ray_query(&self) -> bool {
+        self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
     }
 
     /// MSAA sample counts `format` supports on this adapter, always including 1.
@@ -184,6 +183,52 @@ impl GpuContext {
         self.surface = self.instance.create_surface(target)?;
         self.surface.configure(&self.device, &self.config);
         Ok(())
+    }
+}
+
+/// Opens the device with the adapter's resolution limits, and with hardware ray query where the adapter has it.
+///
+/// # Errors
+///
+/// Fails when the adapter cannot provide a device.
+pub async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), Error> {
+    let ray_query = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    let (required_features, experimental_features) = if ray_query {
+        // SAFETY: ray query is experimental in wgpu; Rustium uses it behind the software fallback and only with
+        // validated acceleration-structure builds.
+        let token = unsafe { wgpu::ExperimentalFeatures::enabled() };
+        (wgpu::Features::EXPERIMENTAL_RAY_QUERY, token)
+    } else {
+        (wgpu::Features::empty(), wgpu::ExperimentalFeatures::disabled())
+    };
+    let mut required_limits = wgpu::Limits::default().using_resolution(adapter.limits());
+    if ray_query {
+        // The path tracer binds one top-level acceleration structure; take what the adapter offers for the sizes.
+        let offered = adapter.limits();
+        required_limits.max_acceleration_structures_per_shader_stage = 1;
+        required_limits.max_blas_primitive_count = offered.max_blas_primitive_count;
+        required_limits.max_blas_geometry_count = offered.max_blas_geometry_count;
+        required_limits.max_tlas_instance_count = offered.max_tlas_instance_count;
+    }
+    let descriptor = wgpu::DeviceDescriptor {
+        label: Some("rustium device"),
+        required_features,
+        required_limits,
+        experimental_features,
+        ..Default::default()
+    };
+    match adapter.request_device(&descriptor).await {
+        Ok(pair) => Ok(pair),
+        Err(error) if ray_query => {
+            warn!(%error, "device with ray query failed, retrying without it");
+            let plain = wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                ..descriptor
+            };
+            Ok(adapter.request_device(&plain).await?)
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

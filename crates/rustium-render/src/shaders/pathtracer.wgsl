@@ -324,6 +324,50 @@ fn trace_record(model: ModelRecord, index: u32, origin: vec3<f32>, dir: vec3<f32
     return result;
 }
 
+// The Color at Shape cell `cell` of `model`; 0 outside its chunk grid and in empty chunks.
+fn voxel_at(model: ModelRecord, cell: vec3<i32>) -> u32 {
+    let rel = cell - model.grid_min.xyz * CHUNK;
+    if (any(rel < vec3<i32>(0)) || any(rel >= vec3<i32>(model.grid_size.xyz) * CHUNK)) {
+        return 0u;
+    }
+    let chunk = vec3<i32>(rel.x >> 5u, rel.y >> 5u, rel.z >> 5u);
+    let slot = chunk_slot(model, chunk);
+    if (slot == 0u) {
+        return 0u;
+    }
+    return voxel_in(slot, rel - chunk * CHUNK);
+}
+
+// `material_edges` for the voxel face at Shape-space `local_position` with normal `local_normal` (which may point
+// either way): the sides where the neighbour and the cell in front of it are both empty, as the mesher marks them.
+fn outer_edges(model: ModelRecord, local_position: vec3<f32>, local_normal: vec3<f32>) -> u32 {
+    var outward = local_normal;
+    var cell = vec3<i32>(floor(local_position - outward * 0.5));
+    if (voxel_at(model, cell) == 0u) {
+        // Leaving glass from the inside: the voxel is on the side the normal points to.
+        outward = -outward;
+        cell = vec3<i32>(floor(local_position - outward * 0.5));
+    }
+    let front = vec3<i32>(round(outward));
+    let a = abs(outward);
+    let normal_axis = select(select(2u, 1u, a.y > a.z), 0u, a.x > a.y && a.x > a.z);
+    let columns = mat3x3<f32>(model.column_x.xyz, model.column_y.xyz, model.column_z.xyz);
+    var edges = 0u;
+    for (var axis = 0u; axis < 3u; axis += 1u) {
+        if (axis == normal_axis) {
+            continue;
+        }
+        for (var side = 0u; side < 2u; side += 1u) {
+            var step = vec3<i32>(0);
+            step[axis] = select(-1, 1, side == 1u);
+            if (voxel_at(model, cell + step) == 0u && voxel_at(model, cell + step + front) == 0u) {
+                edges |= edge_bit(columns, axis, side == 1u);
+            }
+        }
+    }
+    return edges;
+}
+
 // `evaluate_material` for a point on Model `model`: its Shape-space position and normal come from the Model's
 // transform, which is the inverse of the one `trace_record` applies to rays.
 fn shade(color_index: u32, model: u32, point: vec3<f32>, normal: vec3<f32>) -> Surface {
@@ -331,6 +375,10 @@ fn shade(color_index: u32, model: u32, point: vec3<f32>, normal: vec3<f32>) -> S
     let moved = point - record.offset.xyz;
     let local_position = vec3<f32>(dot(record.column_x.xyz, moved), dot(record.column_y.xyz, moved), dot(record.column_z.xyz, moved));
     let local_normal = vec3<f32>(dot(record.column_x.xyz, normal), dot(record.column_y.xyz, normal), dot(record.column_z.xyz, normal));
+    material_edges = 0x3fu;
+    if ((color_flags(color_index) & COLOR_OUTER_EDGES) != 0u) {
+        material_edges = outer_edges(record, local_position, local_normal);
+    }
     return evaluate_material(color_index, point, normal, local_position, local_normal);
 }
 

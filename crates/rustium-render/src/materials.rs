@@ -24,6 +24,8 @@ const FLAG_NO_SHADOW: u32 = 1 << 16;
 const FLAG_VOLUMETRIC: u32 = 1 << 17;
 /// The Material is see-through glass: a transmitting Surface without a Volume output (`COLOR_TRANSMISSIVE`).
 const FLAG_TRANSMISSIVE: u32 = 1 << 18;
+/// The Material has a Voxel bevel on its outer edges only (`COLOR_OUTER_EDGES`).
+const FLAG_OUTER_EDGES: u32 = 1 << 19;
 
 const _: () = assert!(size_of::<GpuColor>() == 16);
 
@@ -63,6 +65,9 @@ impl GpuMaterialTable {
             if let Some(found) = graphs.get(graph as usize) {
                 if !found.casts_shadow {
                     packed |= FLAG_NO_SHADOW;
+                }
+                if found.bevels_outer_edges() {
+                    packed |= FLAG_OUTER_EDGES;
                 }
                 // Shadow rays only dim in a see-through voxel; an opaque Surface with a Volume output still blocks.
                 if found.transmits() {

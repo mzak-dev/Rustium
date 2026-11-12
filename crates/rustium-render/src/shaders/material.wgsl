@@ -16,7 +16,7 @@ struct ColorEntry {
     // Bits 0..16: index of the Color's Material. Bit 16 (COLOR_NO_SHADOW): the Material does not cast shadows.
     // Bit 17 (COLOR_VOLUMETRIC): the Material has a Volume output, so shadow rays are dimmed by its haze instead of
     // stopped. Bit 18 (COLOR_TRANSMISSIVE): see-through glass without a Volume output; shadow rays pass it, dimmed and
-    // tinted.
+    // tinted. Bit 19 (COLOR_OUTER_EDGES): a Voxel bevel rounds only the outer edges.
     graph: u32,
 };
 
@@ -24,6 +24,8 @@ const COLOR_GRAPH_MASK: u32 = 0xffffu;
 const COLOR_NO_SHADOW: u32 = 0x10000u;
 const COLOR_VOLUMETRIC: u32 = 0x20000u;
 const COLOR_TRANSMISSIVE: u32 = 0x40000u;
+// The Material has a Voxel bevel on its outer edges only: the path tracer looks up which edges those are.
+const COLOR_OUTER_EDGES: u32 = 0x80000u;
 
 struct MaterialTable {
     colors: array<ColorEntry, 256>,
@@ -63,6 +65,20 @@ struct Surface {
 // pass passes the mesh's per-vertex occlusion; the path tracer leaves it at 1 because its bounce lighting already
 // darkens corners (the Ambient occlusion node is therefore flat there).
 var<private> material_ao: f32 = 1.0;
+
+// The outer edges of the shaded voxel face, for the Voxel bevel's "Outer edges only": bit 2 * axis is the face's low
+// side along Scene axis `axis`, bit 2 * axis + 1 its high side. The caller sets it before `evaluate_material` (the
+// raster pass from the mesh, the path tracer from the neighbouring voxels); the default rounds every edge.
+var<private> material_edges: u32 = 0x3fu;
+
+// The `material_edges` bit of a voxel's side along its Model's axis `axis` (`positive`: the high side), for a Model
+// whose axes point along `columns` in the Scene (signed axis permutations).
+fn edge_bit(columns: mat3x3<f32>, axis: u32, positive: bool) -> u32 {
+    let side = columns[axis] * select(-1.0, 1.0, positive);
+    let a = abs(side);
+    let scene_axis = select(select(2u, 1u, a.y > a.z), 0u, a.x > a.y && a.x > a.z);
+    return 1u << (2u * scene_axis + u32(side[scene_axis] > 0.0));
+}
 
 fn mp(i: u32) -> f32 {
     return material_params[i];
@@ -231,30 +247,33 @@ fn edge_wear(p: vec3<f32>, n: vec3<f32>, width: f32, breakup: f32, seed: u32) ->
     return 1.0 - smoothstep(0.0, max(local_width, 1.0e-4), d);
 }
 
-// Tilt contributed by one tangent axis: leans outwards near either end, in `segments` steps.
-fn bevel_axis(local: f32, radius: f32, segments: f32) -> f32 {
+// Tilt contributed by one tangent axis: leans outwards near either end, in `segments` steps. `open` bit 0 rounds the
+// low end, bit 1 the high end.
+fn bevel_axis(local: f32, radius: f32, segments: f32, open: u32) -> f32 {
     var tilt = 0.0;
-    if (local < radius) {
+    if ((open & 1u) != 0u && local < radius) {
         tilt -= ceil((1.0 - local / radius) * segments) / segments;
     }
-    if (1.0 - local < radius) {
+    if ((open & 2u) != 0u && 1.0 - local < radius) {
         tilt += ceil((1.0 - (1.0 - local) / radius) * segments) / segments;
     }
     return tilt;
 }
 
-// Voxel bevel node: shading-only normal that leans over voxel edges as if they were rounded off.
-fn bevel_normal(p: vec3<f32>, n: vec3<f32>, radius: f32, segments: i32) -> vec3<f32> {
+// Voxel bevel node: shading-only normal that leans over voxel edges as if they were rounded off; with `outer` only
+// over the edges in `material_edges`.
+fn bevel_normal(p: vec3<f32>, n: vec3<f32>, radius: f32, segments: i32, outer: f32) -> vec3<f32> {
     if (radius <= 0.0) {
         return n;
     }
     let local = p - floor(p - n * 0.01);
     let a = abs(n);
     let s = f32(max(segments, 1));
+    let edges = select(0x3fu, material_edges, outer > 0.5);
     let tilt = vec3<f32>(
-        select(bevel_axis(local.x, radius, s), 0.0, a.x > 0.5),
-        select(bevel_axis(local.y, radius, s), 0.0, a.y > 0.5),
-        select(bevel_axis(local.z, radius, s), 0.0, a.z > 0.5),
+        select(bevel_axis(local.x, radius, s, edges & 3u), 0.0, a.x > 0.5),
+        select(bevel_axis(local.y, radius, s, (edges >> 2u) & 3u), 0.0, a.y > 0.5),
+        select(bevel_axis(local.z, radius, s, (edges >> 4u) & 3u), 0.0, a.z > 0.5),
     );
     return normalize(n + tilt);
 }

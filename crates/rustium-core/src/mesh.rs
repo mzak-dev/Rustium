@@ -18,14 +18,16 @@ use crate::shape::Shape;
 
 /// One vertex of a chunk mesh, laid out for the GPU.
 ///
-/// `packed` holds the face index (bits 0–2), ambient occlusion 0..=3 (bits 3–4, 3 = fully lit) and the
-/// Color number (bits 8–15).
+/// `packed` holds the face index (bits 0–2), ambient occlusion 0..=3 (bits 3–4, 3 = fully lit), the
+/// Color number (bits 8–15) and the outer edges of the face (bits 16–19: its low and high side along the face's
+/// u axis, then along its v axis; u and v follow the face's axis cyclically). An outer edge is one where the surface
+/// turns away; only Colors marked in [`Transparency`] get them, for the Voxel bevel's "Outer edges only".
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct MeshVertex {
     /// Corner position in voxel space.
     pub position: [f32; 3],
-    /// Face, ambient occlusion and Color, see the type docs.
+    /// Face, ambient occlusion, Color and outer edges, see the type docs.
     pub packed: u32,
 }
 
@@ -40,7 +42,7 @@ pub struct ChunkMesh {
     pub indices: Vec<u32>,
 }
 
-/// Which Colors let light through, for [`mesh_chunk`].
+/// Which Colors let light through, and which mark their outer edges, for [`mesh_chunk`].
 ///
 /// A transparent Color belongs to the group of its Material. Faces between two voxels of the same group are
 /// culled; an opaque voxel next to a transparent one keeps its face, and so do two different transparent groups.
@@ -48,6 +50,9 @@ pub struct ChunkMesh {
 pub struct Transparency {
     /// Indexed by the Color number: 0 for an opaque Color, otherwise the Material index plus one.
     groups: [u32; 256],
+    /// Bit per Color number: its faces record their outer edges (see [`MeshVertex`]). Faces with different edges
+    /// do not merge, so only Colors whose Material needs them are marked.
+    outer_edges: [u64; 4],
 }
 
 impl Default for Transparency {
@@ -58,7 +63,10 @@ impl Default for Transparency {
 
 impl Transparency {
     /// Every Color is opaque.
-    pub const OPAQUE: Self = Self { groups: [0; 256] };
+    pub const OPAQUE: Self = Self {
+        groups: [0; 256],
+        outer_edges: [0; 4],
+    };
 
     /// The table for `scene`: a Color is transparent when its Material is (see
     /// [`MaterialGraph::is_transparent`](crate::MaterialGraph::is_transparent)).
@@ -75,6 +83,12 @@ impl Transparency {
             if graphs.get(graph as usize).is_some_and(MaterialGraph::is_transparent) {
                 table.set(id, Some(graph));
             }
+            if graphs
+                .get(graph as usize)
+                .is_some_and(MaterialGraph::bevels_outer_edges)
+            {
+                table.set_outer_edges(id, true);
+            }
         }
         table
     }
@@ -84,6 +98,26 @@ impl Transparency {
         if let Some(group) = self.groups.get_mut(usize::from(color.get())) {
             *group = graph.map_or(0, |graph| graph.saturating_add(1));
         }
+    }
+
+    /// Marks whether the faces of `color` record their outer edges.
+    pub fn set_outer_edges(&mut self, color: ColorId, on: bool) {
+        let number = usize::from(color.get());
+        if let Some(word) = self.outer_edges.get_mut(number / 64) {
+            let bit = 1 << (number % 64);
+            if on {
+                *word |= bit;
+            } else {
+                *word &= !bit;
+            }
+        }
+    }
+
+    fn outer_edges(&self, color: u8) -> bool {
+        let number = usize::from(color);
+        self.outer_edges
+            .get(number / 64)
+            .is_some_and(|word| word & (1 << (number % 64)) != 0)
     }
 
     /// 0 for an opaque Color (or an empty voxel), otherwise a number identifying the Color's Material.
@@ -234,8 +268,9 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, transparency: &Transparency,
 /// Bits 1..=32 of a column: the chunk's own voxels, without the border.
 const INNER_BITS: u64 = ((1_u64 << SIZE) - 1) << 1;
 
-/// Merge key of the exposed face of the voxel at `position`: Color (bits 0–7), four AO values (8–15) and a
-/// marker bit so a key is never zero.
+/// Merge key of the exposed face of the voxel at `position`: Color (bits 0–7), four AO values (8–15), a marker bit
+/// (16) so a key is never zero, and the outer edges (17–20, in the order of [`MeshVertex`]) for Colors marked in
+/// `transparency`.
 fn face_key(
     padded: &PaddedChunk,
     transparency: &Transparency,
@@ -261,7 +296,18 @@ fn face_key(
         }
     };
     let ao = ao(-1, -1) | ao(1, -1) << 2 | ao(1, 1) << 4 | ao(-1, 1) << 6;
-    u32::from(material) | ao << 8 | 1 << 16
+    let mut edges = 0;
+    if transparency.outer_edges(material) {
+        // The surface turns away where the neighbour and the cell in front of it are both empty; a filled
+        // neighbour continues it (flat) and a filled cell in front of it folds it inwards.
+        for (bit, side) in [-u_dir, u_dir, -v_dir, v_dir].into_iter().enumerate() {
+            let next = position + side;
+            if padded.get(next) == 0 && padded.get(next + normal) == 0 {
+                edges |= 1 << bit;
+            }
+        }
+    }
+    u32::from(material) | ao << 8 | 1 << 16 | edges << 17
 }
 
 /// Occupancy of the padded chunk as one `u64` per voxel column and axis; bit `i` is padded coordinate `i`.
@@ -332,6 +378,7 @@ fn push_quad(mesh: &mut ChunkMesh, corner: Vec3, u_span: IVec3, v_span: IVec3, f
         return;
     };
     let color = key & 0xff;
+    let edges = (key >> 17) & 0xf;
     let ao = [(key >> 8) & 3, (key >> 10) & 3, (key >> 12) & 3, (key >> 14) & 3];
     let u_span = u_span.as_vec3();
     let v_span = v_span.as_vec3();
@@ -339,7 +386,7 @@ fn push_quad(mesh: &mut ChunkMesh, corner: Vec3, u_span: IVec3, v_span: IVec3, f
     for (position, ao) in corners.iter().zip(ao) {
         mesh.vertices.push(MeshVertex {
             position: position.to_array(),
-            packed: face.index() | ao << 3 | color << 8,
+            packed: face.index() | ao << 3 | color << 8 | edges << 16,
         });
     }
     // Corners run counter-clockwise seen from the positive side; flip for negative faces. Split along the
@@ -483,6 +530,41 @@ mod tests {
         assert_eq!(mesh.vertices.len() / 4, 6);
     }
 
+    /// The outer-edge bits of the +Y face over cell `(x, 0, z)`.
+    fn top_edges(mesh: &ChunkMesh, x: f32, z: f32) -> Option<u32> {
+        mesh.vertices.chunks(4).find_map(|quad| {
+            let corners = quad.iter().map(|vertex| Vec3::from_array(vertex.position));
+            let (min, max) = corners.fold((Vec3::MAX, Vec3::MIN), |(low, high), p| (low.min(p), high.max(p)));
+            let over = min.x <= x && x < max.x && min.z <= z && z < max.z;
+            (quad[0].packed & 7 == Face::PosY.index() && over).then_some((quad[0].packed >> 16) & 0xf)
+        })
+    }
+
+    #[test]
+    fn marked_colors_record_their_outer_edges() {
+        let mut shape = Shape::new();
+        for x in 0..3 {
+            for z in 0..3 {
+                shape.set(IVec3::new(x, 0, z), ColorId::new(1));
+            }
+        }
+        // A wall on the far side: the slab's edge under it folds inwards, so it is not outer.
+        shape.set(IVec3::new(1, 1, 3), ColorId::new(1));
+        shape.set(IVec3::new(1, 0, 3), ColorId::new(1));
+        let mut marked = Transparency::OPAQUE;
+        marked.set_outer_edges(ColorId::FIRST, true);
+        let mut mesh = ChunkMesh::default();
+        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &marked, &mut mesh);
+        // +Y: u is Z and v is X; bits are low u, high u, low v, high v.
+        assert_eq!(top_edges(&mesh, 0.5, 0.5), Some(0b0101), "corner: low Z and low X");
+        assert_eq!(top_edges(&mesh, 1.5, 1.5), Some(0), "middle");
+        assert_eq!(top_edges(&mesh, 2.5, 1.5), Some(0b1000), "high X side");
+        assert_eq!(top_edges(&mesh, 0.5, 2.5), Some(0b0110), "far corner: high Z and low X");
+        assert_eq!(top_edges(&mesh, 1.5, 2.5), Some(0), "high Z folds up into the wall");
+        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &Transparency::OPAQUE, &mut mesh);
+        assert_eq!(top_edges(&mesh, 0.5, 0.5), Some(0), "unmarked Colors record nothing");
+    }
+
     proptest! {
         #[test]
         fn greedy_mesh_covers_exactly_the_exposed_faces(
@@ -493,6 +575,8 @@ mod tests {
             for (number, group) in (1..=6_u8).zip(glass) {
                 if let Some(color) = ColorId::new(number) {
                     transparency.set(color, group);
+                    // Outer edges split quads but must not change which faces are covered.
+                    transparency.set_outer_edges(color, number % 2 == 0);
                 }
             }
             let mut shape = Shape::new();

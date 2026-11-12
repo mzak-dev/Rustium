@@ -674,7 +674,8 @@ static VOXEL_BEVEL: NodeSpec = NodeSpec {
     kind: GraphNodeKind::VoxelBevel,
     label: "Voxel bevel",
     description: "Tilts the normal near voxel edges so they catch light as if rounded. Shading only, the geometry \
-                  stays.",
+                  stays. Outer edges only rounds just the edges where the surface turns away, so a block of voxels \
+                  reads as one rounded shape.",
     category: NodeCategory::Shading,
     inputs: &[],
     outputs: &[out("Normal", SocketType::Vector)],
@@ -688,6 +689,7 @@ static VOXEL_BEVEL: NodeSpec = NodeSpec {
                 default: 2,
             },
         ),
+        side_param("Outer edges only", ParamKind::Bool { default: false }),
     ],
     bypass_input: None,
 };

@@ -41,6 +41,8 @@ struct VertexOutput {
     @location(4) @interpolate(flat) color_index: u32,
     @location(5) local: vec3<f32>,
     @location(6) @interpolate(flat) local_normal: vec3<f32>,
+    // The face's outer edges as `material_edges` (Scene axes).
+    @location(7) @interpolate(flat) edges: u32,
 };
 
 fn face_normal(face: u32) -> vec3<f32> {
@@ -70,6 +72,18 @@ fn vs_main(
     out.local = position;
     out.local_normal = local_normal;
     out.color_index = (packed >> 8u) & 255u;
+    // Outer edges come from the mesher along the face's u and v axes (the axes after the face's, cyclically).
+    let axis = (packed & 7u) / 2u;
+    let u_axis = (axis + 1u) % 3u;
+    let v_axis = (axis + 2u) % 3u;
+    let columns = mat3x3<f32>(column_x.xyz, column_y.xyz, column_z.xyz);
+    var edges = 0u;
+    for (var bit = 0u; bit < 4u; bit += 1u) {
+        if (((packed >> (16u + bit)) & 1u) != 0u) {
+            edges |= edge_bit(columns, select(u_axis, v_axis, bit >= 2u), (bit & 1u) == 1u);
+        }
+    }
+    out.edges = edges;
     out.dim = column_x.w;
     return out;
 }
@@ -78,6 +92,7 @@ fn vs_main(
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The mesh's per-vertex occlusion feeds the Ambient occlusion node.
     material_ao = in.ao;
+    material_edges = in.edges;
     let surface = evaluate_material(in.color_index, in.world, in.normal, in.local, in.local_normal);
     // The Material may bend the normal (Voxel bevel); it only changes the shading.
     let normal = surface.normal;

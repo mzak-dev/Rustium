@@ -195,6 +195,9 @@ fn single_node(ui: &mut Ui, hud: &mut Hud<'_>, node: &GraphNode) {
             if node.kind == GraphNodeKind::Noise {
                 note(ui, hud.tr("effects-per-voxel-hint"));
             }
+            if node.kind == GraphNodeKind::VoxelBevel {
+                note(ui, hud.tr("effects-outer-edges-hint"));
+            }
             for edit in edits {
                 let merge = !matches!(edit, GraphEdit::RenameNode { .. });
                 graph_edit(hud, edit, merge);

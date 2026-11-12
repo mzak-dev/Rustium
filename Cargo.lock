@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "color-eyre",
  "crossbeam-channel",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "divan",
@@ -3156,7 +3156,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "hyper",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "raw-window-handle",
  "tracing",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-script"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "mlua",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "rustium-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "rustium-app",

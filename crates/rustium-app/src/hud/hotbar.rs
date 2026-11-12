@@ -184,7 +184,9 @@ fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
                             }
                             if response.on_hover_text(hex(color)).clicked() {
                                 let slot = hud.editor.active_slot;
-                                hud.editor.slots[slot] = *id;
+                                if let Some(entry) = hud.editor.slots.get_mut(slot) {
+                                    *entry = *id;
+                                }
                             }
                         }
                     });

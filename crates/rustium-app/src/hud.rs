@@ -558,8 +558,9 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
         .response;
 
     let pointer = ctx.input(|input| input.pointer.hover_pos());
+    // The window's edges and title strip belong to the desktop window; a page has neither.
     let resize = pointer
-        .filter(|_| !hud.maximized && response.hovered())
+        .filter(|_| crate::DESKTOP && !hud.maximized && response.hovered())
         .and_then(|position| resize_direction(screen, position));
     if let Some(direction) = resize {
         ctx.set_cursor_icon(resize_cursor(direction));
@@ -570,7 +571,8 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
     }
 
     // Title-bar zone: the strip from the top edge down to the bottom of the top islands moves the window.
-    let in_title_zone = pointer.is_some_and(|position| position.y - screen.min.y < MARGIN + TOP_BAR_HEIGHT);
+    let in_title_zone =
+        crate::DESKTOP && pointer.is_some_and(|position| position.y - screen.min.y < MARGIN + TOP_BAR_HEIGHT);
     if in_title_zone && response.hovered() && !hud.editor.is_stroking() {
         hud.editor.hover = None;
         if response.double_clicked() {

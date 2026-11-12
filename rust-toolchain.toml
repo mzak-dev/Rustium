@@ -1,4 +1,5 @@
 [toolchain]
 channel = "stable"
 components = ["clippy", "rustfmt", "rust-src", "rust-analyzer"]
-# targets = ["wasm32-unknown-unknown"]   # for WASM projects
+# The browser build (scripts/build-web.sh).
+targets = ["wasm32-unknown-unknown"]

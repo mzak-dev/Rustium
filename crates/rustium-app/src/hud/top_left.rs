@@ -65,8 +65,11 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             });
         },
     );
-    // Empty parts of the island act as the title bar.
+    // Empty parts of the island act as the title bar (of the desktop window; a page cannot be moved).
     let drag = response.response;
+    if !crate::DESKTOP {
+        return;
+    }
     if drag.double_clicked() {
         hud.send(AppCommand::ToggleMaximize);
     } else if drag.drag_started() {
@@ -141,9 +144,12 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
             if item(ui, hud.tr("menu-export-palette"), "", true).clicked() {
                 hud.send(AppCommand::ExportPalette);
             }
-            ui.separator();
-            if item(ui, hud.tr("menu-run-script"), "", true).clicked() {
-                hud.send(AppCommand::RunScript);
+            // Luau scripts are desktop only.
+            if crate::DESKTOP {
+                ui.separator();
+                if item(ui, hud.tr("menu-run-script"), "", true).clicked() {
+                    hud.send(AppCommand::RunScript);
+                }
             }
             ui.separator();
             if item(
@@ -160,9 +166,12 @@ fn main_menu(button: &egui::Response, hud: &mut Hud<'_>) {
                 hud.ui.splash_open = true;
                 hud.ui.splash_opened_at = None;
             }
-            ui.separator();
-            if item(ui, hud.tr("menu-quit"), "Alt F4", true).clicked() {
-                hud.send(AppCommand::Quit);
+            // A page is closed with its tab.
+            if crate::DESKTOP {
+                ui.separator();
+                if item(ui, hud.tr("menu-quit"), "Alt F4", true).clicked() {
+                    hud.send(AppCommand::Quit);
+                }
             }
         });
 }

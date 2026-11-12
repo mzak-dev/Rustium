@@ -10,11 +10,20 @@ publish = false
 [dependencies]
 bytemuck.workspace = true
 glam.workspace = true
+naga.workspace = true
 rustium-core.workspace = true
-pollster.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+web-time.workspace = true
 wgpu.workspace = true
+
+# Blocking on the GPU (error scopes, readbacks) is native only: a browser answers those promises only after the
+# frame yields, so the web build waits for them with `wasm-bindgen-futures` instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
 
 [dev-dependencies]
 png.workspace = true

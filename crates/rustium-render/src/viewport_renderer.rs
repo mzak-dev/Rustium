@@ -4,14 +4,18 @@ use bytemuck::{Pod, Zeroable};
 use rustium_core::{ChunkCoord, ChunkMesh, MaterialGraph, MeshVertex, Palette, Placement, Scene, ShapeId};
 use wgpu::util::DeviceExt;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::error::Error;
 use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
 use crate::material_compiler::{compile_materials, default_compiled};
 use crate::material_pipelines::{BuildContext, CompileStatus, MaterialCompiler};
 use crate::materials::{GpuMaterialTable, MaterialBuffers};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::offline::OfflineRenderer;
-use crate::path_tracer::{PathTracer, RayTracing, TraceEngine, TraceFrame, TraceImage, TraceProgress};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::path_tracer::TraceImage;
+use crate::path_tracer::{PathTracer, RayTracing, TraceEngine, TraceFrame, TraceProgress};
 use crate::taa::{self, TaaPass, TaaTargets, TaaUniform};
 
 /// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
@@ -379,6 +383,8 @@ impl ViewportRenderer {
     /// A path tracer of its own for saving images and video frames on a worker thread. It gets a snapshot of the
     /// Colors and Material constants and the shader the viewport runs right now (later Material edits do not reach
     /// it), and holds no Scene until [`OfflineRenderer::upload_scene`] is called.
+    // Native only: the offline renderer blocks on the GPU.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn offline_renderer(&self, gpu: &GpuContext) -> OfflineRenderer {
         let materials = self.materials.snapshot(gpu.device(), gpu.queue());
         let mut tracer = PathTracer::new(gpu.device(), &materials, SCENE_FORMAT, self.ray_tracing);
@@ -401,6 +407,8 @@ impl ViewportRenderer {
     /// # Errors
     ///
     /// [`Error::Readback`] when nothing has been traced yet or the GPU read fails.
+    // Native only: blocks until the GPU has finished.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read_trace_image(&self, gpu: &GpuContext) -> Result<TraceImage, Error> {
         self.tracer.read_image(gpu.device(), gpu.queue())
     }

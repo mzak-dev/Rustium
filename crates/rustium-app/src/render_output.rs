@@ -1,5 +1,10 @@
 //! Writing the traced image: ACES-tonemapped 8-bit PNG or raw linear EXR. The render jobs call this from their worker
-//! thread, which also asks for the file name through a native dialog (see `render_job`).
+//! thread, which also asks for the file name through a native dialog (see `render_job`). The browser has no render
+//! jobs, so there only the interface's handling of a [`SaveOutcome`] remains.
+#![cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "only the desktop's render jobs write images")
+)]
 
 use std::fs::File;
 use std::io::BufWriter;

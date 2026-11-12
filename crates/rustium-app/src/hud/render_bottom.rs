@@ -1,9 +1,8 @@
 //! Render mode, bottom: the Render / Pause button with Shots, and the corner hints and status readout.
 
-use std::time::Instant;
-
 use egui::{Align2, Color32, Context, FontId, Id, RichText, Sense, Stroke, StrokeKind, vec2};
 use fluent_bundle::FluentValue;
+use web_time::Instant;
 
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud, Intro, MARGIN, Place, centre_budget, corner, corner_budget, fit_key, fit_level, island};

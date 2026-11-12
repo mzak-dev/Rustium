@@ -1,10 +1,9 @@
 //! State and pure logic of Render mode: Shots, lens, light and output settings, and the [`TraceFrame`] the
 //! renderer needs. The interface for it lives in `hud/render_*.rs`.
 
-use std::time::{Duration, Instant};
-
 use glam::Vec3;
 use rustium_render::{Ground, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceProgress};
+use web_time::{Duration, Instant};
 
 use crate::camera::{OrbitCamera, Projection};
 use crate::icons::Icon;
@@ -45,6 +44,10 @@ pub(crate) const EXPOSURE_RANGE: (f32, f32) = (-6.0, 6.0);
 /// Range of the number of frames of a turntable.
 pub(crate) const TURNTABLE_RANGE: (u32, u32) = (8, 720);
 /// Frame rate of rendered videos.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "only the desktop renders videos")
+)]
 pub(crate) const VIDEO_FPS: u32 = 24;
 
 /// Which Render tool the left toolbar has active.
@@ -418,6 +421,10 @@ impl RenderState {
 
     /// The Shots the queue renders. Until the user manages Shots, the one default Shot is the working view, so the
     /// queue renders what is on screen; afterwards every Shot renders as saved.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "only the desktop runs the queue")
+    )]
     pub(crate) fn queued_shots(&self, camera: &OrbitCamera) -> Vec<Shot> {
         if self.shots_touched {
             return self.shots.clone();
@@ -540,6 +547,10 @@ impl RenderState {
 
     /// The frames of a turntable around `camera`'s target: one full turn in `turntable_frames` steps. The background
     /// is never transparent because video has no alpha.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "only the desktop renders videos")
+    )]
     pub(crate) fn turntable_frames(
         &self,
         camera: &OrbitCamera,

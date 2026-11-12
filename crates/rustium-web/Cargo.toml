@@ -1,0 +1,36 @@
+[package]
+name = "rustium-web"
+description = "Browser entry point of the Rustium voxel editor (WebAssembly, WebGPU)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is wasm32-only: on other targets this crate is empty, so `cargo build --workspace` stays native.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook.workspace = true
+rustium-app.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"] }
+tracing-web.workspace = true
+wasm-bindgen.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+# Size first: the editor downloads before it can start. The features are the ones rustc enables by default for
+# wasm32-unknown-unknown; wasm-opt must be told, or it rejects the module.
+wasm-opt = [
+    "-Oz",
+    "--enable-bulk-memory",
+    "--enable-multivalue",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+]
+
+[lints]
+workspace = true

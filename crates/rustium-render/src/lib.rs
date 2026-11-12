@@ -12,6 +12,7 @@ mod gpu_context;
 mod material_compiler;
 mod material_pipelines;
 mod materials;
+#[cfg(not(target_arch = "wasm32"))]
 mod offline;
 mod path_tracer;
 mod ray_scene;
@@ -29,6 +30,7 @@ pub use gpu_context::{
 pub use material_compiler::{CompileError, CompiledMaterials, PARAM_CAPACITY, compile_materials};
 pub use material_pipelines::CompileStatus;
 pub use materials::{GpuColor, GpuMaterialTable, MaterialBuffers};
+#[cfg(not(target_arch = "wasm32"))]
 pub use offline::OfflineRenderer;
 pub use path_tracer::{
     Ground, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame, TraceImage,

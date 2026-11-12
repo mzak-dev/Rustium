@@ -2,14 +2,14 @@
 //!
 //! A change to a Material's shape produces new WGSL. The new raster and path tracer pipelines are built on a worker
 //! thread (`wgpu::Device` is shareable; the driver's shader compile is the slow part) and swapped in between frames
-//! when they are ready. The old pipelines keep drawing meanwhile, and a shader that fails to compile leaves them in
+//! when they are ready. In the browser there are no threads and the device cannot leave the main thread: the
+//! pipelines are created at once (the browser compiles them in its GPU process) and the error scope is awaited on the
+//! event loop instead. The old pipelines keep drawing meanwhile, and a shader that fails to compile leaves them in
 //! place and is reported through [`CompileStatus::Error`]. A change to a number only rewrites the parameter buffer.
 
 use std::sync::mpsc;
-use std::thread;
 
 use bytemuck::Zeroable;
-use wgpu::naga;
 
 use crate::material_compiler::{CompileError, CompiledMaterials, assemble};
 use crate::materials::{GpuMaterialTable, MaterialBuffers};
@@ -164,15 +164,39 @@ impl MaterialCompiler {
         self.status = CompileStatus::Compiling;
         let context = context.clone();
         let sender = self.sender.clone();
-        let spawned = thread::Builder::new()
-            .name("material-compile".to_owned())
-            .spawn(move || {
-                let result = build(&context, &source);
-                let _ = sender.send(Message { generation, result });
-            });
-        if let Err(error) = spawned {
-            self.pending = None;
-            self.status = CompileStatus::Error(format!("cannot start the shader compiler thread: {error}"));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let spawned = std::thread::Builder::new()
+                .name("material-compile".to_owned())
+                .spawn(move || {
+                    let result = build(&context, &source);
+                    let _ = sender.send(Message { generation, result });
+                });
+            if let Err(error) = spawned {
+                self.pending = None;
+                self.status = CompileStatus::Error(format!("cannot start the shader compiler thread: {error}"));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        match build_in_scope(&context, &source) {
+            Ok((built, scope)) => {
+                // Pop now, so the scope comes off the device's stack before anything else this frame pushes one; only
+                // the answer is awaited.
+                let verdict = scope.pop();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let result = match verdict.await {
+                        Some(error) => Err(error.to_string()),
+                        None => Ok(built),
+                    };
+                    let _ = sender.send(Message { generation, result });
+                });
+            }
+            Err(error) => {
+                let _ = sender.send(Message {
+                    generation,
+                    result: Err(error),
+                });
+            }
         }
     }
 
@@ -209,8 +233,19 @@ impl MaterialCompiler {
     }
 }
 
-/// Validates the shaders with naga (for readable messages), then builds the pipelines inside an error scope.
+/// Builds the pipelines and waits for the driver's verdict.
+#[cfg(not(target_arch = "wasm32"))]
 fn build(context: &BuildContext, material_source: &str) -> Result<Built, String> {
+    let (built, scope) = build_in_scope(context, material_source)?;
+    if let Some(error) = pollster::block_on(scope.pop()) {
+        return Err(error.to_string());
+    }
+    Ok(built)
+}
+
+/// Validates the shaders with naga (for readable messages), then builds the pipelines inside an error scope. The
+/// pipelines are usable only if the returned scope pops without an error.
+fn build_in_scope(context: &BuildContext, material_source: &str) -> Result<(Built, wgpu::ErrorScopeGuard), String> {
     validate(
         "raster",
         &raster_shader_source(material_source),
@@ -238,14 +273,12 @@ fn build(context: &BuildContext, material_source: &str) -> Result<Built, String>
         material_source,
         context.engine,
     );
-    if let Some(error) = pollster::block_on(scope.pop()) {
-        return Err(error.to_string());
-    }
-    Ok(Built {
+    let built = Built {
         raster,
         raster_mirrored,
         compute,
-    })
+    };
+    Ok((built, scope))
 }
 
 /// Parses and validates `source`; the error is the compiler's message with the offending line.

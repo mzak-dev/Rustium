@@ -58,6 +58,10 @@ fn outline_width(height: u32) -> u32 {
 #[derive(Debug)]
 struct Targets {
     size: (u32, u32),
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "only the native read-back uses it")
+    )]
     resolved: wgpu::Texture,
     /// Demodulate: accumulation `i` into scratch 0.
     demodulate: [wgpu::BindGroup; 2],
@@ -163,6 +167,10 @@ impl Resolver {
     }
 
     /// The finished picture, once [`Resolver::bind`] has been called.
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "only the native read-back uses it")
+    )]
     pub(crate) fn resolved(&self) -> Option<&wgpu::Texture> {
         self.targets.as_ref().map(|targets| &targets.resolved)
     }

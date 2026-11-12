@@ -15,9 +15,6 @@ use crate::bridge::Bridge;
 use crate::error::Error;
 use crate::tools::Tools;
 
-/// The default port of the MCP endpoint.
-pub const DEFAULT_PORT: u16 = 7420;
-
 /// A running MCP server: streamable HTTP on `127.0.0.1`, served from its own thread.
 ///
 /// The server only ever talks to the editor through the [`Bridge`]. Dropping it (or calling

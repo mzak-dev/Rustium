@@ -3,20 +3,30 @@
 //! Every read and write runs on the `io-worker` thread (dialogs on short-lived threads of their own), so the
 //! interface keeps drawing. Jobs go in through a channel, outcomes come back through another and wake the event loop.
 //! A Scene is cloned on the UI thread (shapes and chunks are shared, so that is cheap) and encoded on the worker.
+//!
+//! The browser has no disk and no threads. Jobs run at once when they are submitted. "Open" and the imports use the
+//! browser's file picker, which hands over a copy of the file: it is kept under its name until its job reads it.
+//! Saving and exporting download the file; the dialog-free save names it after the document. Autosave and recovery
+//! are desktop only.
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Cursor, Write};
+use std::io::Cursor;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 use crossbeam_channel::{Receiver, Sender};
 use rustium_core::{
     FileError, NodeId, PAL_MAX_COLORS, Scene, decode_ruv, encode_ruv, export_vox, import_vox, parse_pal, write_pal,
 };
-use tracing::{error, info, warn};
+#[cfg(not(target_arch = "wasm32"))]
+use tracing::error;
+use tracing::{info, warn};
+use web_time::{Duration, Instant};
 
 use crate::recent::{self, RecentFile, RecentItem};
 use crate::settings::data_dir;
@@ -150,6 +160,7 @@ pub(crate) enum IoOutcome {
 
 /// Handle to the IO thread.
 pub(crate) struct Io {
+    #[cfg(not(target_arch = "wasm32"))]
     jobs: Sender<IoJob>,
     outcome_sender: Sender<IoOutcome>,
     outcomes: Receiver<IoOutcome>,
@@ -169,37 +180,35 @@ impl std::fmt::Debug for Io {
 impl Io {
     /// Starts the IO thread; `wake` is called after every outcome so the event loop redraws.
     pub(crate) fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
-        let (jobs, job_receiver) = crossbeam_channel::unbounded::<IoJob>();
         let (outcome_sender, outcomes) = crossbeam_channel::unbounded::<IoOutcome>();
-        let worker_outcomes = outcome_sender.clone();
-        let worker_wake = Arc::clone(&wake);
         let quitting = Arc::new(AtomicBool::new(false));
         let autosave_lock = Arc::new(Mutex::new(()));
-        let worker_quitting = Arc::clone(&quitting);
-        let worker_lock = Arc::clone(&autosave_lock);
-        let spawned = std::thread::Builder::new().name("io-worker".to_owned()).spawn(move || {
-            for job in job_receiver {
-                let outcome = if let IoJob::Autosave { .. } = job {
-                    let _guard = worker_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if worker_quitting.load(Ordering::SeqCst) {
-                        None
+        #[cfg(not(target_arch = "wasm32"))]
+        let jobs = {
+            let (jobs, job_receiver) = crossbeam_channel::unbounded::<IoJob>();
+            let worker_outcomes = outcome_sender.clone();
+            let worker_wake = Arc::clone(&wake);
+            let worker_quitting = Arc::clone(&quitting);
+            let worker_lock = Arc::clone(&autosave_lock);
+            let spawned = std::thread::Builder::new().name("io-worker".to_owned()).spawn(move || {
+                for job in job_receiver {
+                    if let IoJob::Autosave { .. } = job {
+                        let _guard = worker_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !worker_quitting.load(Ordering::SeqCst) {
+                            deliver(&worker_outcomes, &*worker_wake, job);
+                        }
                     } else {
-                        run(job)
+                        deliver(&worker_outcomes, &*worker_wake, job);
                     }
-                } else {
-                    run(job)
-                };
-                if let Some(outcome) = outcome {
-                    // A closed channel means the application is shutting down.
-                    let _ = worker_outcomes.send(outcome);
-                    worker_wake();
                 }
+            });
+            if let Err(error) = spawned {
+                error!(%error, "cannot start the IO thread");
             }
-        });
-        if let Err(error) = spawned {
-            error!(%error, "cannot start the IO thread");
-        }
+            jobs
+        };
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             jobs,
             outcome_sender,
             outcomes,
@@ -222,18 +231,25 @@ impl Io {
         }
     }
 
-    /// Queues a job.
+    /// Queues a job. In the browser it runs at once.
     pub(crate) fn submit(&self, job: IoJob) {
+        #[cfg(not(target_arch = "wasm32"))]
         if self.jobs.send(job).is_err() {
             error!("the IO thread is gone");
         }
+        #[cfg(target_arch = "wasm32")]
+        deliver(&self.outcome_sender, &*self.wake, job);
     }
 
     /// Takes the outcomes that arrived since the last call.
     pub(crate) fn poll(&self) -> Vec<IoOutcome> {
         self.outcomes.try_iter().collect()
     }
+}
 
+/// Native dialogs, each on a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+impl Io {
     /// Runs a native dialog on its own thread; a chosen file becomes a job, a dismissed dialog becomes
     /// [`IoOutcome::Cancelled`] (with `document` when it was a Save dialog for that document).
     fn dialog(&self, document: Option<u64>, pick: impl FnOnce() -> Option<IoJob> + Send + 'static) {
@@ -321,6 +337,128 @@ impl Io {
     }
 }
 
+/// The browser's file picker for opening and importing; saving and exporting download the file under the name the save
+/// dialog would have suggested.
+#[cfg(target_arch = "wasm32")]
+impl Io {
+    /// Asks for a file with `extensions`; the picked file becomes the job `make` builds for it.
+    fn pick(
+        &self,
+        title: String,
+        filter: String,
+        extensions: Vec<&'static str>,
+        make: impl FnOnce(PathBuf) -> IoJob + 'static,
+    ) {
+        let outcomes = self.outcome_sender.clone();
+        let wake = Arc::clone(&self.wake);
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some((name, bytes)) = crate::web::pick_file(title, filter, extensions).await {
+                let path = PathBuf::from(name);
+                picked::keep(path.clone(), bytes);
+                deliver(&outcomes, &*wake, make(path));
+            } else {
+                let _ = outcomes.send(IoOutcome::Cancelled(None));
+                wake();
+            }
+        });
+    }
+
+    /// Asks for a `.ruv` file to open.
+    pub(crate) fn pick_open(&self, title: String, scene_label: String) {
+        self.pick(title, scene_label, vec![EXTENSION], |path| IoJob::Load { path });
+    }
+
+    /// Asks for a `.vox` file to import.
+    pub(crate) fn pick_import_vox(&self, title: String) {
+        self.pick(title, "MagicaVoxel".to_owned(), vec!["vox"], |path| IoJob::ImportVox {
+            path,
+        });
+    }
+
+    /// Asks for a palette file to import.
+    pub(crate) fn pick_import_palette(&self, title: String) {
+        self.pick(title, "Palette".to_owned(), vec!["pal", "png"], |path| {
+            IoJob::ImportPalette { path }
+        });
+    }
+
+    /// Downloads the Scene as a `.ruv` file.
+    pub(crate) fn pick_save(&self, _title: String, _scene_label: String, start: SaveStart, job: SaveJob) {
+        let path = with_default_extension(PathBuf::from(start.file_name), EXTENSION);
+        self.submit(job.into_job(path));
+    }
+
+    /// Downloads the Scene as a `.vox` file.
+    pub(crate) fn pick_export_vox(&self, _title: String, start: SaveStart, scene: Box<Scene>) {
+        let path = PathBuf::from(start.file_name).with_extension("vox");
+        self.submit(IoJob::ExportVox { path, scene });
+    }
+
+    /// Downloads the palette as a `.pal` file.
+    pub(crate) fn pick_export_palette(&self, _title: String, start: SaveStart, colors: Vec<[u8; 3]>) {
+        let path = PathBuf::from(start.file_name).with_extension("pal");
+        self.submit(IoJob::ExportPalette { path, colors });
+    }
+}
+
+/// Runs `job` and reports its outcome, if it has one.
+fn deliver(outcomes: &Sender<IoOutcome>, wake: &(dyn Fn() + Send + Sync), job: IoJob) {
+    if let Some(outcome) = run(job) {
+        // A closed channel means the application is shutting down.
+        let _ = outcomes.send(outcome);
+        wake();
+    }
+}
+
+/// Files the browser's picker handed over, kept by name until the job that reads them runs.
+#[cfg(target_arch = "wasm32")]
+mod picked {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static FILES: RefCell<HashMap<PathBuf, Vec<u8>>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) fn keep(path: PathBuf, bytes: Vec<u8>) {
+        FILES.with_borrow_mut(|files| files.insert(path, bytes));
+    }
+
+    /// Hands the file over once; a second read finds nothing.
+    pub(super) fn take(path: &Path) -> Option<Vec<u8>> {
+        FILES.with_borrow_mut(|files| files.remove(path))
+    }
+}
+
+/// Reads a file for a job: from disk, or in the browser the copy its picker handed over.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    fs::read(path)
+}
+
+/// Reads a file for a job: from disk, or in the browser the copy its picker handed over.
+#[cfg(target_arch = "wasm32")]
+fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    picked::take(path).ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+/// Writes a file for a job: atomically on disk, or in the browser as a download named after the file.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic(path, bytes)
+}
+
+/// Writes a file for a job: atomically on disk, or in the browser as a download named after the file.
+#[cfg(target_arch = "wasm32")]
+fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path
+        .file_name()
+        .map_or_else(|| "rustium".into(), |name| name.to_string_lossy());
+    crate::web::download(&name, bytes).map_err(|report| std::io::Error::other(format!("{report:#}")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn save_dialog(title: String, label: &str, extension: &str, start: &SaveStart) -> Option<PathBuf> {
     let mut dialog = rfd::FileDialog::new()
         .set_title(title)
@@ -336,6 +474,7 @@ fn save_dialog(title: String, label: &str, extension: &str, start: &SaveStart) -
 #[derive(Debug, Clone)]
 pub(crate) struct SaveStart {
     pub(crate) file_name: String,
+    #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "a download has no folder"))]
     pub(crate) directory: Option<PathBuf>,
 }
 
@@ -413,8 +552,9 @@ fn newest_untitled_recovery(dir: &Path) -> Option<PathBuf> {
 /// The error of the failed rename.
 pub(crate) fn shelve_recovery(recovery: &Path) -> std::io::Result<PathBuf> {
     let dir = recovery.parent().map_or_else(PathBuf::new, Path::to_path_buf);
-    let seconds = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    // `web_time`, because `std::time::SystemTime::now` panics in the browser.
+    let seconds = web_time::SystemTime::now()
+        .duration_since(web_time::SystemTime::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
     let mut target = dir.join(format!("untitled-{seconds}.ruv.recovery"));
     let mut number = 1;
@@ -549,6 +689,7 @@ impl Document {
 }
 
 /// Writes `bytes` to a temporary file beside `path` and renames it over `path`, so a crash never leaves half a file.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
@@ -644,7 +785,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
             }
         },
         IoJob::ImportVox { path } => {
-            let result = fs::read(&path)
+            let result = read_file(&path)
                 .map_err(|error| error.to_string())
                 .and_then(|bytes| import_vox(&bytes, &file_stem(&path)).map_err(|error| error.to_string()));
             match result {
@@ -667,7 +808,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
             obsolete,
         } => match encode_ruv(&scene)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| write_atomic(&path, &bytes).map_err(|error| error.to_string()))
+            .and_then(|bytes| write_file(&path, &bytes).map_err(|error| error.to_string()))
         {
             Ok(()) => {
                 info!(path = %path.display(), "saved scene");
@@ -702,19 +843,19 @@ fn run(job: IoJob) -> Option<IoOutcome> {
         },
         IoJob::Autosave { path, scene, revision } => match encode_ruv(&scene)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| write_atomic(&path, &bytes).map_err(|error| error.to_string()))
+            .and_then(|bytes| write_file(&path, &bytes).map_err(|error| error.to_string()))
         {
             Ok(()) => IoOutcome::Autosaved(revision),
             Err(error) => failure(Operation::Autosave, &path, error),
         },
         IoJob::ExportVox { path, scene } => match export_vox(&scene)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| write_atomic(&path, &bytes).map_err(|error| error.to_string()))
+            .and_then(|bytes| write_file(&path, &bytes).map_err(|error| error.to_string()))
         {
             Ok(()) => IoOutcome::Exported(path),
             Err(error) => failure(Operation::Export, &path, error),
         },
-        IoJob::ExportPalette { path, colors } => match write_atomic(&path, write_pal(&colors).as_bytes()) {
+        IoJob::ExportPalette { path, colors } => match write_file(&path, write_pal(&colors).as_bytes()) {
             Ok(()) => IoOutcome::Exported(path),
             Err(error) => failure(Operation::Export, &path, error),
         },
@@ -744,13 +885,13 @@ fn run(job: IoJob) -> Option<IoOutcome> {
 }
 
 fn read_scene(path: &Path) -> Result<Scene, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = read_file(path).map_err(|error| error.to_string())?;
     decode_ruv(&bytes).map_err(|error| error.to_string())
 }
 
 /// Reads a JASC-PAL file, or the pixels of a PNG (row by row, at most 256 of them).
 fn read_palette(path: &Path) -> Result<Vec<[u8; 3]>, String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let bytes = read_file(path).map_err(|error| error.to_string())?;
     let is_png = path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("png"));

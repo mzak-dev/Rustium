@@ -1,16 +1,21 @@
 //! Progressive compute-shader path tracer (ADR 0001): traverses the chunk grid uploaded by [`TraceScene`],
 //! accumulates samples into an `Rgba32Float` texture and tonemaps the result into the viewport.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use rustium_core::{MaterialGraph, NodeId};
+#[cfg(not(target_arch = "wasm32"))]
+use rustium_core::MaterialGraph;
+use rustium_core::NodeId;
 use tracing::warn;
+use web_time::{Duration, Instant};
 
 use crate::error::Error;
-use crate::material_compiler::{CompileError, compile_materials, default_compiled};
+use crate::material_compiler::default_compiled;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::material_compiler::{CompileError, compile_materials};
 use crate::materials::MaterialBuffers;
 use crate::ray_scene::RayScene;
 use crate::resolve::{self, ResolveInput, Resolver};
@@ -524,6 +529,10 @@ pub fn check_image_size(device: &wgpu::Device, size: (u32, u32)) -> Result<(), E
 
 /// How many rows of `padded` bytes one read-back staging buffer holds: a quarter of the device's buffer limit, at
 /// most 64 MiB, at least one row, at most the image.
+#[cfg_attr(
+    target_arch = "wasm32",
+    expect(dead_code, reason = "only the native read-back uses it")
+)]
 fn readback_band_rows(max_buffer_size: u64, padded: u32, height: u32) -> u32 {
     let limit = (max_buffer_size / 4).min(64 << 20).max(u64::from(padded));
     u32::try_from(limit / u64::from(padded))
@@ -791,6 +800,8 @@ impl PathTracer {
     /// # Errors
     ///
     /// [`CompileError`] when the graphs do not compile to valid WGSL.
+    // Native only: blocks on the GPU, which a browser cannot do on its main thread.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn set_materials(
         &mut self,
         device: &wgpu::Device,
@@ -951,6 +962,8 @@ impl PathTracer {
     /// # Errors
     ///
     /// [`Error::Readback`] when the image cannot be copied back from the GPU. A cancelled render is `Ok(None)`.
+    // Native only: blocks on the GPU, which a browser cannot do on its main thread.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render_to_image(
         &mut self,
         device: &wgpu::Device,
@@ -1186,6 +1199,8 @@ impl PathTracer {
     /// # Errors
     ///
     /// [`Error::Readback`] when nothing has been rendered yet or the GPU read fails.
+    // Native only: blocks on the GPU, which a browser cannot do on its main thread.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn read_image(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<TraceImage, Error> {
         let accumulation = self.accumulation.as_ref().ok_or(Error::Readback)?;
         let resolved = self.resolver.resolved().ok_or(Error::Readback)?;

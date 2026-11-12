@@ -25,18 +25,36 @@
 //! server.stop();
 //! # Ok::<(), rustium_mcp::Error>(())
 //! ```
+//!
+//! # WebAssembly
+//!
+//! A browser cannot listen on a port, so on `wasm32` the crate offers only the [`Permission`] switches and
+//! [`DEFAULT_PORT`], which the editor's settings store either way.
 #![warn(clippy::panic, clippy::expect_used)]
 
+#[cfg(not(target_arch = "wasm32"))]
 mod bridge;
+#[cfg(not(target_arch = "wasm32"))]
 mod error;
 mod permission;
+#[cfg(not(target_arch = "wasm32"))]
 mod server;
+#[cfg(not(target_arch = "wasm32"))]
 mod stdio;
+#[cfg(not(target_arch = "wasm32"))]
 mod tools;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use bridge::{Bridge, BrushTool, Envelope, FaceDirection, Reply, Request, VoxelWrite, Waker, channel};
+#[cfg(not(target_arch = "wasm32"))]
 pub use error::Error;
 pub use permission::{Permission, Permissions, SharedPermissions};
-pub use server::{DEFAULT_PORT, Server};
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::Server;
+#[cfg(not(target_arch = "wasm32"))]
 pub use stdio::run_stdio_bridge;
+#[cfg(not(target_arch = "wasm32"))]
 pub use tools::Tools;
+
+/// The port the editor serves MCP on unless the settings say otherwise.
+pub const DEFAULT_PORT: u16 = 7420;

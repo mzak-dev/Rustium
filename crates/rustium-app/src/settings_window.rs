@@ -25,6 +25,7 @@ pub(crate) enum Section {
 }
 
 impl Section {
+    #[cfg(not(target_arch = "wasm32"))]
     const ALL: [Self; 6] = [
         Self::General,
         Self::Interface,
@@ -32,6 +33,15 @@ impl Section {
         Self::Input,
         Self::Performance,
         Self::Mcp,
+    ];
+    /// A page cannot serve MCP, so the browser has no MCP section.
+    #[cfg(target_arch = "wasm32")]
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Interface,
+        Self::Viewport,
+        Self::Input,
+        Self::Performance,
     ];
 
     fn title_key(self) -> &'static str {
@@ -559,22 +569,25 @@ fn general(ui: &mut Ui, hud: &mut Hud<'_>) {
             );
         },
     );
-    row(
-        ui,
-        &i18n.tr("setting-autosave"),
-        Some(&i18n.tr("setting-autosave-hint")),
-        |ui| {
-            widgets::switch(ui, &mut settings.autosave, true);
-        },
-    );
-    row(ui, &i18n.tr("setting-autosave-interval"), None, |ui| {
-        number_field(
+    // The browser keeps no recovery copies (see `files`).
+    if crate::DESKTOP {
+        row(
             ui,
-            DragValue::new(&mut settings.autosave_minutes)
-                .range(1..=60)
-                .suffix(" min"),
+            &i18n.tr("setting-autosave"),
+            Some(&i18n.tr("setting-autosave-hint")),
+            |ui| {
+                widgets::switch(ui, &mut settings.autosave, true);
+            },
         );
-    });
+        row(ui, &i18n.tr("setting-autosave-interval"), None, |ui| {
+            number_field(
+                ui,
+                DragValue::new(&mut settings.autosave_minutes)
+                    .range(1..=60)
+                    .suffix(" min"),
+            );
+        });
+    }
     row(ui, &i18n.tr("setting-undo-steps"), None, |ui| {
         number_field(ui, DragValue::new(&mut settings.undo_steps).range(10..=2000));
     });
@@ -762,63 +775,66 @@ fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
             devices.push(&choice.name);
         }
     }
-    row(
-        ui,
-        &i18n.tr("setting-device"),
-        Some(&i18n.tr("settings-restart")),
-        |ui| {
-            let automatic = i18n.tr("backend-automatic");
-            let shown = settings.gpu_adapter.clone().unwrap_or_else(|| automatic.clone());
-            ComboBox::from_id_salt("gpu-device")
-                .selected_text(shown)
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut settings.gpu_adapter, None, automatic);
-                    for name in &devices {
-                        ui.selectable_value(&mut settings.gpu_adapter, Some((*name).to_owned()), *name);
-                    }
+    // The browser chooses the graphics device and API itself.
+    if crate::DESKTOP {
+        row(
+            ui,
+            &i18n.tr("setting-device"),
+            Some(&i18n.tr("settings-restart")),
+            |ui| {
+                let automatic = i18n.tr("backend-automatic");
+                let shown = settings.gpu_adapter.clone().unwrap_or_else(|| automatic.clone());
+                ComboBox::from_id_salt("gpu-device")
+                    .selected_text(shown)
+                    .width(220.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut settings.gpu_adapter, None, automatic);
+                        for name in &devices {
+                            ui.selectable_value(&mut settings.gpu_adapter, Some((*name).to_owned()), *name);
+                        }
+                    })
+                    .response
+                    .on_hover_text(format!("{}: {adapter}", i18n.tr("setting-device-current")));
+            },
+        );
+        row(
+            ui,
+            &i18n.tr("setting-backend"),
+            Some(&i18n.tr("settings-restart")),
+            |ui| {
+                let before = settings.backend;
+                let work_in_progress = i18n.tr("backend-work-in-progress");
+                widgets::segmented_with_unavailable(ui, &mut settings.backend, &backends, true, |backend| {
+                    let available = rustium_render::GraphicsBackend::from(backend).is_available();
+                    (!available).then(|| work_in_progress.clone())
+                });
+                let wanted = rustium_render::GraphicsBackend::from(settings.backend);
+                if settings.backend != before
+                    && let Some(name) = &settings.gpu_adapter
+                    && !adapters
+                        .iter()
+                        .any(|choice| choice.name == *name && wanted.offers(choice))
+                {
+                    settings.gpu_adapter = None;
+                }
+            },
+        );
+        row(
+            ui,
+            &i18n.tr("setting-pt-device"),
+            Some(&i18n.tr("setting-pt-device-hint")),
+            |ui| {
+                ui.add_enabled_ui(false, |ui| {
+                    ComboBox::from_id_salt("pt-device")
+                        .selected_text(i18n.tr("pt-device-same"))
+                        .width(220.0)
+                        .show_ui(ui, |_| {});
                 })
                 .response
-                .on_hover_text(format!("{}: {adapter}", i18n.tr("setting-device-current")));
-        },
-    );
-    row(
-        ui,
-        &i18n.tr("setting-backend"),
-        Some(&i18n.tr("settings-restart")),
-        |ui| {
-            let before = settings.backend;
-            let work_in_progress = i18n.tr("backend-work-in-progress");
-            widgets::segmented_with_unavailable(ui, &mut settings.backend, &backends, true, |backend| {
-                let available = rustium_render::GraphicsBackend::from(backend).is_available();
-                (!available).then(|| work_in_progress.clone())
-            });
-            let wanted = rustium_render::GraphicsBackend::from(settings.backend);
-            if settings.backend != before
-                && let Some(name) = &settings.gpu_adapter
-                && !adapters
-                    .iter()
-                    .any(|choice| choice.name == *name && wanted.offers(choice))
-            {
-                settings.gpu_adapter = None;
-            }
-        },
-    );
-    row(
-        ui,
-        &i18n.tr("setting-pt-device"),
-        Some(&i18n.tr("setting-pt-device-hint")),
-        |ui| {
-            ui.add_enabled_ui(false, |ui| {
-                ComboBox::from_id_salt("pt-device")
-                    .selected_text(i18n.tr("pt-device-same"))
-                    .width(220.0)
-                    .show_ui(ui, |_| {});
-            })
-            .response
-            .on_disabled_hover_text(i18n.tr("setting-pt-device-hint"));
-        },
-    );
+                .on_disabled_hover_text(i18n.tr("setting-pt-device-hint"));
+            },
+        );
+    }
     let ray_hint = i18n.tr(if hud.ray_query_supported {
         "setting-ray-tracing-hint"
     } else {

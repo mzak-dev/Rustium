@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# The editor is a library so that the desktop binary below and the browser build (crates/rustium-web) share it.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "rustium"
 path = "src/main.rs"
@@ -14,7 +18,6 @@ path = "src/main.rs"
 [dependencies]
 color-eyre.workspace = true
 crossbeam-channel.workspace = true
-directories.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true
@@ -22,23 +25,49 @@ exr.workspace = true
 fluent-bundle.workspace = true
 glam.workspace = true
 png.workspace = true
-pollster.workspace = true
 rfd.workspace = true
 rustium-core.workspace = true
 rustium-mcp.workspace = true
 rustium-platform.workspace = true
 rustium-render.workspace = true
-rustium-script.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tracing-appender.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"] }
 unic-langid.workspace = true
+web-time.workspace = true
 wgpu.workspace = true
 winit.workspace = true
+
+# The desktop editor: settings and log files in the data directory, the native clipboard, Luau scripts. (rustium-mcp
+# builds its server only for native targets.)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories.workspace = true
+egui-winit = { workspace = true, features = ["clipboard", "wayland", "x11"] }
+pollster.workspace = true
+rustium-script.workspace = true
+tracing-appender.workspace = true
+
+# The browser build (see crates/rustium-web): the canvas, browser storage and downloads.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys.workspace = true
+tracing-web.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "Element",
+    "HtmlAnchorElement",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "Storage",
+    "Url",
+    "Window",
+] }
 
 [dev-dependencies]
 fluent-syntax.workspace = true

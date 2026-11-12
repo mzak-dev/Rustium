@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rustium</title>
+  <meta name="description" content="Rustium, a voxel model editor written in Rust, running in the browser with WebGPU.">
+  <link rel="icon" type="image/png" href="logo.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #1a1d22;
+      --text: #e6e9ee;
+      --muted: #a6afbc;
+      --accent: #ee6c3e;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: var(--background);
+      color: var(--text);
+      font: 15px/1.5 system-ui, sans-serif;
+    }
+    /* winit sizes the drawing buffer from the canvas's CSS size. */
+    #rustium {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      outline: none;
+      touch-action: none;
+    }
+    .notice {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-content: center;
+      gap: 12px;
+      padding: 16px;
+      text-align: center;
+      background: var(--background);
+    }
+    .notice img { width: 96px; margin: 0 auto; }
+    .notice p { margin: 0; max-width: 32rem; color: var(--muted); }
+    .notice a { color: var(--accent); }
+    #loading[hidden], #unsupported[hidden] { display: none; }
+    #rustium-error {
+      display: none;
+      white-space: pre-wrap;
+      font-family: ui-monospace, monospace;
+      font-size: 13px;
+      text-align: left;
+    }
+    #rustium-error[data-visible="true"] { display: grid; }
+  </style>
+</head>
+<body>
+  <canvas id="rustium" tabindex="0"></canvas>
+
+  <div id="loading" class="notice">
+    <img src="logo.png" alt="Rustium logo">
+    <p>Loading Rustium…</p>
+  </div>
+
+  <div id="unsupported" class="notice" hidden>
+    <img src="logo.png" alt="Rustium logo">
+    <p><strong>This browser does not offer WebGPU, which Rustium needs.</strong></p>
+    <p>Try a recent Chrome, Edge or Safari, or a Firefox with WebGPU enabled, or
+      <a href="https://github.com/mzak-dev/Rustium/releases">download the desktop app</a>.</p>
+    <p lang="pl">Ta przeglądarka nie obsługuje WebGPU, którego wymaga Rustium.</p>
+  </div>
+
+  <div id="rustium-error" class="notice" role="alert"></div>
+
+  <script type="module">
+    const loading = document.getElementById("loading");
+    if (!("gpu" in navigator)) {
+      loading.hidden = true;
+      document.getElementById("unsupported").hidden = false;
+    } else {
+      // Instantiating the module runs Rustium's start function, which takes over the canvas.
+      const { default: init } = await import("./pkg/rustium_web.js");
+      try {
+        await init();
+      } finally {
+        loading.hidden = true;
+      }
+      document.getElementById("rustium").focus();
+    }
+  </script>
+</body>
+</html>

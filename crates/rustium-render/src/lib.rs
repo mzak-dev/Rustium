@@ -16,6 +16,7 @@ mod offline;
 mod path_tracer;
 mod ray_scene;
 mod resolve;
+mod taa;
 mod trace_scene;
 mod viewport_renderer;
 

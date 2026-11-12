@@ -9,9 +9,10 @@ use crate::glass_pass::{GlassPass, GlassRect};
 use crate::gpu_context::GpuContext;
 use crate::material_compiler::{compile_materials, default_compiled};
 use crate::material_pipelines::{BuildContext, CompileStatus, MaterialCompiler};
-use crate::materials::MaterialBuffers;
+use crate::materials::{MaterialBuffers, is_transparent};
 use crate::offline::OfflineRenderer;
 use crate::path_tracer::{PathTracer, RayTracing, TraceEngine, TraceFrame, TraceImage, TraceProgress};
+use crate::taa::{self, TaaPass, TaaTargets, TaaUniform};
 
 /// Camera and lighting data shared by every scene shader (`shaders/common.wgsl`).
 #[repr(C)]
@@ -118,8 +119,35 @@ struct SceneTargets {
     size: (u32, u32),
     multisampled: Option<wgpu::TextureView>,
     color: wgpu::TextureView,
+    /// Where the scene pass resolves to while temporal anti-aliasing is on; the TAA pass turns it into `color`.
+    raw: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
+
+/// What the temporal anti-aliasing of the raster viewport remembers between frames.
+#[derive(Debug)]
+struct TaaState {
+    pass: TaaPass,
+    /// Frames drawn with TAA so far; moves the jitter and the dither pattern.
+    frame: u32,
+    /// Frames since the camera or the Scene last changed; the image has settled after [`SETTLE_FRAMES`].
+    still_frames: u32,
+    /// Whether the last frame was resolved with TAA (so the history holds it).
+    was_active: bool,
+    /// The view-projection of the last frame, without jitter, and the eye.
+    previous: Option<([[f32; 4]; 4], [f32; 4])>,
+    /// Edits or Material changes since the last frame: the history is trusted less for one frame.
+    edited: bool,
+}
+
+/// Weight of the new frame in the history blend: about the last ten frames count.
+const TAA_BLEND: f32 = 0.1;
+/// The same right after an edit: the changed pixels settle fast and stale ones fade.
+const TAA_BLEND_AFTER_EDIT: f32 = 0.35;
+/// Frames the image needs to settle after a change (the dither pattern repeats every few frames).
+const SETTLE_FRAMES: u32 = 24;
+/// An eye farther from last frame's eye than this (in voxels) is a camera cut: the history is dropped.
+const TAA_CUT_DISTANCE: f32 = 48.0;
 
 #[derive(Debug)]
 struct Pipelines {
@@ -150,6 +178,10 @@ pub struct ViewportRenderer {
     tracer: PathTracer,
     /// The traversal the user asked for; applies to the viewport tracer and to offline renderers.
     ray_tracing: RayTracing,
+    dither_buffer: wgpu::Buffer,
+    taa: TaaState,
+    /// Whether a Color of the Palette uses a Material that lets light through (glass, haze).
+    has_transparency: bool,
 }
 
 impl ViewportRenderer {
@@ -163,6 +195,12 @@ impl ViewportRenderer {
             mapped_at_creation: false,
         });
         let materials = MaterialBuffers::new(device);
+        let dither_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dither uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let scene_layout = create_scene_layout(device);
         let scene_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene bind group"),
@@ -175,6 +213,10 @@ impl ViewportRenderer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: materials.colors().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dither_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 9,
@@ -210,6 +252,16 @@ impl ViewportRenderer {
             glass,
             tracer,
             ray_tracing: RayTracing::Auto,
+            dither_buffer,
+            taa: TaaState {
+                pass: TaaPass::new(device, SCENE_FORMAT, sample_count > 1),
+                frame: 0,
+                still_frames: 0,
+                was_active: false,
+                previous: None,
+                edited: false,
+            },
+            has_transparency: false,
         }
     }
 
@@ -233,6 +285,8 @@ impl ViewportRenderer {
         let context = self.build_context(gpu);
         self.compiler.restart_pending(&context);
         self.targets = None;
+        self.taa.pass = TaaPass::new(gpu.device(), SCENE_FORMAT, sample_count > 1);
+        self.taa.was_active = false;
     }
 
     /// Uploads the Colors (sRGB converted to linear) and compiles the Material graphs for the raster pass and the
@@ -244,9 +298,19 @@ impl ViewportRenderer {
     /// in. A graph that does not compile leaves the old pipelines in place and shows [`CompileStatus::Error`].
     pub fn set_materials(&mut self, gpu: &GpuContext, palette: &Palette, graphs: &[MaterialGraph]) {
         self.materials.write_colors(gpu.queue(), palette, graphs);
+        self.has_transparency = palette
+            .iter()
+            .any(|(_, color)| graphs.get(color.graph as usize).is_some_and(is_transparent));
+        self.taa.edited = true;
         let context = self.build_context(gpu);
         self.compiler.request(gpu.queue(), &context, compile_materials(graphs));
         self.tracer.restart();
+    }
+
+    /// Whether the raster image is still settling: glass and haze are dithered and averaged over a few frames, so the
+    /// app should keep drawing until this is `false` (it is `false` whenever nothing transparent is on screen).
+    pub fn is_settling(&self) -> bool {
+        self.has_transparency && self.taa.was_active && self.taa.still_frames < SETTLE_FRAMES
     }
 
     /// Whether the Material pipelines match the Scene's graphs (the editor's "Compiled" chip).
@@ -336,6 +400,7 @@ impl ViewportRenderer {
         let Ok(index_count) = u32::try_from(mesh.indices.len()) else {
             return;
         };
+        self.taa.edited = true;
         if index_count == 0 {
             if let Some(chunks) = self.chunks.get_mut(&shape) {
                 chunks.remove(&coord);
@@ -365,6 +430,7 @@ impl ViewportRenderer {
 
     /// Drops every chunk mesh.
     pub fn clear_chunks(&mut self) {
+        self.taa.edited = true;
         self.chunks.clear();
     }
 
@@ -383,11 +449,58 @@ impl ViewportRenderer {
             self.glass.resize(gpu.device(), gpu.queue(), &targets.color, size);
             self.targets = Some(targets);
         }
+        if self.has_transparency && !self.taa.pass.has_history_for(size) {
+            self.taa.pass.resize(gpu.device(), size);
+            self.taa.was_active = false;
+        }
         let Some(targets) = &self.targets else {
             return;
         };
         let queue = gpu.queue();
-        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&frame.camera));
+        let temporal = self.has_transparency && frame.trace.is_none();
+        let mut camera = frame.camera;
+        let mut taa_uniform = None;
+        if temporal {
+            let state = &mut self.taa;
+            let cut = state.previous.is_none_or(|(_, eye)| {
+                let moved = glam::Vec3::from_array([eye[0], eye[1], eye[2]])
+                    - glam::Vec3::from_array([frame.camera.eye[0], frame.camera.eye[1], frame.camera.eye[2]]);
+                moved.length() > TAA_CUT_DISTANCE
+            });
+            let history = state.was_active && !cut;
+            let changed = state
+                .previous
+                .is_none_or(|(view_proj, _)| view_proj != frame.camera.view_proj)
+                || state.edited;
+            state.still_frames = if changed {
+                0
+            } else {
+                state.still_frames.saturating_add(1)
+            };
+            let blend = if state.edited { TAA_BLEND_AFTER_EDIT } else { TAA_BLEND };
+            let unjittered = glam::Mat4::from_cols_array_2d(&frame.camera.view_proj);
+            camera.view_proj = taa::jittered(frame.camera.view_proj, taa::jitter(state.frame), size);
+            taa_uniform = Some(TaaUniform {
+                prev_view_proj: state
+                    .previous
+                    .map_or(frame.camera.view_proj, |(view_proj, _)| view_proj),
+                inv_view_proj: unjittered.inverse().to_cols_array_2d(),
+                settings: [blend, f32::from(u8::from(!history)), size.0 as f32, size.1 as f32],
+            });
+            state.previous = Some((frame.camera.view_proj, frame.camera.eye));
+            state.edited = false;
+        } else {
+            self.taa.was_active = false;
+            self.taa.previous = None;
+        }
+        // The dither pattern changes every frame only while the temporal pass averages the frames.
+        let dither_frame = if temporal { (self.taa.frame % 4096) as f32 } else { 0.0 };
+        queue.write_buffer(
+            &self.dither_buffer,
+            0,
+            bytemuck::bytes_of(&[dither_frame, 0.0_f32, 0.0, 0.0]),
+        );
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera));
         let line_bytes = bytemuck::cast_slice::<LineVertex, u8>(frame.lines);
         if line_bytes.len() as u64 > self.line_buffer.size() {
             self.line_buffer = create_line_buffer(gpu.device(), frame.lines.len().next_power_of_two());
@@ -404,9 +517,11 @@ impl ViewportRenderer {
             self.glass.encode(queue, encoder, surface, frame.glass, frame.blur);
             return;
         }
+        // With temporal anti-aliasing the scene goes to `raw` first and the TAA pass writes `color`.
+        let scene_color = if temporal { &targets.raw } else { &targets.color };
         let (view, resolve_target) = match &targets.multisampled {
-            Some(multisampled) => (multisampled, Some(&targets.color)),
-            None => (&targets.color, None),
+            Some(multisampled) => (multisampled, Some(scene_color)),
+            None => (scene_color, None),
         };
         let [r, g, b] = frame.background.map(f64::from);
         {
@@ -425,7 +540,11 @@ impl ViewportRenderer {
                     view: &targets.depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if temporal {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -463,6 +582,21 @@ impl ViewportRenderer {
                 pass.set_vertex_buffer(0, self.line_buffer.slice(..));
                 pass.draw(0..line_count, 0..1);
             }
+        }
+        if let Some(uniform) = &taa_uniform {
+            self.taa.pass.encode(
+                gpu.device(),
+                queue,
+                encoder,
+                &TaaTargets {
+                    raw: &targets.raw,
+                    depth: &targets.depth,
+                    output: &targets.color,
+                },
+                uniform,
+            );
+            self.taa.frame = self.taa.frame.wrapping_add(1);
+            self.taa.was_active = true;
         }
         self.glass.encode(queue, encoder, surface, frame.glass, frame.blur);
     }
@@ -512,6 +646,12 @@ fn create_targets(device: &wgpu::Device, size: (u32, u32), sample_count: u32) ->
         1,
         wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
     );
+    let raw = texture(
+        "scene color raw",
+        SCENE_FORMAT,
+        1,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
     let multisampled = (sample_count > 1).then(|| {
         texture(
             "scene color msaa",
@@ -524,17 +664,18 @@ fn create_targets(device: &wgpu::Device, size: (u32, u32), sample_count: u32) ->
         "scene depth",
         DEPTH_FORMAT,
         sample_count,
-        wgpu::TextureUsages::RENDER_ATTACHMENT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
     );
     SceneTargets {
         size,
         multisampled,
         color,
+        raw,
         depth,
     }
 }
 
-/// Group 0 of the raster pipelines: camera (0), Palette colors (1) and Material constants (9).
+/// Group 0 of the raster pipelines: camera (0), Palette colors (1), the dither frame (2) and Material constants (9).
 pub(crate) fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let uniform_entry = |binding| wgpu::BindGroupLayoutEntry {
         binding,
@@ -551,6 +692,16 @@ pub(crate) fn create_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
         entries: &[
             uniform_entry(0),
             uniform_entry(1),
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
             wgpu::BindGroupLayoutEntry {
                 binding: 9,
                 visibility: wgpu::ShaderStages::FRAGMENT,

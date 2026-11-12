@@ -417,13 +417,15 @@ impl Running {
             .get(&ViewportId::ROOT)
             .map_or(Duration::MAX, |viewport| viewport.repaint_delay);
         let compiling = *self.viewport.material_status() == rustium_render::CompileStatus::Compiling;
-        let repaint_delay = if compiling || (self.ui.mode == Mode::Render && self.ui.render.is_accumulating()) {
-            Duration::ZERO
-        } else if self.ui.render.job.is_some() {
-            repaint_delay.min(Duration::from_millis(200))
-        } else {
-            repaint_delay
-        };
+        let settling = self.ui.mode != Mode::Render && self.viewport.is_settling();
+        let repaint_delay =
+            if compiling || settling || (self.ui.mode == Mode::Render && self.ui.render.is_accumulating()) {
+                Duration::ZERO
+            } else if self.ui.render.job.is_some() {
+                repaint_delay.min(Duration::from_millis(200))
+            } else {
+                repaint_delay
+            };
         self.next_frame = Instant::now().checked_add(repaint_delay.max(frame_interval(settings)));
 
         let pixels_per_point = output.pixels_per_point;

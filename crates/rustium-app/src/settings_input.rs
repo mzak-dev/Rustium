@@ -166,7 +166,7 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
 /// Name of a shortcut in the current language.
 fn action_name(i18n: &I18n, action: Action) -> String {
     match action.slot_number() {
-        Some(number) => i18n.tr_args("binding-slot", &[("slot", FluentValue::from(i64::from(number)))]),
+        Some(number) => i18n.tr_args(action.message_key(), &[("slot", FluentValue::from(i64::from(number)))]),
         None => i18n.tr(action.message_key()),
     }
 }

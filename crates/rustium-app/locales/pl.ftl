@@ -378,7 +378,6 @@ status-done = Gotowe
 eta-finished = zakończono
 eta-left = zostało { $time }
 
-## Materials preview
 edit-graph = Edycja materiału
 create-graph = Nowy materiał
 assign-graph = Przypisanie materiału do koloru
@@ -395,18 +394,6 @@ set-graph-param = Zmiana wartości noda
 rename-graph-node = Zmiana nazwy noda
 bypass-graph-node = Pominięcie noda
 graph-frame = Edycja ramki
-mp-title = Materiały (podgląd)
-mp-hint = Tymczasowe: zastąpi je edytor węzłów w trybie Efekty.
-mp-active = Kolor { $n } używa materiału { $name }
-mp-new = Nowy materiał
-mp-assign = Użyj dla aktywnego koloru
-mp-default-locked = Materiał domyślny jest wbudowany i nie można go edytować.
-mat-roughness = Chropowatość
-mat-metallic = Metaliczność
-mat-emission-color = Kolor światła
-mat-strength = Siła
-mat-transmission = Przepuszczalność
-mat-ior = IOR
 
 # Files
 menu-save-as = Zapisz jako…
@@ -440,3 +427,177 @@ file-error-import = Nie można zaimportować { $name }: { $reason }
 file-error-export = Nie można wyeksportować { $name }: { $reason }
 file-error-palette = Nie można wczytać palety { $name }: { $reason }
 splash-recent-missing = Tego pliku już nie ma
+
+## Effects mode (Material node editor)
+gt-select = Zaznaczanie i przesuwanie
+gt-select-desc = Zaznacz węzły i przeciągaj je po grafie.
+gt-pan = Przesuwanie widoku
+gt-pan-desc = Przesuwaj widok grafu.
+gt-add = Dodaj węzeł
+gt-add-desc = Otwórz wyszukiwarkę węzłów przy kursorze.
+gt-cut = Przecinanie połączeń
+gt-cut-desc = Przeciągnij linię przez połączenia, aby je usunąć.
+gt-frame = Ramka wokół węzłów
+gt-frame-desc = Zgrupuj zaznaczone węzły w ramce z etykietą.
+gt-fit = Dopasuj graf do widoku
+gt-fit-desc = Przybliż tak, aby cały graf był widoczny.
+action-graph-delete = Usuń zaznaczone węzły (graf)
+action-graph-duplicate = Duplikuj zaznaczone węzły
+action-graph-select-all = Zaznacz wszystkie węzły
+action-graph-deselect = Wyczyść zaznaczenie węzłów
+binding-group-effects = Efekty
+binding-material = Materiał { $slot }
+effects-materials = Materiały
+effects-textures = Tekstury
+effects-scripts = Skrypty
+effects-used-by = Używają
+effects-colors-count = { $count ->
+    [one] { $count } kolor
+    [few] { $count } kolory
+   *[many] { $count } kolorów
+}
+effects-preview = Podgląd
+preview-model = Model
+preview-cube = Sześcian
+preview-ball = Kula
+effects-material-info = { $count ->
+    [one] PBR · { $count } węzeł
+    [few] PBR · { $count } węzły
+   *[many] PBR · { $count } węzłów
+}
+effects-new = Nowy
+effects-new-blank = Pusty materiał
+effects-new-name = Nowy materiał
+effects-new-sample = Z próbki
+hint-add-node = Dodaj węzeł
+hint-connect = Przeciągnij gniazdo, aby połączyć
+hint-pan-graph = Przesuwanie
+status-compiled = Skompilowano
+status-compiling = Kompilowanie…
+status-error = Błąd kompilacji
+effects-nodes-count = { $count ->
+    [one] { $count } węzeł
+    [few] { $count } węzły
+   *[many] { $count } węzłów
+}
+effects-links-count = { $count ->
+    [one] { $count } połączenie
+    [few] { $count } połączenia
+   *[many] { $count } połączeń
+}
+snap-nodes = Przyciągaj węzły do siatki
+tab-node = Węzeł
+tab-library = Biblioteka
+tab-material = Materiał
+search-nodes = Szukaj węzłów
+effects-no-selection = Zaznacz węzeł, aby go edytować, albo dodaj nowy z Biblioteki.
+effects-selected-count = Zaznaczone węzły: { $count }
+effects-node-name = Tytuł
+effects-linked = Połączone
+effects-auto = Automatyczne
+effects-bypass = Pomiń
+effects-delete = Usuń
+effects-duplicate = Duplikuj
+effects-bake = Wypal do tekstur
+effects-bake-planned = Wypalanie do tekstur jest w planach.
+effects-stop-add = Dodaj punkt
+effects-stop-remove = Usuń punkt
+effects-surface-protected = Wyjścia Powierzchnia nie można usunąć.
+effects-frame-default = Ramka
+effects-frame-needs-nodes = Najpierw zaznacz węzły do ujęcia w ramkę.
+material-name = Nazwa
+material-shading = Cieniowanie
+material-pbr = Fizycznie poprawne
+material-casts-shadow = Rzuca cień
+material-assign-more = Przypisz do kolejnych kolorów palety
+material-assign-hint = Kliknij kolor, aby nadać mu ten materiał; kliknij zaznaczony, aby przywrócić domyślny.
+material-delete = Usuń materiał
+material-default-locked = Materiał domyślny jest wbudowany i nie można go edytować.
+material-hint = Materiał należy do kolorów palety. Każdy woksel pomalowany tymi kolorami go dostaje, w trybie Model i Render.
+gn-voxel-color = Kolor woksela
+gn-ambient-occlusion = Okluzja otoczenia
+gn-value = Wartość
+gn-noise = Szum
+gn-cells = Komórki
+gn-gradient = Gradient
+gn-edge-wear = Starcie krawędzi
+gn-mix = Mieszanie
+gn-color-ramp = Rampa kolorów
+gn-hue-shift = Przesunięcie barwy
+gn-remap = Przeskalowanie
+gn-multiply = Mnożenie
+gn-clamp = Ogranicz
+gn-voxel-bevel = Fazowanie woksela
+gn-surface = Powierzchnia
+gn-volume = Objętość
+gn-input = Wejście
+gn-pattern = Wzór
+gn-color = Kolor
+gn-math = Matematyka
+gn-shading = Cieniowanie
+gn-output = Wyjście
+gn-position = Pozycja
+gn-normal = Normalna
+gn-base-color = Kolor bazowy
+gn-metallic = Metaliczność
+gn-roughness = Chropowatość
+gn-emission = Emisja
+gn-emission-strength = Siła emisji
+gn-transmission = Przepuszczalność
+gn-density = Gęstość
+gn-scattering-color = Kolor rozpraszania
+gn-scale = Skala
+gn-detail = Szczegółowość
+gn-seed = Ziarno
+gn-space = Przestrzeń
+gn-per-voxel = Na woksel
+gn-model = Model
+gn-world = Świat
+gn-vector = Wektor
+gn-distance = Odległość
+gn-cell = Komórka
+gn-border = Granica
+gn-randomness = Losowość
+gn-axis = Oś
+gn-range = Zakres
+gn-width = Szerokość
+gn-breakup = Nieregularność
+gn-mask = Maska
+gn-factor = Współczynnik
+gn-blend = Mieszanie
+gn-add = Dodawanie
+gn-screen = Ekran
+gn-stops = Punkty
+gn-shift = Przesunięcie
+gn-saturation = Nasycenie
+gn-from = Z
+gn-to = Do
+gn-result = Wynik
+gn-min = Min
+gn-max = Maks
+gn-radius = Promień
+gn-segments = Segmenty
+gn-strength = Siła
+gn-ior = IOR
+gn-ao = AO
+gn-a = A
+gn-b = B
+gn-x = X
+gn-y = Y
+gn-z = Z
+gnd-voxel-color = Kolor woksela z palety oraz miejsce cieniowanego punktu na modelu.
+gnd-ambient-occlusion = Jak otwarta jest powierzchnia: 1 na otwartej przestrzeni, mniej w narożnikach. Path tracer zwraca 1.
+gnd-value = Stała liczba.
+gnd-noise = Gładkie losowe wartości z pozycji. Skala 1 to jedna komórka szumu na 8 wokseli.
+gnd-cells = Wzór komórkowy: odległość do najbliższego punktu, losowa wartość komórki i odległość do jej granicy.
+gnd-gradient = Przechodzi od 0 do 1 wzdłuż osi, między dwiema pozycjami podanymi w wokselach.
+gnd-edge-wear = Maska równa 1 na krawędziach wokseli i zanikająca do środka; nieregularność ją postrzępia.
+gnd-mix = Nakłada kolor B na kolor A według współczynnika.
+gnd-color-ramp = Zamienia liczbę na kolor, interpolując między punktami.
+gnd-hue-shift = Obraca barwę koloru o podaną liczbę stopni oraz skaluje nasycenie i jasność.
+gnd-remap = Przenosi liczbę z zakresu Z do zakresu Do.
+gnd-multiply = Mnoży dwie liczby.
+gnd-clamp = Ogranicza liczbę do zakresu Min..Maks.
+gnd-voxel-bevel = Odchyla normalną przy krawędziach wokseli, jakby były zaokrąglone. Tylko cieniowanie, geometria się nie zmienia.
+gnd-surface = Kończy materiał: jak wygląda powierzchnia woksela.
+gnd-volume = Opcjonalne zakończenie materiału: mgła wewnątrz woksela.

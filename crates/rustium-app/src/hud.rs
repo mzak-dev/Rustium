@@ -1,9 +1,12 @@
 //! The viewport-first HUD from the Final mockups: floating glass islands over a full-window viewport.
 
 mod corners;
+mod effects;
+mod effects_bars;
+mod effects_canvas;
+mod effects_inspector;
 mod hotbar;
 mod inspector;
-mod materials_preview;
 mod prompt;
 mod render_bottom;
 mod render_inspector;
@@ -22,6 +25,8 @@ pub(crate) mod widgets;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+pub(crate) use effects::{EffectsState, GraphTool, PreviewShape};
+pub(crate) use effects_bars::preview_view_rect;
 use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
 pub(crate) use prompt::Prompt;
 use rustium_core::{Face, NodeId};
@@ -44,6 +49,8 @@ use crate::settings_window::Section;
 pub(crate) enum Mode {
     /// Editing voxels with the raster viewport.
     Model,
+    /// The Material node editor.
+    Effects,
     /// Path-traced preview and image output.
     Render,
 }
@@ -62,6 +69,7 @@ pub(crate) struct UiState {
     pub(crate) started_at: Option<f64>,
     pub(crate) mode: Mode,
     pub(crate) render: RenderState,
+    pub(crate) effects: EffectsState,
     pub(crate) inspector_open: bool,
     pub(crate) inspector_tab: InspectorTab,
     pub(crate) palette_open: bool,
@@ -97,6 +105,7 @@ impl UiState {
             started_at: None,
             mode: Mode::Model,
             render: RenderState::new(&OrbitCamera::default()),
+            effects: EffectsState::new(),
             inspector_open: true,
             inspector_tab: InspectorTab::Scene,
             palette_open: false,
@@ -191,6 +200,7 @@ pub(crate) struct Hud<'frame> {
     pub(crate) ray_query_supported: bool,
     pub(crate) sample_counts: &'frame [u32],
     pub(crate) mcp_status: &'frame McpStatus,
+    pub(crate) material_status: &'frame rustium_render::CompileStatus,
     pub(crate) glass: Vec<Glass>,
     pub(crate) commands: Vec<AppCommand>,
 }
@@ -303,6 +313,11 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
     if hud.ui.started_at.is_none() {
         hud.ui.started_at = Some(ctx.input(|input| input.time));
     }
+    // egui hands keyboard focus to the first widget on Tab while the frame is built; remember whether the key was
+    // meant for a shortcut before that happens.
+    let tab_shortcut = hud.ui.mode == Mode::Effects
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input(|input| input.key_pressed(egui::Key::Tab));
     if hud.ui.mode == Mode::Render {
         render_viewport::layout(ctx, hud);
     }
@@ -319,6 +334,7 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
             hotbar::show(ctx, hud);
             corners::show(ctx, hud);
         }
+        Mode::Effects => effects::draw(ctx, hud),
         Mode::Render => {
             render_tools::options(ctx, hud);
             render_tools::toolbar(ctx, hud);
@@ -327,6 +343,9 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
         }
     }
     if !hud.ui.modal_open() {
+        if tab_shortcut {
+            ctx.memory_mut(egui::Memory::stop_text_input);
+        }
         shortcuts(ctx, hud);
     }
     prompt::show(ctx, hud);
@@ -352,6 +371,9 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_min_size(screen.size());
             if hud.ui.mode == Mode::Render {
                 render_viewport::paint(ui, hud);
+            } else if hud.ui.mode == Mode::Effects {
+                let hole = effects_bars::preview_view_rect(screen);
+                effects_canvas::paint(ui, hud, screen, hole);
             }
         })
         .response;
@@ -382,6 +404,11 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
 
     if hud.ui.mode == Mode::Render {
         render_viewport::input(ctx, hud, &response, pointer);
+        return;
+    }
+    if hud.ui.mode == Mode::Effects {
+        hud.editor.clear_hover();
+        effects_canvas::input(ctx, hud, &response, pointer);
         return;
     }
     viewport::interact(ctx, hud, &response, screen, pointer);
@@ -419,11 +446,14 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
     if ctx.egui_wants_keyboard_input() {
         return;
     }
-    let scope = if hud.ui.mode == Mode::Render {
-        Scope::Render
-    } else {
-        Scope::Model
+    let scope = match hud.ui.mode {
+        Mode::Render => Scope::Render,
+        Mode::Effects => Scope::Effects,
+        Mode::Model => Scope::Model,
     };
+    if scope == Scope::Effects {
+        effects::extra_keys(ctx, hud);
+    }
     let pressed = ctx.input_mut(|input| hud.settings.keymap.take_pressed(input, scope));
     for action in pressed {
         match action {
@@ -438,6 +468,15 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
             Action::Tool(tool) => hud.editor.tool = tool,
             Action::Slot(slot) => hud.editor.active_slot = usize::from(slot),
             Action::StepIn | Action::StepOut | Action::DeleteNodes => focus_action(hud, action),
+            Action::GraphTool(_)
+            | Action::AddNode
+            | Action::FrameNodes
+            | Action::FitGraph
+            | Action::DeleteGraphSelection
+            | Action::DuplicateNodes
+            | Action::SelectAllNodes
+            | Action::ClearNodeSelection
+            | Action::MaterialSlot(_) => effects::shortcut(ctx, hud, action),
             Action::RenderTool(_) | Action::RenderStart | Action::ClearRenderRegion => {
                 render_viewport::shortcut(hud, action);
             }

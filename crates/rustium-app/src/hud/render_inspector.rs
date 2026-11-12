@@ -229,7 +229,6 @@ fn render_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
         widgets::switch(ui, &mut render.denoise, true).on_hover_text(denoise_hint);
         ui.end_row();
     });
-    super::materials_preview::show(ui, hud);
 }
 
 fn camera_tab(ui: &mut Ui, hud: &mut Hud<'_>) {

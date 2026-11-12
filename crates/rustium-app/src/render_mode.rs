@@ -195,8 +195,6 @@ pub(crate) struct RenderState {
     pub(crate) progress: TraceProgress,
     /// Result of the last Save image, already translated.
     pub(crate) message: Option<String>,
-    /// Material graph selected in the temporary Materials preview section.
-    pub(crate) preview_graph: usize,
     started: Instant,
     generation: u64,
 }
@@ -247,7 +245,6 @@ impl RenderState {
                 generation: 0,
             },
             message: None,
-            preview_graph: 0,
             started: Instant::now(),
             generation: 0,
         }

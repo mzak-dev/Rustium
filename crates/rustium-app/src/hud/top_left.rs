@@ -46,10 +46,15 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 let current = hud.ui.mode;
                 let look = |mode| if current == mode { Look::On } else { Look::Plain };
                 if widgets::text_button(ui, &hud.tr("mode-model"), 32.0, look(Mode::Model), true).clicked() {
+                    hud.editor.release();
                     hud.ui.mode = Mode::Model;
                 }
-                widgets::text_button(ui, &hud.tr("mode-effects"), 32.0, Look::Plain, false)
-                    .on_hover_text(hud.tr("planned"));
+                if widgets::text_button(ui, &hud.tr("mode-effects"), 32.0, look(Mode::Effects), true).clicked()
+                    && hud.ui.mode != Mode::Effects
+                {
+                    hud.editor.release();
+                    hud.ui.mode = Mode::Effects;
+                }
                 if widgets::text_button(ui, &hud.tr("mode-render"), 32.0, look(Mode::Render), true).clicked()
                     && hud.ui.mode != Mode::Render
                 {

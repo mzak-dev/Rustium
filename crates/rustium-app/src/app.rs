@@ -22,8 +22,9 @@ use winit::window::{Icon, Window, WindowId};
 
 use crate::camera::OrbitCamera;
 use crate::editor::Editor;
+use crate::effects_preview::{self, Preview};
 use crate::files::{self, Document, Io, Pending};
-use crate::hud::{self, AppCommand, Hud, Mode, Toast, UiState};
+use crate::hud::{self, AppCommand, Hud, Mode, PreviewShape, Toast, UiState};
 use crate::i18n::I18n;
 use crate::mcp::McpHost;
 use crate::recent::{self, RecentFile};
@@ -110,6 +111,7 @@ struct Running {
     ui: UiState,
     i18n: I18n,
     mesh: ChunkMesh,
+    preview: Preview,
     sample_counts: Vec<u32>,
     adapter_name: String,
     next_frame: Option<Instant>,
@@ -316,6 +318,7 @@ impl Running {
             ui,
             i18n: I18n::new(settings.language),
             mesh: ChunkMesh::default(),
+            preview: Preview::default(),
             sample_counts,
             adapter_name,
             next_frame: None,
@@ -392,6 +395,7 @@ impl Running {
                 ray_query_supported: self.gpu.supports_ray_query(),
                 sample_counts: &self.sample_counts,
                 mcp_status: self.mcp.status(),
+                material_status: self.viewport.material_status(),
                 glass: Vec::new(),
                 commands: Vec::new(),
             };
@@ -462,7 +466,11 @@ impl Running {
 
         self.update_platform(&glass, pixels_per_point);
 
-        let lines = self.overlay_lines(settings);
+        let lines = if self.ui.mode == Mode::Effects {
+            Vec::new()
+        } else {
+            self.overlay_lines(settings)
+        };
         let glass_rects: Vec<GlassRect> = glass
             .iter()
             .map(|glass| GlassRect {
@@ -474,12 +482,16 @@ impl Running {
         let background = settings
             .background
             .map(|channel| (f32::from(channel) / 255.0).powf(2.2));
-        let models = self.model_draws();
+        let effects_view = (self.ui.mode == Mode::Effects).then(|| self.effects_view(pixels_per_point));
+        let models = match &effects_view {
+            Some(_) if self.ui.effects.preview != PreviewShape::Model => Preview::draws(),
+            _ => self.model_draws(),
+        };
         let frame_input = ViewportFrame {
             models: &models,
-            camera: self.camera_uniform(),
+            camera: effects_view.unwrap_or_else(|| self.camera_uniform()),
             background,
-            show_grid: settings.show_grid,
+            show_grid: settings.show_grid && self.ui.mode != Mode::Effects,
             lines: &lines,
             glass: &glass_rects,
             blur: settings.translucent_panels,
@@ -667,12 +679,26 @@ impl Running {
 
     /// Keeps the GPU copies the renderers read in step with the Editor and the mode.
     fn sync_render(&mut self) {
-        if self.editor.take_palette_dirty() {
-            self.viewport.set_materials(
-                &self.gpu,
-                self.editor.scene.palette(),
-                self.editor.scene.material_graphs(),
-            );
+        // A Cube or Ball preview points one Palette Color at the edited Material in the GPU copy only.
+        let wanted = (self.ui.mode == Mode::Effects && self.ui.effects.preview != PreviewShape::Model)
+            .then_some(self.ui.effects.graph);
+        let mut dirty = self.editor.take_palette_dirty();
+        if wanted != self.preview.applied_graph {
+            self.preview.applied_graph = wanted;
+            dirty = true;
+        }
+        if dirty {
+            let scratch = wanted.map(|graph| Preview::scene_with_material(&self.editor.scene, graph));
+            let scene = scratch.as_ref().unwrap_or(&self.editor.scene);
+            self.viewport
+                .set_materials(&self.gpu, scene.palette(), self.editor.scene.material_graphs());
+        }
+        if wanted.is_some() {
+            let shape = self.ui.effects.preview;
+            let (id, meshes) = self.preview.meshes(shape, &self.editor.scene);
+            for (coord, mesh) in meshes {
+                self.viewport.upload_chunk(&self.gpu, id, *coord, mesh);
+            }
         }
         self.viewport.poll_materials(&self.gpu);
         let mode = self.ui.mode;
@@ -849,6 +875,15 @@ impl Running {
                 placement,
             })
             .collect()
+    }
+
+    /// Camera of the Effects preview: the Scene or the Cube and Ball squeezed into the preview rectangle.
+    fn effects_view(&self, pixels_per_point: f32) -> CameraUniform {
+        let (width, height) = self.gpu.size();
+        let screen = egui::vec2(width as f32 / pixels_per_point, height as f32 / pixels_per_point);
+        let rect = hud::preview_view_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, screen));
+        let camera = effects_preview::camera_for(self.ui.effects.preview, &self.editor.scene);
+        effects_preview::uniform(&camera, rect, screen)
     }
 
     fn camera_uniform(&self) -> CameraUniform {

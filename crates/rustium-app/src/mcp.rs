@@ -7,7 +7,6 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use color_eyre::eyre::{Result, WrapErr};
@@ -15,7 +14,7 @@ use color_eyre::eyre::{Result, WrapErr};
 use crossbeam_channel::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
 use rustium_mcp::{Bridge, Envelope, Server, SharedPermissions};
-use rustium_mcp::{DEFAULT_PORT, Permission, Permissions};
+use rustium_mcp::{DEFAULT_PORT, Permission, Permissions, Waker};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,9 +26,6 @@ use crate::editor::Editor;
 use crate::i18n::I18n;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::settings::Settings;
-
-/// Wakes the event loop after the server queued a request.
-pub(crate) type Waker = Arc<dyn Fn() + Send + Sync>;
 
 /// How the user says they connect, which decides what "Copy client config" produces. The editor always serves
 /// HTTP; `rustium --mcp-stdio` is a bridge to it.
@@ -203,18 +199,17 @@ impl McpHost {
 /// The browser's host: nothing can connect, so it is always off and never has requests.
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug)]
-pub(crate) struct McpHost {
-    status: McpStatus,
-}
+pub(crate) struct McpHost;
 
 #[cfg(target_arch = "wasm32")]
 impl McpHost {
     pub(crate) fn new(_settings: &McpSettings, _waker: Waker) -> Self {
-        Self { status: McpStatus::Off }
+        Self
     }
 
+    #[expect(clippy::unused_self, reason = "the same calls as the desktop host")]
     pub(crate) fn status(&self) -> &McpStatus {
-        &self.status
+        &McpStatus::Off
     }
 
     #[expect(clippy::unused_self, reason = "the same calls as the desktop host")]

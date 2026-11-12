@@ -31,7 +31,6 @@ async function main() {
     throw new Error("usage: node web/smoke-test.cjs URL [screenshot-dir]");
   }
   const problems = [];
-  let ready = false;
   const browser = await chromium.launch({ args: WEBGPU_ARGS });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
@@ -42,23 +41,17 @@ async function main() {
       if (message.type() === "error") {
         problems.push(`console error: ${text}`);
       }
-      if (text.includes("viewport ready")) {
-        ready = true;
-      }
     });
 
+    const ready = page
+      .waitForEvent("console", { predicate: (message) => message.text().includes("viewport ready"), timeout: 120_000 })
+      .catch(() => problems.push("the editor never reported that its viewport is ready"));
     await page.goto(url);
     const adapter = await page.evaluate(async () => Boolean(navigator.gpu && (await navigator.gpu.requestAdapter())));
     if (!adapter) {
       throw new Error("this Chromium offers no WebGPU adapter, so the build cannot be tested here");
     }
-    await page.waitForFunction(() => document.getElementById("loading").hidden, null, { timeout: 60_000 });
-    for (let waited = 0; !ready && waited < 60_000; waited += 500) {
-      await page.waitForTimeout(500);
-    }
-    if (!ready) {
-      problems.push("the editor never reported that its viewport is ready");
-    }
+    await ready;
 
     const step = async (name, action) => {
       await action();

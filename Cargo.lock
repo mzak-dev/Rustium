@@ -3215,10 +3215,8 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "rustium-app",
- "tracing",
- "tracing-subscriber",
- "tracing-web",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

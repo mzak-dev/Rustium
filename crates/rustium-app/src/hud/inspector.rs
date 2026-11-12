@@ -134,9 +134,11 @@ fn tabs(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
                 (InspectorTab::History, "tab-history"),
                 (InspectorTab::Mcp, "tab-mcp"),
             ];
-            // A page cannot serve MCP.
-            let shown = if crate::DESKTOP { &tabs[..] } else { &tabs[..2] };
-            for &(tab, key) in shown {
+            for (tab, key) in tabs {
+                // A page cannot serve MCP.
+                if !crate::DESKTOP && tab == InspectorTab::Mcp {
+                    continue;
+                }
                 let look = if hud.ui.inspector_tab == tab {
                     Look::On
                 } else {

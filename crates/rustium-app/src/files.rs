@@ -34,6 +34,15 @@ use crate::settings::data_dir;
 /// Extension of Rustium scene files.
 pub(crate) const EXTENSION: &str = "ruv";
 
+/// Name of the `.vox` filter in the file dialogs.
+const VOX_LABEL: &str = "MagicaVoxel";
+
+/// Name of the palette filter in the file dialogs.
+const PALETTE_LABEL: &str = "Palette";
+
+/// Files a palette can be imported from.
+const PALETTE_EXTENSIONS: &[&str] = &["pal", "png"];
+
 /// What to do once the user has dealt with unsaved changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Pending {
@@ -287,7 +296,7 @@ impl Io {
         self.dialog(None, move || {
             let path = rfd::FileDialog::new()
                 .set_title(title)
-                .add_filter("MagicaVoxel", &["vox"])
+                .add_filter(VOX_LABEL, &["vox"])
                 .pick_file()?;
             Some(IoJob::ImportVox { path })
         });
@@ -298,7 +307,7 @@ impl Io {
         self.dialog(None, move || {
             let path = rfd::FileDialog::new()
                 .set_title(title)
-                .add_filter("Palette", &["pal", "png"])
+                .add_filter(PALETTE_LABEL, PALETTE_EXTENSIONS)
                 .pick_file()?;
             Some(IoJob::ImportPalette { path })
         });
@@ -323,7 +332,7 @@ impl Io {
     /// Asks where to export a `.vox` file.
     pub(crate) fn pick_export_vox(&self, title: String, start: SaveStart, scene: Box<Scene>) {
         self.dialog(None, move || {
-            let path = save_dialog(title, "MagicaVoxel", "vox", &start)?;
+            let path = save_dialog(title, VOX_LABEL, "vox", &start)?;
             Some(IoJob::ExportVox { path, scene })
         });
     }
@@ -331,7 +340,7 @@ impl Io {
     /// Asks where to export a palette file.
     pub(crate) fn pick_export_palette(&self, title: String, start: SaveStart, colors: Vec<[u8; 3]>) {
         self.dialog(None, move || {
-            let path = save_dialog(title, "Palette", "pal", &start)?;
+            let path = save_dialog(title, PALETTE_LABEL, "pal", &start)?;
             Some(IoJob::ExportPalette { path, colors })
         });
     }
@@ -346,7 +355,7 @@ impl Io {
         &self,
         title: String,
         filter: String,
-        extensions: Vec<&'static str>,
+        extensions: &'static [&'static str],
         make: impl FnOnce(PathBuf) -> IoJob + 'static,
     ) {
         let outcomes = self.outcome_sender.clone();
@@ -365,19 +374,17 @@ impl Io {
 
     /// Asks for a `.ruv` file to open.
     pub(crate) fn pick_open(&self, title: String, scene_label: String) {
-        self.pick(title, scene_label, vec![EXTENSION], |path| IoJob::Load { path });
+        self.pick(title, scene_label, &[EXTENSION], |path| IoJob::Load { path });
     }
 
     /// Asks for a `.vox` file to import.
     pub(crate) fn pick_import_vox(&self, title: String) {
-        self.pick(title, "MagicaVoxel".to_owned(), vec!["vox"], |path| IoJob::ImportVox {
-            path,
-        });
+        self.pick(title, VOX_LABEL.to_owned(), &["vox"], |path| IoJob::ImportVox { path });
     }
 
     /// Asks for a palette file to import.
     pub(crate) fn pick_import_palette(&self, title: String) {
-        self.pick(title, "Palette".to_owned(), vec!["pal", "png"], |path| {
+        self.pick(title, PALETTE_LABEL.to_owned(), PALETTE_EXTENSIONS, |path| {
             IoJob::ImportPalette { path }
         });
     }
@@ -389,14 +396,16 @@ impl Io {
     }
 
     /// Downloads the Scene as a `.vox` file.
+    #[expect(clippy::needless_pass_by_value, reason = "the same call as the desktop's dialog")]
     pub(crate) fn pick_export_vox(&self, _title: String, start: SaveStart, scene: Box<Scene>) {
-        let path = PathBuf::from(start.file_name).with_extension("vox");
+        let path = start.suggested("vox");
         self.submit(IoJob::ExportVox { path, scene });
     }
 
     /// Downloads the palette as a `.pal` file.
+    #[expect(clippy::needless_pass_by_value, reason = "the same call as the desktop's dialog")]
     pub(crate) fn pick_export_palette(&self, _title: String, start: SaveStart, colors: Vec<[u8; 3]>) {
-        let path = PathBuf::from(start.file_name).with_extension("pal");
+        let path = start.suggested("pal");
         self.submit(IoJob::ExportPalette { path, colors });
     }
 }
@@ -463,7 +472,7 @@ fn save_dialog(title: String, label: &str, extension: &str, start: &SaveStart) -
     let mut dialog = rfd::FileDialog::new()
         .set_title(title)
         .add_filter(label, &[extension])
-        .set_file_name(Path::new(&start.file_name).with_extension(extension).to_string_lossy());
+        .set_file_name(start.suggested(extension).to_string_lossy());
     if let Some(directory) = &start.directory {
         dialog = dialog.set_directory(directory);
     }
@@ -476,6 +485,13 @@ pub(crate) struct SaveStart {
     pub(crate) file_name: String,
     #[cfg_attr(target_arch = "wasm32", expect(dead_code, reason = "a download has no folder"))]
     pub(crate) directory: Option<PathBuf>,
+}
+
+impl SaveStart {
+    /// The file name the dialog (or the browser's download) suggests for a file with `extension`.
+    fn suggested(&self, extension: &str) -> PathBuf {
+        Path::new(&self.file_name).with_extension(extension)
+    }
 }
 
 /// What a "Save as" does once a path is chosen.

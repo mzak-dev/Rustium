@@ -1,7 +1,7 @@
 //! The browser build: the event loop on a `<canvas>`, browser storage, file pickers and downloads.
 //!
-//! `crates/rustium-web` installs the panic hook and logging and then calls [`run`]. Everything else in this module is
-//! what the rest of the editor uses in place of the desktop's files and dialogs.
+//! `crates/rustium-web` installs the panic hook and then calls [`run`]. Everything else in this module is what the rest
+//! of the editor uses in place of the desktop's files and dialogs.
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use wasm_bindgen::JsCast;
@@ -9,7 +9,7 @@ use winit::event_loop::EventLoop;
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 use winit::window::WindowAttributes;
 
-use crate::{app, settings};
+use crate::{app, logging, settings};
 
 /// Id of the `<canvas>` in `web/index.html` that the editor draws into.
 const CANVAS_ID: &str = "rustium";
@@ -17,12 +17,14 @@ const CANVAS_ID: &str = "rustium";
 /// Id of the element in `web/index.html` that shows a fatal error instead of the editor.
 const ERROR_ID: &str = "rustium-error";
 
-/// Starts the editor in the page's `<canvas id="rustium">`. Returns at once: the browser drives the event loop.
+/// Sends logs to the browser console and starts the editor in the page's `<canvas id="rustium">`. Returns at once: the
+/// browser drives the event loop.
 ///
 /// # Errors
 ///
-/// Fails when the event loop cannot be created.
+/// Fails when logging or the event loop cannot be set up.
 pub fn run() -> Result<()> {
+    logging::init().wrap_err("cannot start logging")?;
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Rustium in the browser");
     let event_loop = EventLoop::with_user_event()
         .build()
@@ -106,11 +108,11 @@ pub(crate) fn download(file_name: &str, bytes: &[u8]) -> Result<()> {
 pub(crate) async fn pick_file(
     title: String,
     filter: String,
-    extensions: Vec<&'static str>,
+    extensions: &'static [&'static str],
 ) -> Option<(String, Vec<u8>)> {
     let file = rfd::AsyncFileDialog::new()
         .set_title(title)
-        .add_filter(filter, &extensions)
+        .add_filter(filter, extensions)
         .pick_file()
         .await?;
     let bytes = file.read().await;

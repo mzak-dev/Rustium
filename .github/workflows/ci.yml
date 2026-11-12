@@ -73,15 +73,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
-        with:
-          cache-key: web
+      - uses: ./.github/actions/build-web
       # The crates the browser build compiles, linted as wasm32 (their cfg(target_arch = "wasm32") paths).
       - run: >-
           cargo clippy --locked --target wasm32-unknown-unknown --lib
           -p rustium-core -p rustium-platform -p rustium-render -p rustium-mcp -p rustium-app -p rustium-web
           -- -D warnings
-      - uses: ./.github/actions/build-web
       - name: Keep the screenshots of a failed smoke test
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -89,6 +86,11 @@ jobs:
           name: web-smoke-test-screenshots
           path: ${{ runner.temp }}/screenshots
           if-no-files-found: ignore
+      # The site the pages job deploys, once every check on main has passed.
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'merge_group'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/web
 
   # One stable name for branch protection, whatever the matrix above looks like.
   ci-success:
@@ -101,3 +103,24 @@ jobs:
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
       - run: echo "all CI jobs passed"
+
+  # Every push to main (every merged pull request) publishes the web version built and tested above, once CI is green:
+  # https://mzak-dev.github.io/Rustium/. Needs Settings → Pages → Source: GitHub Actions (docs/web.md).
+  pages:
+    name: Deploy to GitHub Pages
+    needs: ci-success
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # One deployment at a time; a newer push waits for the running one instead of cancelling it halfway.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

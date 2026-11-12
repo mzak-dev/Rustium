@@ -110,13 +110,20 @@ impl App {
         let (Some(window), Some(opened)) = (self.pending_window.take(), opened) else {
             return;
         };
-        let started =
-            opened.and_then(|gpu| Running::assemble(window, gpu, None, &mut self.settings, &self.proxy, None));
+        let started = opened.and_then(|gpu| {
+            let logo = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
+            Ok(Running::assemble(
+                window,
+                gpu,
+                &logo,
+                None,
+                &mut self.settings,
+                &self.proxy,
+                None,
+            ))
+        });
         match started {
-            Ok(mut running) => {
-                // The canvas got its size while the GPU was on its way, and that Resized event found no editor.
-                let size = running.window.inner_size();
-                running.gpu.resize(size.width, size.height);
+            Ok(running) => {
                 running.window.request_redraw();
                 self.running = Some(running);
             }
@@ -208,7 +215,8 @@ impl ApplicationHandler<UserEvent> for App {
         if self.running.is_some() || self.pending_window.is_some() {
             return;
         }
-        let window = match create_window(event_loop) {
+        // Browsers show the page's favicon, not a window icon.
+        let window = match create_window(event_loop, None) {
             Ok(window) => window,
             Err(report) => return self.fail(event_loop, report),
         };
@@ -310,22 +318,38 @@ impl Running {
         proxy: &EventLoopProxy<UserEvent>,
         open_path: Option<PathBuf>,
     ) -> Result<Self> {
-        let window = create_window(event_loop)?;
+        let logo = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
+        let icon = Icon::from_rgba(logo.0.clone(), logo.1.0, logo.1.1).ok();
+        let window = create_window(event_loop, icon)?;
         let (gpu, startup_notice) = open_gpu(&window, settings)?;
-        Self::assemble(window, gpu, startup_notice, settings, proxy, open_path)
+        Ok(Self::assemble(
+            window,
+            gpu,
+            &logo,
+            startup_notice,
+            settings,
+            proxy,
+            open_path,
+        ))
     }
 
-    /// Builds the editor around an open window and GPU. `startup_notice` is shown as a toast.
+    /// Builds the editor around an open window and GPU. `logo` is the decoded [`LOGO_PNG`]; `startup_notice` is
+    /// shown as a toast.
     fn assemble(
         window: Arc<Window>,
         mut gpu: GpuContext,
+        logo: &(Vec<u8>, (u32, u32)),
         startup_notice: Option<String>,
         settings: &mut Settings,
         proxy: &EventLoopProxy<UserEvent>,
         open_path: Option<PathBuf>,
-    ) -> Result<Self> {
-        let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
+    ) -> Self {
+        let (logo_rgba, logo_size) = (&logo.0, logo.1);
         let platform = Platform::attach(&*window);
+        // The window may have been resized while the GPU was being opened (in the browser the canvas gets its size
+        // then), and that Resized event found no editor.
+        let size = window.inner_size();
+        gpu.resize(size.width, size.height);
         gpu.set_vsync(settings.vsync);
         let sample_counts = gpu.supported_sample_counts(wgpu::TextureFormat::Rgba8UnormSrgb);
         let samples = best_sample_count(&sample_counts, settings.msaa_samples);
@@ -351,7 +375,7 @@ impl Running {
             gpu.surface_format(),
             egui_wgpu::RendererOptions::default(),
         );
-        let small_logo = downscale(&logo_rgba, logo_size, 4);
+        let small_logo = downscale(logo_rgba, logo_size, 4);
         let logo_image = egui::ColorImage::from_rgba_unmultiplied(
             [(logo_size.0 / 4) as usize, (logo_size.1 / 4) as usize],
             &small_logo,
@@ -384,7 +408,7 @@ impl Running {
             io.submit(files::IoJob::Load { path });
         }
         let doc = Document::new(editor.revision);
-        Ok(Self {
+        Self {
             window,
             gpu,
             viewport,
@@ -414,7 +438,7 @@ impl Running {
             title: String::new(),
             platform,
             maximize_hover_injected: false,
-        })
+        }
     }
 
     /// Reports the title strip, the controls inside it and the maximize button to the platform layer.
@@ -717,14 +741,11 @@ impl Running {
                 }
             }
             AppCommand::RestartRender => self.viewport.restart_trace(),
-            AppCommand::RunScript => {
-                #[cfg(not(target_arch = "wasm32"))]
-                self.run_script_file();
-                #[cfg(target_arch = "wasm32")]
-                {
-                    self.ui.toast = Some(Toast::new(self.i18n.tr("web-desktop-only"), false));
-                }
-            }
+            #[cfg(not(target_arch = "wasm32"))]
+            AppCommand::RunScript => self.run_script_file(),
+            // Scripts are desktop only; the browser's menu has no entry for them.
+            #[cfg(target_arch = "wasm32")]
+            AppCommand::RunScript => {}
         }
         false
     }
@@ -1144,12 +1165,11 @@ fn push_box(lines: &mut Vec<LineVertex>, volume: Volume, inflate: f32, color: [f
 }
 
 /// The editor's frameless window, or in the browser the page's canvas.
-fn create_window(event_loop: &ActiveEventLoop) -> Result<Arc<Window>> {
-    let (logo_rgba, logo_size) = decode_png(LOGO_PNG).wrap_err("cannot decode the logo")?;
+fn create_window(event_loop: &ActiveEventLoop, icon: Option<Icon>) -> Result<Arc<Window>> {
     let attributes = Window::default_attributes()
         .with_title("Rustium")
         .with_decorations(false)
-        .with_window_icon(Icon::from_rgba(logo_rgba, logo_size.0, logo_size.1).ok());
+        .with_window_icon(icon);
     #[cfg(not(target_arch = "wasm32"))]
     let attributes = attributes
         .with_inner_size(LogicalSize::new(1440.0, 900.0))

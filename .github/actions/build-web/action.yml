@@ -1,5 +1,5 @@
 name: Build and test the web version
-description: Build the browser version with scripts/build-web.sh and smoke-test it in headless Chromium.
+description: Set up Rust for wasm32, build the browser version with scripts/build-web.sh and smoke-test it in headless Chromium.
 
 inputs:
   out-dir:
@@ -11,12 +11,13 @@ runs:
   steps:
     - uses: ./.github/actions/setup-rust
       with:
+        targets: wasm32-unknown-unknown
         cache-key: web
 
-    - name: Install wasm-pack
-      shell: bash
-      # wasm-pack fetches the matching wasm-bindgen and binaryen's wasm-opt itself.
-      run: cargo install wasm-pack --version 0.15.1 --locked
+    # A prebuilt binary; wasm-pack fetches the matching wasm-bindgen and binaryen's wasm-opt itself.
+    - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      with:
+        tool: wasm-pack@0.15.1
 
     - name: Build
       shell: bash

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
@@ -7,6 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::Waker;
 use crate::permission::{Permission, SharedPermissions};
 
 /// Voxel Tool for [`Request::ApplyBrush`].
@@ -148,9 +148,6 @@ pub struct Envelope {
     pub reply: Sender<Reply>,
 }
 
-/// Wakes the UI thread's event loop so it looks at its request channel.
-pub type Waker = Arc<dyn Fn() + Send + Sync>;
-
 /// How long a client waits for the UI thread before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -228,6 +225,8 @@ impl Bridge {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
 
     use super::*;

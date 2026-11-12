@@ -297,6 +297,10 @@ rtab-light = Light
 rtab-output = Output
 frame-guides = Frame guides
 hint-dolly = Dolly
+hint-wheel = Wheel
+hint-pick-focus = Pick focus
+hint-aim-sun = Aim sun
+hint-draw-region = Draw region
 
 ## Render inspector
 style = Style
@@ -371,7 +375,12 @@ render-button-hint = Start or pause rendering
 add-shot = Add shot from current view
 shots-full = All five shots are in use
 shot-name = Shot { $n }
-shot-tooltip = Shot { $n }, { $size }
+shot-tooltip = { $name }, { $size }
+shot-modified = Changed since saved. Click to go back to the saved view, or right-click to update it.
+shot-rename = Name
+shot-update = Update from current view
+shot-delete = Delete shot
+image-too-large = A { $width } × { $height } image needs about { $needed } GB of GPU memory; at most { $allowed } GB and { $side } pixels per side are allowed. Choose a smaller size.
 status-rendering = Rendering
 status-paused = Paused
 status-done = Done

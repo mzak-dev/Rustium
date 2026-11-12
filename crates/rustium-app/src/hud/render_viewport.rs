@@ -1,7 +1,7 @@
 //! Render mode, the viewport itself: where the 16:9 frame sits, its labels, guides and progress bar, and what the
 //! pointer and keys do over it.
 
-use egui::{Align2, Color32, Context, FontId, PointerButton, Pos2, Rect, Response, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, Context, FontId, PointerButton, Pos2, Rect, Response, Stroke, StrokeKind, Ui, pos2, vec2};
 use glam::{Vec2 as GlamVec2, Vec3};
 use rustium_core::{HitTarget, NodeId, pick_scene};
 
@@ -55,24 +55,35 @@ pub(crate) fn paint(ui: &Ui, hud: &Hud<'_>) {
     };
     let render = &hud.ui.render;
     let painter = ui.painter();
-    let shot = hud.i18n.tr_args(
-        "shot-name",
-        &[("n", fluent_bundle::FluentValue::from(render.active_shot + 1))],
+    let shot = render_bottom::shot_label(hud, render.active_shot);
+    // Shot name in the UI font, numbers in mono. The size is left out when the frame is too narrow for both labels.
+    let mut label = egui::text::LayoutJob::default();
+    label.append(
+        &format!("{shot} · "),
+        0.0,
+        egui::TextFormat::simple(FontId::proportional(11.0), theme::MUTED),
     );
-    painter.text(
-        frame.left_top() - vec2(0.0, 7.0),
-        Align2::LEFT_BOTTOM,
-        format!("{shot} · {:.0} mm", render.lens_mm),
-        FontId::proportional(11.0),
-        theme::MUTED,
+    label.append(
+        &format!("{:.0} mm", render.lens_mm),
+        0.0,
+        egui::TextFormat::simple(FontId::monospace(11.0), theme::MUTED),
     );
-    painter.text(
-        frame.right_top() - vec2(0.0, 7.0),
-        Align2::RIGHT_BOTTOM,
+    let label = painter.layout_job(label);
+    let size = painter.layout_no_wrap(
         format!("{} × {}", render.size.0, render.size.1),
         FontId::monospace(11.0),
         theme::MUTED,
     );
+    let label_origin = frame.left_top() - vec2(0.0, 7.0 + label.size().y);
+    let fits_both = label.size().x + size.size().x + 16.0 <= frame.width();
+    painter.galley(label_origin, label, theme::MUTED);
+    if fits_both {
+        painter.galley(
+            frame.right_top() - vec2(size.size().x, 7.0 + size.size().y),
+            size,
+            theme::MUTED,
+        );
+    }
     painter.rect_stroke(
         frame,
         4,
@@ -147,11 +158,14 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     }
 
     if response.drag_started_by(PointerButton::Primary) {
+        // A drag is detected only after the pointer has moved a few points; what it grabs is what was under the
+        // button when it went down.
+        let pressed = ctx.input(|input| input.pointer.press_origin()).or(pointer);
         match hud.ui.render.tool {
-            RenderTool::Orbit => choose_pivot(hud, pointer, frame),
-            RenderTool::PickFocus => pick_focus(hud, pointer, frame),
+            RenderTool::Orbit => hud.ui.render.orbit_pivot = choose_pivot(hud, pressed, frame),
+            RenderTool::PickFocus => pick_focus(hud, pressed, frame),
             RenderTool::Region => {
-                hud.ui.render.region_anchor = pointer.zip(frame).map(|(position, frame)| fraction(frame, position));
+                hud.ui.render.region_anchor = pressed.zip(frame).map(|(position, frame)| fraction(frame, position));
             }
             _ => {}
         }
@@ -159,9 +173,13 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     if response.dragged_by(PointerButton::Primary) {
         let delta = response.drag_delta();
         match hud.ui.render.tool {
-            RenderTool::Orbit => hud
-                .camera
-                .orbit(GlamVec2::new(delta.x, delta.y), hud.settings.orbit_style),
+            RenderTool::Orbit => {
+                let delta = GlamVec2::new(delta.x, delta.y);
+                match hud.ui.render.orbit_pivot {
+                    Some(pivot) => hud.camera.orbit_around(delta, hud.settings.orbit_style, pivot),
+                    None => hud.camera.orbit(delta, hud.settings.orbit_style),
+                }
+            }
             RenderTool::Pan => pan(hud, delta, height),
             RenderTool::Dolly => {
                 let target = hud.camera.target;
@@ -184,9 +202,12 @@ pub(crate) fn input(ctx: &Context, hud: &mut Hud<'_>, response: &Response, point
     if response.clicked_by(PointerButton::Primary) && hud.ui.render.tool == RenderTool::PickFocus {
         pick_focus(hud, pointer, frame);
     }
+    if response.drag_stopped_by(PointerButton::Primary) {
+        hud.ui.render.orbit_pivot = None;
+    }
     if response.drag_stopped_by(PointerButton::Primary) && hud.ui.render.tool == RenderTool::Region {
         hud.ui.render.region_anchor = None;
-        if hud.ui.render.pixel_region().is_none_or(|region| {
+        if hud.ui.render.pixel_region(hud.ui.render.size).is_none_or(|region| {
             let [width, height] = [region[2] - region[0], region[3] - region[1]];
             width < 8 || height < 8
         }) {
@@ -231,9 +252,11 @@ fn pick_focus(hud: &mut Hud<'_>, pointer: Option<Pos2>, frame: Option<Rect>) {
     render.focus_marker = Some(fraction(frame, position));
 }
 
-/// Orbit pivot at the start of a drag: the model's centre, or the point under the cursor.
-fn choose_pivot(hud: &mut Hud<'_>, pointer: Option<Pos2>, frame: Option<Rect>) {
-    let pivot = match hud.ui.render.around {
+/// Orbit pivot at the press of a drag: the model's centre, or the point under the cursor. `None` (nothing under the
+/// cursor, empty Scene) orbits around the camera target as usual. The camera turns about the pivot without changing
+/// the view, so nothing jumps.
+fn choose_pivot(hud: &Hud<'_>, pointer: Option<Pos2>, frame: Option<Rect>) -> Option<Vec3> {
+    match hud.ui.render.around {
         OrbitAround::Model => hud
             .editor
             .scene
@@ -242,9 +265,6 @@ fn choose_pivot(hud: &mut Hud<'_>, pointer: Option<Pos2>, frame: Option<Rect>) {
         OrbitAround::Cursor => pointer
             .zip(frame)
             .and_then(|(position, frame)| point_under(hud, frame, position)),
-    };
-    if let Some(pivot) = pivot {
-        hud.camera.retarget(pivot);
     }
 }
 

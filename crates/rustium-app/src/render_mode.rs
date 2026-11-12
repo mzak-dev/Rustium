@@ -3,6 +3,7 @@
 
 use std::time::{Duration, Instant};
 
+use glam::Vec3;
 use rustium_render::{Ground, RenderPass, RenderStyle, Sky, ThinLens, TraceFrame, TraceProgress};
 
 use crate::camera::{OrbitCamera, Projection};
@@ -17,6 +18,11 @@ const SENSOR_HEIGHT_MM: f32 = 24.0;
 const DEFAULT_EXPOSURE_EV: f32 = -1.0;
 /// Range of the Lens field.
 pub(crate) const LENS_RANGE_MM: (f32, f32) = (8.0, 300.0);
+/// Most pixels the interactive preview traces. The picture is shown at most this big and scaled up by the display;
+/// the saved image is always rendered at the full output size by the offline renderer.
+const PREVIEW_MAX_PIXELS: f32 = 1_300_000.0;
+/// Smallest side of the interactive preview.
+const PREVIEW_MIN_SIDE: u32 = 16;
 /// Range of an output side in pixels.
 pub(crate) const SIDE_RANGE: (u32, u32) = (16, 8192);
 /// Range of the aperture as an f-number.
@@ -134,6 +140,8 @@ pub(crate) struct Shot {
     pub(crate) camera: OrbitCamera,
     pub(crate) lens_mm: f32,
     pub(crate) size: (u32, u32),
+    /// Name given by the user; `None` shows "Shot n".
+    pub(crate) name: Option<String>,
 }
 
 /// What the render is doing, for the status readout.
@@ -182,6 +190,11 @@ pub(crate) struct RenderState {
     pub(crate) backdrop: Backdrop,
     pub(crate) shots: Vec<Shot>,
     pub(crate) active_shot: usize,
+    /// Whether the user has added, renamed, updated or deleted a Shot. Until then the one default Shot is just the
+    /// working view, and the queue renders what is on screen.
+    pub(crate) shots_touched: bool,
+    /// What the camera orbits around during the current drag, fixed when the button went down.
+    pub(crate) orbit_pivot: Option<Vec3>,
     /// Region to render as fractions of the image, `[x0, y0, x1, y1]`.
     pub(crate) region: Option<[f32; 4]>,
     /// Where a Render region drag started, as fractions of the image.
@@ -196,6 +209,9 @@ pub(crate) struct RenderState {
     /// Result of the last Save image, already translated.
     pub(crate) message: Option<String>,
     started: Instant,
+    /// Time the render spent paused since `started`, and since when it is paused now.
+    paused_total: Duration,
+    paused_since: Option<Instant>,
     generation: u64,
 }
 
@@ -231,8 +247,11 @@ impl RenderState {
                 camera: camera.clone(),
                 lens_mm,
                 size,
+                name: None,
             }],
             active_shot: 0,
+            shots_touched: false,
+            orbit_pivot: None,
             region: None,
             region_anchor: None,
             running: true,
@@ -247,18 +266,18 @@ impl RenderState {
             },
             message: None,
             started: Instant::now(),
+            paused_total: Duration::ZERO,
+            paused_since: None,
             generation: 0,
         }
     }
 
-    /// Called when Render mode opens: the live view becomes the active Shot.
+    /// Called when Render mode opens: until the user manages Shots themselves, the live view is Shot 1.
     pub(crate) fn enter(&mut self, camera: &OrbitCamera) {
-        self.projection = if camera.projection == Projection::Perspective {
-            ViewProjection::Perspective
-        } else {
-            ViewProjection::Orthographic
-        };
-        self.sync_active_shot(camera);
+        self.projection = projection_of(camera);
+        if !self.shots_touched {
+            self.sync_active_shot(camera);
+        }
         self.message = None;
     }
 
@@ -289,8 +308,8 @@ impl RenderState {
         }
     }
 
-    /// Keeps the active Shot equal to the live view.
-    pub(crate) fn sync_active_shot(&mut self, camera: &OrbitCamera) {
+    /// Stores the live view, lens and output size in the active Shot.
+    fn sync_active_shot(&mut self, camera: &OrbitCamera) {
         let (lens_mm, size) = (self.lens_mm, self.size);
         if let Some(shot) = self.shots.get_mut(self.active_shot) {
             shot.camera.clone_from(camera);
@@ -299,59 +318,140 @@ impl RenderState {
         }
     }
 
-    /// Adds a Shot from the current view and makes it active; `false` when all [`MAX_SHOTS`] are used.
+    /// Whether the live view, lens or output size differ from what Shot `index` saved. Only the active Shot can.
+    pub(crate) fn shot_modified(&self, index: usize, camera: &OrbitCamera) -> bool {
+        index == self.active_shot
+            && self.shots.get(index).is_some_and(|shot| {
+                shot.camera != *camera || (shot.lens_mm - self.lens_mm).abs() > 1e-4 || shot.size != self.size
+            })
+    }
+
+    /// Replaces the active Shot's saved view with the live one.
+    pub(crate) fn update_shot(&mut self, index: usize, camera: &OrbitCamera) {
+        self.shots_touched = true;
+        if index == self.active_shot {
+            self.sync_active_shot(camera);
+        }
+    }
+
+    /// Adds a Shot from the current view and makes it active; `false` when all [`MAX_SHOTS`] are used. The Shots that
+    /// exist keep what they saved.
     pub(crate) fn add_shot(&mut self, camera: &OrbitCamera) -> bool {
         if self.shots.len() >= MAX_SHOTS {
             return false;
         }
-        self.sync_active_shot(camera);
+        self.shots_touched = true;
         self.shots.push(Shot {
             camera: camera.clone(),
             lens_mm: self.lens_mm,
             size: self.size,
+            name: None,
         });
         self.active_shot = self.shots.len() - 1;
         true
     }
 
-    /// Makes Shot `index` the live view.
+    /// Removes Shot `index`; the last Shot cannot be removed. When the active Shot goes, its neighbour becomes the live
+    /// view.
+    pub(crate) fn delete_shot(&mut self, index: usize, camera: &mut OrbitCamera) {
+        if self.shots.len() <= 1 || index >= self.shots.len() {
+            return;
+        }
+        self.shots_touched = true;
+        self.shots.remove(index);
+        if index < self.active_shot {
+            self.active_shot -= 1;
+        } else if index == self.active_shot {
+            let next = index.min(self.shots.len() - 1);
+            self.active_shot = next;
+            self.load_shot(next, camera);
+        }
+    }
+
+    /// Names Shot `index`; an empty or blank name goes back to "Shot n". Spaces are kept so the name can be typed.
+    pub(crate) fn rename_shot(&mut self, index: usize, name: &str) {
+        self.shots_touched = true;
+        if let Some(shot) = self.shots.get_mut(index) {
+            shot.name = (!name.trim().is_empty()).then(|| name.chars().take(40).collect());
+        }
+    }
+
+    /// The Shots the queue renders. Until the user manages Shots, the one default Shot is the working view, so the
+    /// queue renders what is on screen; afterwards every Shot renders as saved.
+    pub(crate) fn queued_shots(&self, camera: &OrbitCamera) -> Vec<Shot> {
+        if self.shots_touched {
+            return self.shots.clone();
+        }
+        vec![Shot {
+            camera: camera.clone(),
+            lens_mm: self.lens_mm,
+            size: self.size,
+            name: None,
+        }]
+    }
+
+    /// Makes Shot `index` the live view. Changes made to the live view since the Shot was saved are dropped.
     pub(crate) fn select_shot(&mut self, index: usize, camera: &mut OrbitCamera) {
-        self.sync_active_shot(camera);
+        if index >= self.shots.len() {
+            return;
+        }
+        self.active_shot = index;
+        self.load_shot(index, camera);
+    }
+
+    fn load_shot(&mut self, index: usize, camera: &mut OrbitCamera) {
         let Some(shot) = self.shots.get(index) else {
             return;
         };
         camera.clone_from(&shot.camera);
         self.lens_mm = shot.lens_mm;
         self.size = shot.size;
-        self.active_shot = index;
-        self.projection = if camera.projection == Projection::Perspective {
-            ViewProjection::Perspective
-        } else {
-            ViewProjection::Orthographic
-        };
+        self.projection = projection_of(camera);
     }
 
-    /// The pixel rectangle of the render region, if one is set and not degenerate.
-    pub(crate) fn pixel_region(&self) -> Option<[u32; 4]> {
+    /// The pixel rectangle of the render region in an image of `size`, if one is set and not degenerate.
+    pub(crate) fn pixel_region(&self, size: (u32, u32)) -> Option<[u32; 4]> {
         let [x0, y0, x1, y1] = self.region?;
         let region = [
-            fraction_to_pixels(x0.min(x1), self.size.0),
-            fraction_to_pixels(y0.min(y1), self.size.1),
-            fraction_to_pixels(x0.max(x1), self.size.0),
-            fraction_to_pixels(y0.max(y1), self.size.1),
+            fraction_to_pixels(x0.min(x1), size.0),
+            fraction_to_pixels(y0.min(y1), size.1),
+            fraction_to_pixels(x0.max(x1), size.0),
+            fraction_to_pixels(y0.max(y1), size.1),
         ];
         (region[2] > region[0] && region[3] > region[1]).then_some(region)
     }
 
-    /// The renderer's input for this frame; `scale` converts HUD points to physical pixels and `voxel_size` is the
-    /// Scene's voxel edge in metres.
+    /// The size the interactive preview traces for a frame shown `shown` physical pixels big: what is on screen, at
+    /// the output's aspect, capped at [`PREVIEW_MAX_PIXELS`] and never above the output size. Saved images are
+    /// rendered at the output size by the offline renderer instead.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the sizes are positive and at most the output side"
+    )]
+    pub(crate) fn preview_size(&self, shown: (f32, f32)) -> (u32, u32) {
+        let aspect = self.aspect();
+        let width = shown.0.max(1.0);
+        let shrink = (PREVIEW_MAX_PIXELS / (width * (width / aspect)).max(1.0))
+            .sqrt()
+            .min(1.0);
+        let preview_width =
+            ((width * shrink).round() as u32).clamp(PREVIEW_MIN_SIDE, self.size.0.max(PREVIEW_MIN_SIDE));
+        let preview_height =
+            ((preview_width as f32 / aspect).round() as u32).clamp(PREVIEW_MIN_SIDE, self.size.1.max(PREVIEW_MIN_SIDE));
+        (preview_width, preview_height)
+    }
+
+    /// The renderer's input for this frame, traced at the preview size; `scale` converts HUD points to physical pixels
+    /// and `voxel_size` is the Scene's voxel edge in metres.
     pub(crate) fn trace_frame(&self, camera: &OrbitCamera, scale: f32, voxel_size: f32) -> Option<TraceFrame> {
         let [x, y, width, height] = self.frame_rect?;
+        let preview = self.preview_size((width * scale, height * scale));
         Some(TraceFrame {
-            region: self.pixel_region(),
+            region: self.pixel_region(preview),
             running: self.running,
             frame_rect: [x * scale, y * scale, width * scale, height * scale],
-            ..self.frame_for(camera, self.lens_mm, self.size, voxel_size)
+            ..self.frame_for(camera, self.lens_mm, preview, voxel_size)
         })
     }
 
@@ -424,11 +524,22 @@ impl RenderState {
         self.focus_m.unwrap_or(camera.distance * voxel_size)
     }
 
-    /// Records the renderer's progress; a restart resets the clock the ETA runs on.
+    /// Records the renderer's progress; a restart resets the clock the ETA runs on, and time spent paused does not
+    /// count towards it.
     pub(crate) fn update_progress(&mut self, progress: TraceProgress, now: Instant) {
         if progress.generation != self.generation {
             self.generation = progress.generation;
             self.started = now;
+            self.paused_total = Duration::ZERO;
+            self.paused_since = None;
+        }
+        match (self.running, self.paused_since) {
+            (false, None) => self.paused_since = Some(now),
+            (true, Some(since)) => {
+                self.paused_total += now.saturating_duration_since(since);
+                self.paused_since = None;
+            }
+            _ => {}
         }
         self.progress = progress;
     }
@@ -448,14 +559,20 @@ impl RenderState {
         self.running && self.progress.samples < self.progress.target
     }
 
-    /// Time left at the pace so far, or `None` before the first sample or when finished.
+    /// Time left at the pace so far, or `None` before anything is traced or when finished. A sample that is still
+    /// being swept band by band counts by the part that is done, so a slow GPU shows an estimate before the first
+    /// full sample.
     pub(crate) fn eta(&self, now: Instant) -> Option<Duration> {
-        let done = self.progress.samples;
-        if done == 0 || done >= self.progress.target {
+        let done = f64::from(self.progress.samples) + f64::from(self.progress.partial);
+        if done <= 0.0 || self.progress.samples >= self.progress.target {
             return None;
         }
-        let elapsed = now.saturating_duration_since(self.started);
-        Some(elapsed.mul_f64(f64::from(self.progress.target - done) / f64::from(done)))
+        let paused = self.paused_total
+            + self
+                .paused_since
+                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        let elapsed = now.saturating_duration_since(self.started).saturating_sub(paused);
+        Some(elapsed.mul_f64((f64::from(self.progress.target) - done) / done))
     }
 
     pub(crate) fn fraction_done(&self) -> f32 {
@@ -489,10 +606,24 @@ pub(crate) fn lens_to_fov_degrees(lens_mm: f32) -> f32 {
         .to_degrees()
 }
 
-/// `mm:ss` for a duration, capped at 99:59.
+/// `mm:ss` for a duration, `h:mm:ss` from one hour on.
 pub(crate) fn format_duration(duration: Duration) -> String {
-    let seconds = duration.as_secs().min(99 * 60 + 59);
-    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    let seconds = duration.as_secs();
+    if seconds >= 3600 {
+        format!("{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+    } else {
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
+/// The Camera tab's projection choice that matches `camera`: the isometric view is the orthographic one from the
+/// classic angle.
+pub(crate) fn projection_of(camera: &OrbitCamera) -> ViewProjection {
+    match camera.projection {
+        Projection::Perspective => ViewProjection::Perspective,
+        Projection::Orthographic if camera.is_isometric() => ViewProjection::Isometric,
+        Projection::Orthographic => ViewProjection::Orthographic,
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +653,7 @@ mod tests {
         assert!(render.add_shot(&camera));
         camera.yaw = 2.0;
         render.size = (1080, 1080);
+        render.update_shot(1, &camera);
         render.select_shot(0, &mut camera);
         assert!((camera.yaw - OrbitCamera::default().yaw).abs() < 1e-6);
         assert_eq!(render.size, (1920, 1080), "shot 1 kept its own size");
@@ -539,25 +671,17 @@ mod tests {
     }
 
     #[test]
-    fn the_live_view_updates_the_active_shot_before_switching() {
-        let (mut render, mut camera) = state();
-        render.add_shot(&camera);
-        camera.pitch = 1.0;
-        render.select_shot(0, &mut camera);
-        render.select_shot(1, &mut camera);
-        assert!(
-            (camera.pitch - 1.0).abs() < 1e-6,
-            "shot 2 remembered the edit made while it was active"
-        );
-    }
-
-    #[test]
     fn region_fractions_become_ordered_pixels() {
         let (mut render, _) = state();
         render.region = Some([0.75, 0.5, 0.25, 0.0]);
-        assert_eq!(render.pixel_region(), Some([480, 0, 1440, 540]));
+        assert_eq!(render.pixel_region(render.size), Some([480, 0, 1440, 540]));
+        assert_eq!(
+            render.pixel_region((960, 540)),
+            Some([240, 0, 720, 270]),
+            "the region scales to the preview size"
+        );
         render.region = Some([0.5, 0.5, 0.5, 0.9]);
-        assert_eq!(render.pixel_region(), None, "a zero-width region is ignored");
+        assert_eq!(render.pixel_region(render.size), None, "a zero-width region is ignored");
     }
 
     #[test]
@@ -571,6 +695,30 @@ mod tests {
         let far = inverse.project_point3(glam::Vec3::new(0.0, 0.0, 1.0));
         let to_target = (camera.target - near).normalize();
         assert!((far - near).normalize().dot(to_target) > 0.9999);
+    }
+
+    #[test]
+    fn the_preview_follows_the_display_and_never_the_output() {
+        let (mut render, _) = state();
+        // Shown at 1030 x 580 physical pixels, the preview traces about that, not 1920 x 1080.
+        let preview = render.preview_size((1030.0, 579.4));
+        assert!((i64::from(preview.0) - 1030).abs() <= 1 && (i64::from(preview.1) - 579).abs() <= 1);
+        // A large display is capped so the trace stays affordable, at the output's aspect.
+        let capped = render.preview_size((3840.0, 2160.0));
+        assert!(capped.0 * capped.1 <= 1_350_000 && (capped.0 as f32 / capped.1 as f32 - 16.0 / 9.0).abs() < 0.02);
+        // A small output is never enlarged for the preview.
+        render.size = (320, 180);
+        assert_eq!(render.preview_size((1030.0, 579.0)), (320, 180));
+    }
+
+    #[test]
+    fn the_region_is_set_in_preview_pixels() {
+        let (mut render, camera) = state();
+        render.frame_rect = Some([0.0, 0.0, 800.0, 450.0]);
+        render.region = Some([0.0, 0.0, 0.5, 1.0]);
+        let frame = render.trace_frame(&camera, 1.0, 0.1).unwrap();
+        assert_eq!(frame.size, (800, 450));
+        assert_eq!(frame.region, Some([0, 0, 400, 450]));
     }
 
     #[test]
@@ -644,8 +792,113 @@ mod tests {
     }
 
     #[test]
-    fn durations_format_as_minutes_and_seconds() {
+    fn durations_format_as_minutes_and_seconds_then_hours() {
         assert_eq!(format_duration(Duration::from_secs(75)), "01:15");
-        assert_eq!(format_duration(Duration::from_secs(100_000)), "99:59");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59:59");
+        assert_eq!(format_duration(Duration::from_secs(3725)), "1:02:05");
+        assert_eq!(format_duration(Duration::from_secs(100_000)), "27:46:40");
+    }
+
+    #[test]
+    fn a_sample_in_flight_gives_an_estimate_before_it_is_finished() {
+        let (mut render, _) = state();
+        let start = Instant::now();
+        render.update_progress(
+            TraceProgress {
+                samples: 0,
+                target: 10,
+                partial: 0.5,
+                generation: 1,
+            },
+            start,
+        );
+        // Half a sample in 5 s: 9.5 samples to go at 10 s per sample.
+        assert_eq!(render.eta(start + Duration::from_secs(5)).unwrap().as_secs(), 95);
+    }
+
+    #[test]
+    fn paused_time_does_not_count_towards_the_eta() {
+        let (mut render, _) = state();
+        let start = Instant::now();
+        let progress = |samples| TraceProgress {
+            samples,
+            target: 100,
+            partial: 0.0,
+            generation: 1,
+        };
+        render.update_progress(progress(0), start);
+        render.update_progress(progress(10), start + Duration::from_secs(10));
+        // Paused for a minute between second 11 and 71.
+        render.running = false;
+        render.update_progress(progress(10), start + Duration::from_secs(11));
+        render.running = true;
+        render.update_progress(progress(10), start + Duration::from_secs(71));
+        let eta = render.eta(start + Duration::from_secs(71)).unwrap();
+        // 11 s of running time for 10 samples, 90 to go.
+        assert_eq!(eta.as_secs(), 99, "the paused minute is left out");
+    }
+
+    #[test]
+    fn shots_are_saved_views_that_the_live_view_does_not_overwrite() {
+        let (mut render, mut camera) = state();
+        let original = camera.clone();
+        assert!(render.add_shot(&camera));
+        camera.yaw += 1.0;
+        assert!(render.shot_modified(1, &camera), "the active shot notices the change");
+        assert!(!render.shot_modified(0, &camera));
+        assert_eq!(render.shots[0].camera, original, "Shot 1 kept what it saved");
+        render.select_shot(0, &mut camera);
+        assert_eq!(camera, original);
+        // Adding after moving stores the new view as a new shot and leaves the others alone.
+        camera.yaw += 0.5;
+        assert!(render.add_shot(&camera));
+        assert_eq!(render.shots.len(), 3);
+        assert_eq!(render.shots[0].camera, original);
+        assert_ne!(render.shots[2].camera, render.shots[0].camera);
+    }
+
+    #[test]
+    fn shots_can_be_updated_renamed_and_deleted() {
+        let (mut render, mut camera) = state();
+        render.add_shot(&camera);
+        render.add_shot(&camera);
+        camera.pitch = 0.2;
+        render.update_shot(2, &camera);
+        assert_eq!(render.shots[2].camera, camera);
+        assert!(!render.shot_modified(2, &camera));
+        render.rename_shot(1, "Front ");
+        assert_eq!(render.shots[1].name.as_deref(), Some("Front "));
+        render.rename_shot(1, "  ");
+        assert_eq!(render.shots[1].name, None, "a blank name goes back to the default");
+        render.delete_shot(1, &mut camera);
+        assert_eq!(render.shots.len(), 2);
+        assert_eq!(render.active_shot, 1, "the active shot keeps its place");
+        render.delete_shot(1, &mut camera);
+        render.delete_shot(0, &mut camera);
+        assert_eq!(render.shots.len(), 1, "the last shot stays");
+    }
+
+    #[test]
+    fn the_queue_renders_the_screen_until_shots_are_managed() {
+        let (mut render, mut camera) = state();
+        camera.yaw += 1.0;
+        assert_eq!(render.queued_shots(&camera).len(), 1);
+        assert_eq!(render.queued_shots(&camera)[0].camera, camera);
+        render.add_shot(&camera);
+        camera.yaw += 1.0;
+        let queued = render.queued_shots(&camera);
+        assert_eq!(queued.len(), 2);
+        assert_ne!(queued[1].camera, camera, "saved shots render as saved");
+    }
+
+    #[test]
+    fn entering_render_mode_recognises_the_isometric_view() {
+        let (mut render, mut camera) = state();
+        camera.isometric();
+        render.enter(&camera);
+        assert_eq!(render.projection, ViewProjection::Isometric);
+        camera.yaw = 1.0;
+        render.enter(&camera);
+        assert_eq!(render.projection, ViewProjection::Orthographic);
     }
 }

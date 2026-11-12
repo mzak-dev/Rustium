@@ -297,6 +297,10 @@ rtab-light = Światło
 rtab-output = Wyjście
 frame-guides = Linie kadru
 hint-dolly = Zbliż
+hint-wheel = Kółko
+hint-pick-focus = Wybierz ostrość
+hint-aim-sun = Ustaw słońce
+hint-draw-region = Zaznacz obszar
 
 ## Render inspector
 style = Styl
@@ -371,7 +375,12 @@ render-button-hint = Rozpocznij lub wstrzymaj renderowanie
 add-shot = Dodaj ujęcie z bieżącego widoku
 shots-full = Wszystkie pięć ujęć jest zajętych
 shot-name = Ujęcie { $n }
-shot-tooltip = Ujęcie { $n }, { $size }
+shot-tooltip = { $name }, { $size }
+shot-modified = Zmieniono po zapisaniu. Kliknij, aby wrócić do zapisanego widoku, albo kliknij prawym przyciskiem, aby go zaktualizować.
+shot-rename = Nazwa
+shot-update = Zaktualizuj z bieżącego widoku
+shot-delete = Usuń ujęcie
+image-too-large = Obraz { $width } × { $height } wymaga około { $needed } GB pamięci karty graficznej; dozwolone jest najwyżej { $allowed } GB i { $side } pikseli na bok. Wybierz mniejszy rozmiar.
 status-rendering = Renderowanie
 status-paused = Wstrzymano
 status-done = Gotowe

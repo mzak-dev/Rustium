@@ -8,7 +8,7 @@ use fluent_bundle::FluentValue;
 use super::widgets::{self, Look};
 use super::{AppCommand, Hud, Intro, MARGIN, Place, centre_budget, corner, corner_budget, fit_key, fit_level, island};
 use crate::icons::Icon;
-use crate::render_mode::{MAX_SHOTS, RenderStatus, format_duration};
+use crate::render_mode::{MAX_SHOTS, RenderStatus, RenderTool, format_duration};
 use crate::theme;
 
 /// Starts, pauses or restarts the render (the Render button and F5).
@@ -126,8 +126,27 @@ fn draw_label(painter: &egui::Painter, rect: egui::Rect, galley: std::sync::Arc<
     );
 }
 
+/// Icons of the Shot tiles, by position.
+const SHOT_ICONS: [Icon; 5] = [Icon::Cube, Icon::Fit, Icon::Palette, Icon::Grid, Icon::Eye];
+
+/// The name shown for Shot `index`: the one the user gave it, else "Shot n".
+pub(crate) fn shot_label(hud: &Hud<'_>, index: usize) -> String {
+    hud.ui
+        .render
+        .shots
+        .get(index)
+        .and_then(|shot| shot.name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(
+            || hud.i18n.tr_args("shot-name", &[("n", FluentValue::from(index + 1))]),
+            str::to_owned,
+        )
+}
+
 fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize, width: f32) {
     let selected = index == hud.ui.render.active_shot;
+    let modified = hud.ui.render.shot_modified(index, hud.camera);
     let lift = ui
         .ctx()
         .animate_bool_with_time(Id::unique(("shot-lift", index)), selected, 0.18);
@@ -146,7 +165,7 @@ fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize, width: f32) {
         StrokeKind::Inside,
     );
     let dark = Color32::from_rgb(0x2a, 0x2d, 0x32);
-    Icon::Cube.paint(
+    SHOT_ICONS[index % SHOT_ICONS.len()].paint(
         painter,
         egui::Rect::from_center_size(rect.center() + vec2(4.0, 2.0), vec2(18.0, 18.0)),
         dark,
@@ -158,18 +177,84 @@ fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize, width: f32) {
         FontId::monospace(9.0),
         Color32::from_rgb(0x1a, 0x1d, 0x22),
     );
-    let shot = hud.ui.render.shots.get(index);
-    let size = shot.map_or((0, 0), |shot| shot.size);
-    let tooltip = hud.i18n.tr_args(
+    if modified {
+        painter.circle_filled(rect.right_top() + vec2(-6.0, 6.0), 3.0, hud.accent());
+    }
+    let size = hud.ui.render.shots.get(index).map_or((0, 0), |shot| shot.size);
+    let mut tooltip = hud.i18n.tr_args(
         "shot-tooltip",
         &[
-            ("n", FluentValue::from(index + 1)),
+            ("name", FluentValue::from(shot_label(hud, index))),
             ("size", FluentValue::from(format!("{} × {}", size.0, size.1))),
         ],
     );
-    if response.on_hover_text(tooltip).clicked() && !selected {
+    if modified {
+        tooltip.push('\n');
+        tooltip.push_str(&hud.tr("shot-modified"));
+    }
+    let response = response.on_hover_text(tooltip);
+    if response.clicked() && (!selected || modified) {
         hud.ui.render.select_shot(index, hud.camera);
     }
+    shot_menu(&response, hud, index, modified);
+}
+
+/// Right-click menu of a Shot tile: name, update from the live view, delete.
+fn shot_menu(response: &egui::Response, hud: &mut Hud<'_>, index: usize, modified: bool) {
+    let rename_label = hud.tr("shot-rename");
+    let update_label = hud.tr("shot-update");
+    let delete_label = hud.tr("shot-delete");
+    response.context_menu(|ui| {
+        ui.set_min_width(190.0);
+        ui.label(RichText::new(rename_label).color(theme::SUBTLE).size(10.0));
+        let mut name = hud
+            .ui
+            .render
+            .shots
+            .get(index)
+            .and_then(|shot| shot.name.clone())
+            .unwrap_or_default();
+        let hint = shot_label(hud, index);
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text(hint)
+                .desired_width(170.0),
+        );
+        if edit.changed() {
+            hud.ui.render.rename_shot(index, &name);
+        }
+        if edit.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                modified && index == hud.ui.render.active_shot,
+                egui::Button::new(update_label),
+            )
+            .clicked()
+        {
+            hud.ui.render.update_shot(index, hud.camera);
+            ui.close();
+        }
+        if ui
+            .add_enabled(hud.ui.render.shots.len() > 1, egui::Button::new(delete_label))
+            .clicked()
+        {
+            hud.ui.render.delete_shot(index, hud.camera);
+            ui.close();
+        }
+    });
+}
+
+/// A cell `width` wide whose content sits at the left or right edge.
+fn fixed_cell(ui: &mut egui::Ui, width: f32, align: egui::Align, content: impl FnOnce(&mut egui::Ui)) {
+    let layout = if align == egui::Align::RIGHT {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.allocate_ui_with_layout(vec2(width, 16.0), layout, content);
 }
 
 /// Bottom corners: mouse hints on the left, status, samples and time left on the right.
@@ -201,7 +286,19 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(34.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                let all = [("LMB", "hint-orbit"), ("MMB", "hint-pan"), ("Wheel", "hint-dolly")];
+                let left = match hud.ui.render.tool {
+                    RenderTool::Orbit => "hint-orbit",
+                    RenderTool::Pan => "hint-pan",
+                    RenderTool::Dolly => "hint-dolly",
+                    RenderTool::PickFocus => "hint-pick-focus",
+                    RenderTool::AimSun => "hint-aim-sun",
+                    RenderTool::Region => "hint-draw-region",
+                };
+                let all = [
+                    ("LMB".to_owned(), left),
+                    ("MMB".to_owned(), "hint-pan"),
+                    (hud.tr("hint-wheel"), "hint-dolly"),
+                ];
                 for (button, key) in all.into_iter().take(3 - usize::from(hints_level)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -241,12 +338,16 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                     RenderStatus::Paused => hud.tr("status-paused"),
                     RenderStatus::Done => hud.tr("status-done"),
                 };
-                ui.label(RichText::new(status).font(theme::bold(11.0)).color(theme::TEXT));
+                // Fixed-width cells: the island keeps its width while the numbers change.
+                fixed_cell(ui, 78.0, egui::Align::LEFT, |ui| {
+                    ui.label(RichText::new(status).font(theme::bold(11.0)).color(theme::TEXT));
+                });
                 if readout_level == 0 {
-                    ui.label(widgets::mono(
-                        format!("{} / {} spp", render.progress.samples, render.progress.target),
-                        11.0,
-                    ));
+                    // More samples than asked (the target was lowered) read as finished, not as "101 / 64".
+                    let done = render.progress.samples.min(render.progress.target);
+                    fixed_cell(ui, 100.0, egui::Align::RIGHT, |ui| {
+                        ui.label(widgets::mono(format!("{done} / {} spp", render.progress.target), 11.0));
+                    });
                 }
                 let eta = match render.status() {
                     RenderStatus::Done => hud.tr("eta-finished"),
@@ -259,7 +360,9 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                     ),
                 };
                 if readout_level < 2 {
-                    ui.label(widgets::mono(eta, 11.0));
+                    fixed_cell(ui, 112.0, egui::Align::RIGHT, |ui| {
+                        ui.label(widgets::mono(eta, 11.0));
+                    });
                 }
             });
         },

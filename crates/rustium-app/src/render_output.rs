@@ -1,19 +1,12 @@
-//! Saving the traced image: ACES-tonemapped 8-bit PNG or raw linear EXR, picked through a native file dialog.
-//!
-//! `rfd` is the one dialog crate used because it is a thin wrapper over the OS dialogs (on Windows just
-//! `windows-sys`), so it adds no runtime and almost no build time. The dialog and the encoding run on a worker
-//! thread so the interface keeps drawing.
+//! Writing the traced image: ACES-tonemapped 8-bit PNG or raw linear EXR. The render jobs call this from their worker
+//! thread, which also asks for the file name through a native dialog (see `render_job`).
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 
 use color_eyre::eyre::{Result, WrapErr};
 use rustium_render::TraceImage;
-use tracing::{error, info};
-
-use crate::render_mode::ImageFormat;
 
 /// How a Save image request ended.
 #[derive(Debug)]
@@ -119,51 +112,6 @@ pub(crate) fn write_exr(path: &Path, image: &TraceImage) -> Result<()> {
         }
     })
     .wrap_err("cannot write the EXR")
-}
-
-/// Asks for a file name and writes `image` on a worker thread; the result arrives on `done`.
-pub(crate) fn save_with_dialog(
-    image: TraceImage,
-    format: ImageFormat,
-    transparent: bool,
-    exposure: f32,
-    done: Sender<SaveOutcome>,
-) {
-    let spawned = std::thread::Builder::new()
-        .name("save-image".to_owned())
-        .spawn(move || {
-            let (label, extension) = match format {
-                ImageFormat::Png | ImageFormat::Mp4 => ("PNG", "png"),
-                ImageFormat::Exr => ("OpenEXR", "exr"),
-            };
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter(label, &[extension])
-                .set_file_name(format!("render.{extension}"))
-                .save_file()
-            else {
-                let _ = done.send(SaveOutcome::Cancelled);
-                return;
-            };
-            let path = path.with_extension(extension);
-            let result = match format {
-                ImageFormat::Png | ImageFormat::Mp4 => write_png(&path, &image, transparent, exposure),
-                ImageFormat::Exr => write_exr(&path, &image),
-            };
-            let outcome = match result {
-                Ok(()) => {
-                    info!(path = %path.display(), "saved image");
-                    SaveOutcome::Saved(path)
-                }
-                Err(report) => {
-                    error!(error = ?report, "cannot save the image");
-                    SaveOutcome::Failed(format!("{report:#}"))
-                }
-            };
-            let _ = done.send(outcome);
-        });
-    if let Err(error) = spawned {
-        error!(%error, "cannot start the save thread");
-    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
-use tracing::{info, warn};
+use std::sync::Arc;
+
+use tracing::{error, info, warn};
 
 use crate::error::Error;
 
@@ -217,7 +219,7 @@ pub async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wg
         experimental_features,
         ..Default::default()
     };
-    match adapter.request_device(&descriptor).await {
+    let opened: Result<(wgpu::Device, wgpu::Queue), Error> = match adapter.request_device(&descriptor).await {
         Ok(pair) => Ok(pair),
         Err(error) if ray_query => {
             warn!(%error, "device with ray query failed, retrying without it");
@@ -229,7 +231,13 @@ pub async fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wg
             Ok(adapter.request_device(&plain).await?)
         }
         Err(error) => Err(error.into()),
-    }
+    };
+    let (device, queue) = opened?;
+    // By default wgpu panics on an error nobody captured; a failed allocation must not take the editor down.
+    device.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
+        error!(%error, "the GPU reported an error");
+    }));
+    Ok((device, queue))
 }
 
 fn fallback_config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {

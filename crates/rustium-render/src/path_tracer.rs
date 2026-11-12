@@ -358,6 +358,15 @@ pub struct PathTracer {
     generation: u64,
 }
 
+/// How many rows of `padded` bytes one read-back staging buffer holds: a quarter of the device's buffer limit, at
+/// most 64 MiB, at least one row, at most the image.
+fn readback_band_rows(max_buffer_size: u64, padded: u32, height: u32) -> u32 {
+    let limit = (max_buffer_size / 4).min(64 << 20).max(u64::from(padded));
+    u32::try_from(limit / u64::from(padded))
+        .unwrap_or(u32::MAX)
+        .clamp(1, height.max(1))
+}
+
 impl PathTracer {
     /// Builds the pipelines; `materials` are the buffers shared with the raster pass and `target_format` the format
     /// of the view [`PathTracer::encode`] draws into. The compute pipeline starts out with only the Default material
@@ -860,52 +869,62 @@ impl PathTracer {
         let (width, height) = accumulation.size;
         let row_bytes = width * 16;
         let padded = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        // Read back in bands of rows: one staging buffer for the whole image would exceed `max_buffer_size` (and
+        // fail validation) for large renders. A band stays within a quarter of the limit and 64 MiB.
+        let band_rows = readback_band_rows(device.limits().max_buffer_size, padded, height);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("path tracer readback"),
-            size: u64::from(padded) * u64::from(height),
+            size: u64::from(padded) * u64::from(band_rows),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("path tracer readback encoder"),
-        });
-        encoder.copy_texture_to_buffer(
-            resolved.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(std::iter::once(encoder.finish()));
-        let (sender, receiver) = mpsc::channel();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let _ = sender.send(result);
-        });
-        if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
-            warn!(%error, "waiting for the readback failed");
-            return Err(Error::Readback);
-        }
-        receiver
-            .recv()
-            .map_err(|_| Error::Readback)?
-            .map_err(|_| Error::Readback)?;
-        let mapped = buffer.slice(..).get_mapped_range().map_err(|_| Error::Readback)?;
         let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-        for row in mapped.chunks(padded as usize).take(height as usize) {
-            let texels: &[f32] = bytemuck::cast_slice(row.get(..row_bytes as usize).ok_or(Error::Readback)?);
-            rgba.extend_from_slice(texels);
+        let mut first_row = 0;
+        while first_row < height {
+            let rows = band_rows.min(height - first_row);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("path tracer readback encoder"),
+            });
+            let mut source = resolved.as_image_copy();
+            source.origin.y = first_row;
+            encoder.copy_texture_to_buffer(
+                source,
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(rows),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+            let (sender, receiver) = mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            if let Err(error) = device.poll(wgpu::PollType::wait_indefinitely()) {
+                warn!(%error, "waiting for the readback failed");
+                return Err(Error::Readback);
+            }
+            receiver
+                .recv()
+                .map_err(|_| Error::Readback)?
+                .map_err(|_| Error::Readback)?;
+            let mapped = buffer.slice(..).get_mapped_range().map_err(|_| Error::Readback)?;
+            for row in mapped.chunks(padded as usize).take(rows as usize) {
+                let texels: &[f32] = bytemuck::cast_slice(row.get(..row_bytes as usize).ok_or(Error::Readback)?);
+                rgba.extend_from_slice(texels);
+            }
+            drop(mapped);
+            buffer.unmap();
+            first_row += rows;
         }
-        drop(mapped);
-        buffer.unmap();
         Ok(TraceImage {
             width,
             height,
@@ -1103,6 +1122,21 @@ fn sun_direction(turn_degrees: f32, height_degrees: f32) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn readback_bands_respect_the_buffer_limit() {
+        // 6000 pixels of 16 bytes per row: far more rows than a 256 MiB limit allows in one buffer.
+        let padded = 96_000;
+        let rows = readback_band_rows(256 << 20, padded, 4000);
+        assert!(u64::from(rows) * u64::from(padded) <= (256 << 20) / 4);
+        assert!(rows >= 1 && rows < 4000);
+        assert_eq!(
+            readback_band_rows(u64::MAX, 256, 10),
+            10,
+            "small images are read in one go"
+        );
+        assert_eq!(readback_band_rows(16, 256, 10), 1, "a row is the least");
+    }
+
     use super::*;
 
     #[test]

@@ -11,6 +11,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use rustium_core::Scene;
@@ -106,7 +107,14 @@ impl JobHandle {
 
     /// The job's result once it has ended.
     pub(crate) fn poll(&self) -> Option<SaveOutcome> {
-        self.results.try_recv().ok()
+        match self.results.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(mpsc::TryRecvError::Empty) => None,
+            // The worker ended without reporting (it panicked): the job is over, whatever the UI thought.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(SaveOutcome::Failed("the render thread stopped unexpectedly".to_owned()))
+            }
+        }
     }
 }
 
@@ -295,21 +303,36 @@ fn render_video(
     render: &mut impl FnMut(&TraceFrame, &mut dyn FnMut(u32) -> bool) -> Result<Option<TraceImage>>,
 ) -> Result<Option<Finished>> {
     let mut sink: Option<VideoSink> = None;
-    for frame in &output.frames {
-        let Some(image) = render_frame(frame, progress, cancel, render)? else {
+    let mut run = || -> Result<bool> {
+        for frame in &output.frames {
+            let Some(image) = render_frame(frame, progress, cancel, render)? else {
+                return Ok(false);
+            };
+            if sink.is_none() {
+                sink = Some(VideoSink::open(path, (image.width, image.height), ffmpeg)?);
+            }
+            if let Some(sink) = &mut sink {
+                sink.push(&image, exposure)?;
+            }
+        }
+        Ok(true)
+    };
+    match run() {
+        Ok(true) => sink.map(VideoSink::finish).transpose(),
+        Ok(false) => {
             if let Some(sink) = sink {
                 sink.abort();
             }
-            return Ok(None);
-        };
-        if sink.is_none() {
-            sink = Some(VideoSink::open(path, (image.width, image.height), ffmpeg)?);
+            Ok(None)
         }
-        if let Some(sink) = &mut sink {
-            sink.push(&image, exposure)?;
+        Err(report) => {
+            // Never leave ffmpeg running or a truncated file behind.
+            if let Some(sink) = sink {
+                sink.abort();
+            }
+            Err(report)
         }
     }
-    sink.map(VideoSink::finish).transpose()
 }
 
 /// Where video frames go: an `ffmpeg` process, or numbered PNG files when there is none.
@@ -317,6 +340,8 @@ enum VideoSink {
     Ffmpeg {
         child: Child,
         input: Option<ChildStdin>,
+        /// Reads stderr while ffmpeg runs, so a full pipe cannot stall it.
+        stderr: Option<JoinHandle<String>>,
         path: PathBuf,
     },
     Sequence {
@@ -360,9 +385,20 @@ impl VideoSink {
         match command.spawn() {
             Ok(mut child) => {
                 let input = child.stdin.take();
+                let stderr = child.stderr.take().and_then(|mut pipe| {
+                    std::thread::Builder::new()
+                        .name("ffmpeg-stderr".to_owned())
+                        .spawn(move || {
+                            let mut text = String::new();
+                            let _ = pipe.read_to_string(&mut text);
+                            text
+                        })
+                        .ok()
+                });
                 Ok(Self::Ffmpeg {
                     child,
                     input,
+                    stderr,
                     path: path.to_path_buf(),
                 })
             }
@@ -381,14 +417,18 @@ impl VideoSink {
 
     fn push(&mut self, image: &TraceImage, exposure: f32) -> Result<()> {
         match self {
-            Self::Ffmpeg { child, input, .. } => {
+            Self::Ffmpeg {
+                child, input, stderr, ..
+            } => {
                 let bytes = render_output::rgb_bytes(image, exposure);
                 let Some(pipe) = input else {
                     return Err(eyre!("ffmpeg has no input"));
                 };
                 if let Err(error) = pipe.write_all(&bytes) {
                     // ffmpeg usually died with a reason on stderr; prefer that to "broken pipe".
-                    let reason = take_stderr(child);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let reason = collect_stderr(stderr.take());
                     return Err(eyre!(
                         "ffmpeg stopped: {}",
                         if reason.is_empty() { error.to_string() } else { reason }
@@ -410,13 +450,18 @@ impl VideoSink {
 
     fn finish(self) -> Result<Finished> {
         match self {
-            Self::Ffmpeg { mut child, input, path } => {
+            Self::Ffmpeg {
+                mut child,
+                input,
+                stderr,
+                path,
+            } => {
                 drop(input);
                 let status = child.wait().wrap_err("cannot wait for ffmpeg")?;
+                let reason = collect_stderr(stderr);
                 if status.success() {
                     Ok(Finished::File(path))
                 } else {
-                    let reason = take_stderr(&mut child);
                     let _ = fs::remove_file(&path);
                     Err(eyre!("ffmpeg failed ({status}): {reason}"))
                 }
@@ -428,10 +473,16 @@ impl VideoSink {
     /// Stops encoding and removes what was written so far.
     fn abort(self) {
         match self {
-            Self::Ffmpeg { mut child, input, path } => {
+            Self::Ffmpeg {
+                mut child,
+                input,
+                stderr,
+                path,
+            } => {
                 drop(input);
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = collect_stderr(stderr);
                 let _ = fs::remove_file(path);
             }
             Self::Sequence { directory, .. } => {
@@ -441,13 +492,11 @@ impl VideoSink {
     }
 }
 
-/// What the child wrote to stderr, trimmed.
-fn take_stderr(child: &mut Child) -> String {
-    let mut text = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_string(&mut text);
-    }
-    text.trim().to_owned()
+/// What the stderr reader collected, trimmed. The process must have ended (or been killed) so the pipe is closed.
+fn collect_stderr(reader: Option<JoinHandle<String>>) -> String {
+    reader
+        .and_then(|reader| reader.join().ok())
+        .map_or_else(String::new, |text| text.trim().to_owned())
 }
 
 #[cfg(test)]
@@ -655,6 +704,18 @@ mod tests {
         handle.progress.partial.store(500, Ordering::Relaxed);
         assert!((handle.fraction() - 0.375).abs() < 1e-6);
         assert!(handle.poll().is_none());
+    }
+
+    #[test]
+    fn a_worker_that_vanished_is_reported_as_a_failure() {
+        let (sender, results) = mpsc::channel::<SaveOutcome>();
+        let handle = JobHandle {
+            progress: Arc::new(Progress::default()),
+            cancel: Arc::new(AtomicBool::new(false)),
+            results,
+        };
+        drop(sender);
+        assert!(matches!(handle.poll(), Some(SaveOutcome::Failed(_))));
     }
 
     #[test]

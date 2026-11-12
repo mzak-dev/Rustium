@@ -6,7 +6,7 @@ use egui::{Align2, Color32, Context, FontId, Id, RichText, Sense, Stroke, Stroke
 use fluent_bundle::FluentValue;
 
 use super::widgets::{self, Look};
-use super::{AppCommand, Hud, Intro, MARGIN, Place, corner, island};
+use super::{AppCommand, Hud, Intro, MARGIN, Place, centre_budget, corner, corner_budget, fit_key, fit_level, island};
 use crate::icons::Icon;
 use crate::render_mode::{MAX_SHOTS, RenderStatus, format_duration};
 use crate::theme;
@@ -23,6 +23,16 @@ pub(crate) fn toggle_render(hud: &mut Hud<'_>) {
 
 /// Bottom-centre island: Render / Pause, the Shots and Add shot.
 pub(crate) fn shots(ctx: &Context, hud: &mut Hud<'_>) {
+    // Level 1 shows only the icon on the Render button, level 2 also makes the Shot tiles narrower.
+    let budget = centre_budget(ctx, hud, "render-hints", "render-readout");
+    let status = hud.ui.render.status();
+    let key = fit_key(&[
+        &hud.settings.language,
+        &hud.settings.ui_scale_percent,
+        &status,
+        &hud.ui.render.shots.len(),
+    ]);
+    let level = fit_level(ctx, hud, "render-shots", budget, key, 2);
     island(
         ctx,
         hud,
@@ -36,10 +46,10 @@ pub(crate) fn shots(ctx: &Context, hud: &mut Hud<'_>) {
         |ui, hud| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                render_button(ui, hud);
+                render_button(ui, hud, level >= 1);
                 widgets::divider(ui, 40.0);
                 for index in 0..hud.ui.render.shots.len() {
-                    shot_tile(ui, hud, index);
+                    shot_tile(ui, hud, index, if level >= 2 { 40.0 } else { 56.0 });
                 }
                 let can_add = hud.ui.render.shots.len() < MAX_SHOTS;
                 let add = widgets::icon_button(ui, Icon::Plus, 40.0, Look::Plain, can_add);
@@ -55,7 +65,7 @@ pub(crate) fn shots(ctx: &Context, hud: &mut Hud<'_>) {
     );
 }
 
-fn render_button(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
+fn render_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, icon_only: bool) {
     let status = hud.ui.render.status();
     let (icon, key) = match status {
         RenderStatus::Rendering => (Icon::Pause, "render-pause"),
@@ -64,7 +74,11 @@ fn render_button(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
     };
     let label = hud.tr(key);
     let galley = ui.painter().layout_no_wrap(label, theme::bold(12.5), theme::ON_ACCENT);
-    let width = (14.0 + 18.0 + 8.0 + galley.size().x + 8.0 + 22.0 + 14.0).max(132.0);
+    let width = if icon_only {
+        44.0
+    } else {
+        (14.0 + 18.0 + 8.0 + galley.size().x + 8.0 + 22.0 + 14.0).max(132.0)
+    };
     let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
     let accent = hud.accent();
     let fill = if response.hovered() {
@@ -81,9 +95,25 @@ fn render_button(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
     painter.rect_filled(rect, 8, fill);
     icon.paint(
         painter,
-        egui::Rect::from_center_size(rect.left_center() + vec2(23.0, 0.0), vec2(18.0, 18.0)),
+        egui::Rect::from_center_size(
+            if icon_only {
+                rect.center()
+            } else {
+                rect.left_center() + vec2(23.0, 0.0)
+            },
+            vec2(18.0, 18.0),
+        ),
         theme::ON_ACCENT,
     );
+    if !icon_only {
+        draw_label(painter, rect, galley);
+    }
+    if response.on_hover_text(hud.tr("render-button-hint")).clicked() {
+        toggle_render(hud);
+    }
+}
+
+fn draw_label(painter: &egui::Painter, rect: egui::Rect, galley: std::sync::Arc<egui::Galley>) {
     let text_pos = rect.left_center() + vec2(40.0, -galley.size().y / 2.0);
     let text_width = galley.size().x;
     painter.galley(text_pos, galley, theme::ON_ACCENT);
@@ -94,17 +124,14 @@ fn render_button(ui: &mut egui::Ui, hud: &mut Hud<'_>) {
         FontId::monospace(10.0),
         theme::ON_ACCENT,
     );
-    if response.on_hover_text(hud.tr("render-button-hint")).clicked() {
-        toggle_render(hud);
-    }
 }
 
-fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize) {
+fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize, width: f32) {
     let selected = index == hud.ui.render.active_shot;
     let lift = ui
         .ctx()
         .animate_bool_with_time(Id::unique(("shot-lift", index)), selected, 0.18);
-    let (rect, response) = ui.allocate_exact_size(vec2(56.0, 40.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 40.0), Sense::click());
     let rect = rect.translate(vec2(0.0, -6.0 * lift));
     let painter = ui.painter();
     if selected {
@@ -147,6 +174,11 @@ fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize) {
 
 /// Bottom corners: mouse hints on the left, status, samples and time left on the right.
 pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
+    // Level 1 drops one hint and the sample count, level 2 keeps one hint and only the status.
+    let budget = corner_budget(ctx);
+    let key = fit_key(&[&hud.settings.language, &hud.settings.ui_scale_percent]);
+    let hints_level = fit_level(ctx, hud, "render-hints", budget, key, 2);
+    let readout_level = fit_level(ctx, hud, "render-readout", budget, key, 2);
     let hints = theme::island()
         .corner_radius(corner(0, 12, 0, 0))
         .inner_margin(egui::Margin {
@@ -169,7 +201,8 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(34.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                for (button, key) in [("LMB", "hint-orbit"), ("MMB", "hint-pan"), ("Wheel", "hint-dolly")] {
+                let all = [("LMB", "hint-orbit"), ("MMB", "hint-pan"), ("Wheel", "hint-dolly")];
+                for (button, key) in all.into_iter().take(3 - usize::from(hints_level)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         ui.label(widgets::mono(button, 11.0).color(theme::TEXT));
@@ -209,10 +242,12 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                     RenderStatus::Done => hud.tr("status-done"),
                 };
                 ui.label(RichText::new(status).font(theme::bold(11.0)).color(theme::TEXT));
-                ui.label(widgets::mono(
-                    format!("{} / {} spp", render.progress.samples, render.progress.target),
-                    11.0,
-                ));
+                if readout_level == 0 {
+                    ui.label(widgets::mono(
+                        format!("{} / {} spp", render.progress.samples, render.progress.target),
+                        11.0,
+                    ));
+                }
                 let eta = match render.status() {
                     RenderStatus::Done => hud.tr("eta-finished"),
                     _ => render.eta(Instant::now()).map_or_else(
@@ -223,7 +258,9 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                         },
                     ),
                 };
-                ui.label(widgets::mono(eta, 11.0));
+                if readout_level < 2 {
+                    ui.label(widgets::mono(eta, 11.0));
+                }
             });
         },
     );

@@ -52,16 +52,27 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                             color.gamma_multiply(0.85),
                         );
                     }
-                    let tooltip = format!(
-                        "{}{}",
-                        hud.tr(tool.message_key()),
-                        hud.settings.keymap.hint(Action::Tool(tool))
-                    );
-                    if response.on_hover_text(tooltip).clicked() {
+                    widgets::side_tip(&response, &hud.tr(tool.message_key()), &key, &hud.tr(tip_key(tool)));
+                    if response.clicked() {
                         hud.editor.tool = tool;
                     }
                 }
             });
         },
     );
+}
+
+/// Message key of the one-line description shown in the tooltip.
+fn tip_key(tool: Tool) -> &'static str {
+    match tool {
+        Tool::SelectBox => "tip-select-box",
+        Tool::SelectColor => "tip-select-color",
+        Tool::Attach => "tip-attach",
+        Tool::Erase => "tip-erase",
+        Tool::Paint => "tip-paint",
+        Tool::Fill => "tip-fill",
+        Tool::Pick => "tip-pick",
+        Tool::Move => "tip-move",
+        Tool::Measure => "tip-measure",
+    }
 }

@@ -149,11 +149,19 @@ fn build(shape: PreviewShape, scene: &Scene) -> Vec<(ChunkCoord, ChunkMesh)> {
         return Vec::new();
     };
     let coords: Vec<ChunkCoord> = built.chunks().map(|(coord, _)| coord).collect();
+    // Every Color records its outer edges, so a Voxel bevel on outer edges only shows on whichever Material is
+    // previewed; the shapes are small enough that the extra quads do not matter.
+    let mut table = Transparency::OPAQUE;
+    for number in 1..=u8::MAX {
+        if let Some(color) = ColorId::new(number) {
+            table.set_outer_edges(color, true);
+        }
+    }
     coords
         .into_iter()
         .map(|coord| {
             let mut mesh = ChunkMesh::default();
-            mesh_chunk(built, coord, &Transparency::OPAQUE, &mut mesh);
+            mesh_chunk(built, coord, &table, &mut mesh);
             (coord, mesh)
         })
         .collect()

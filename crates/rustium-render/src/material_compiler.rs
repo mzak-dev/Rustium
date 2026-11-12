@@ -439,9 +439,10 @@ impl Emitter {
             GraphNodeKind::VoxelBevel => {
                 let radius = self.param(node, 0).scalar();
                 let segments = self.param(node, 1).scalar();
+                let outer = self.param(node, 2).scalar();
                 let _ = writeln!(
                     out,
-                    "    let {v0} = bevel_normal(position, normal, {radius}, i32({segments}));"
+                    "    let {v0} = bevel_normal(position, normal, {radius}, i32({segments}), {outer});"
                 );
             }
             GraphNodeKind::SurfaceOutput | GraphNodeKind::VolumeOutput => {}

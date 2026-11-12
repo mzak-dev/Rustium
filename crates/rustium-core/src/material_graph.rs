@@ -266,6 +266,8 @@ const SURFACE_EMISSION_STRENGTH: usize = 5;
 const SURFACE_TRANSMISSION: usize = 6;
 const SURFACE_TRANSMISSION_SOCKET: u8 = 6;
 const SURFACE_IOR: usize = 7;
+/// Index of the Voxel bevel's "Outer edges only" parameter.
+const BEVEL_OUTER_EDGES: usize = 2;
 
 /// A named Material: a node graph that decides what a Color looks like beyond its base color.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -414,6 +416,26 @@ impl MaterialGraph {
     /// The Volume output node, if the graph has one.
     pub fn volume_output(&self) -> Option<&GraphNode> {
         self.nodes.iter().find(|node| node.kind == GraphNodeKind::VolumeOutput)
+    }
+
+    /// Whether a Voxel bevel that is not bypassed rounds only the outer edges. The mesher then marks those edges
+    /// on the faces of the Material's Colors (see [`crate::Transparency`]).
+    pub fn bevels_outer_edges(&self) -> bool {
+        self.nodes.iter().any(|node| {
+            node.kind == GraphNodeKind::VoxelBevel
+                && !node.bypass
+                && node.params.get(BEVEL_OUTER_EDGES) == Some(&ParamValue::Bool(true))
+        })
+    }
+
+    /// Appends default values for parameters a node kind gained after the graph was saved, so that older files
+    /// still pass [`MaterialGraph::validate`].
+    pub fn fill_new_params(&mut self) {
+        for node in &mut self.nodes {
+            let missing = node.kind.spec().params.iter().skip(node.params.len());
+            let defaults: Vec<ParamValue> = missing.map(|param| param.kind.default_value()).collect();
+            node.params.extend(defaults);
+        }
     }
 
     /// Whether the Material may let light through: a transmission above zero (or linked), or a Volume output.
@@ -656,6 +678,33 @@ impl MaterialGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_active_outer_edge_bevel_asks_for_outer_edges() {
+        let mut graph = MaterialGraph::from_constants("Glass", SurfaceConstants::MATTE);
+        let bevel = graph.push_node(GraphNodeKind::VoxelBevel, [0.0, 0.0]);
+        assert!(!graph.bevels_outer_edges(), "a new bevel rounds every edge");
+        let node = graph.node_mut(bevel).expect("the bevel was just added");
+        node.params[BEVEL_OUTER_EDGES] = ParamValue::Bool(true);
+        assert!(graph.bevels_outer_edges());
+        graph.node_mut(bevel).expect("still there").bypass = true;
+        assert!(!graph.bevels_outer_edges(), "a bypassed bevel does nothing");
+    }
+
+    #[test]
+    fn a_bevel_saved_before_outer_edges_existed_gets_the_default_and_validates() {
+        let mut graph = MaterialGraph::from_constants("Old", SurfaceConstants::MATTE);
+        let bevel = graph.push_node(GraphNodeKind::VoxelBevel, [0.0, 0.0]);
+        graph
+            .node_mut(bevel)
+            .expect("the bevel was just added")
+            .params
+            .truncate(2);
+        assert!(graph.validate().is_err());
+        graph.fill_new_params();
+        assert_eq!(graph.validate(), Ok(()));
+        assert!(!graph.bevels_outer_edges());
+    }
 
     #[test]
     fn sanitized_clamps_every_parameter_and_replaces_nan() {

@@ -228,14 +228,15 @@ fn corrupt<T>(reason: &str) -> Result<T, FileError> {
     Err(FileError::Corrupt(reason.to_owned()))
 }
 
-fn from_dto(dto: SceneDto) -> Result<Scene, FileError> {
+fn from_dto(mut dto: SceneDto) -> Result<Scene, FileError> {
     if !(dto.voxel_size.is_finite() && dto.voxel_size > 0.0) {
         return corrupt("the voxel size is not a positive number");
     }
     if dto.materials.is_empty() || dto.materials.len() > MaterialGraph::MAX_PER_SCENE {
         return corrupt("the number of material graphs is out of range");
     }
-    for graph in &dto.materials {
+    for graph in &mut dto.materials {
+        graph.fill_new_params();
         if graph.validate().is_err() {
             return corrupt("a material graph is malformed");
         }

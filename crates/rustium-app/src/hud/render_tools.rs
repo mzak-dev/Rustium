@@ -3,13 +3,21 @@
 use egui::{Align2, Context, DragValue, FontId, RichText, Stroke, vec2};
 
 use super::widgets::{self, Look};
-use super::{Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, island};
+use super::{Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, fit_key, fit_level, island};
 use crate::keymap::Action;
 use crate::render_mode::{LENS_RANGE_MM, OrbitAround, RenderTool};
 use crate::theme;
 
 /// Top-centre island: name of the active tool, Lens and what the camera orbits around.
 pub(crate) fn options(ctx: &Context, hud: &mut Hud<'_>) {
+    // Level 1 drops the Tool name, level 2 also the labels.
+    let budget = centre_budget(ctx, hud, "top-left", "top-right");
+    let key = fit_key(&[
+        &hud.ui.render.tool,
+        &hud.settings.language,
+        &hud.settings.ui_scale_percent,
+    ]);
+    let level = fit_level(ctx, hud, "render-options", budget, key, 2);
     island(
         ctx,
         hud,
@@ -29,13 +37,17 @@ pub(crate) fn options(ctx: &Context, hud: &mut Hud<'_>) {
             ui.set_height(TOP_BAR_HEIGHT - 8.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let name = hud.tr(hud.ui.render.tool.message_key());
-                ui.add_sized(
-                    [112.0, 32.0],
-                    egui::Label::new(RichText::new(name).font(theme::bold(12.0))),
-                );
-                widgets::divider(ui, 32.0);
-                ui.label(widgets::muted(hud.tr("lens")));
+                if level == 0 {
+                    let name = hud.tr(hud.ui.render.tool.message_key());
+                    ui.add_sized(
+                        [112.0, 32.0],
+                        egui::Label::new(RichText::new(name).font(theme::bold(12.0))),
+                    );
+                    widgets::divider(ui, 32.0);
+                }
+                if level < 2 {
+                    ui.label(widgets::muted(hud.tr("lens")));
+                }
                 ui.add(
                     DragValue::new(&mut hud.ui.render.lens_mm)
                         .range(LENS_RANGE_MM.0..=LENS_RANGE_MM.1)
@@ -44,7 +56,9 @@ pub(crate) fn options(ctx: &Context, hud: &mut Hud<'_>) {
                         .max_decimals(0),
                 );
                 widgets::divider(ui, 32.0);
-                ui.label(widgets::muted(hud.tr("around")));
+                if level < 2 {
+                    ui.label(widgets::muted(hud.tr("around")));
+                }
                 let options = [
                     (OrbitAround::Model, hud.tr("around-model")),
                     (OrbitAround::Cursor, hud.tr("around-cursor")),
@@ -109,12 +123,24 @@ pub(crate) fn toolbar(ctx: &Context, hud: &mut Hud<'_>) {
                             color.gamma_multiply(0.85),
                         );
                     }
-                    let tooltip = format!("{} ({key})", hud.tr(tool.message_key()));
-                    if response.on_hover_text(tooltip).clicked() {
+                    widgets::side_tip(&response, &hud.tr(tool.message_key()), &key, &hud.tr(tip_key(tool)));
+                    if response.clicked() {
                         hud.ui.render.tool = tool;
                     }
                 }
             });
         },
     );
+}
+
+/// Message key of the one-line description shown in the tooltip.
+fn tip_key(tool: RenderTool) -> &'static str {
+    match tool {
+        RenderTool::Orbit => "rtip-orbit",
+        RenderTool::Pan => "rtip-pan",
+        RenderTool::Dolly => "rtip-dolly",
+        RenderTool::PickFocus => "rtip-focus",
+        RenderTool::AimSun => "rtip-sun",
+        RenderTool::Region => "rtip-region",
+    }
 }

@@ -84,17 +84,28 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                 let label_centre = quad.iter().fold(egui::Vec2::ZERO, |sum, p| sum + p.to_vec2()) / 4.0;
                 let area = (quad[1] - quad[0]).length() * (quad[3] - quad[0]).length();
                 if area > 120.0 {
-                    ui.painter().text(
-                        label_centre.to_pos2(),
-                        egui::Align2::CENTER_CENTER,
-                        hud.tr(label_key(*face)),
-                        crate::theme::bold(7.0),
-                        if face.axis() == 1 {
-                            Color32::WHITE
-                        } else {
-                            crate::theme::SOFT
-                        },
-                    );
+                    let colour = if face.axis() == 1 {
+                        Color32::WHITE
+                    } else {
+                        crate::theme::SOFT
+                    };
+                    let text = hud.tr(label_key(*face));
+                    // Shrink the label until it fits the width of the face.
+                    let left = quad.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+                    let right = quad.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+                    let measured = ui
+                        .painter()
+                        .layout_no_wrap(text.clone(), crate::theme::bold(7.0), colour);
+                    let size = (7.0 * (right - left) * 0.8 / measured.size().x.max(1.0)).min(7.0);
+                    if size >= 4.5 {
+                        ui.painter().text(
+                            label_centre.to_pos2(),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            crate::theme::bold(size),
+                            colour,
+                        );
+                    }
                 }
             }
 

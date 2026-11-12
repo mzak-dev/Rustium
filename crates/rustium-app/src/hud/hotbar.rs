@@ -5,7 +5,7 @@ use fluent_bundle::FluentValue;
 use rustium_core::ColorId;
 
 use super::widgets::{self, Look};
-use super::{Glass, Hud, Intro, MARGIN, Place, island};
+use super::{Glass, Hud, Intro, MARGIN, Place, centre_budget, fit_key, fit_level, island};
 use crate::icons::Icon;
 use crate::keymap::Action;
 use crate::settings::Motion;
@@ -22,7 +22,17 @@ fn hex(color: Color32) -> String {
     format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
 }
 
+/// Level 1 drops the Palette label, level 2 shrinks the slots, level 3 drops the current color.
+const MAX_LEVEL: u8 = 3;
+
 pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
+    let budget = centre_budget(ctx, hud, "hints", "readout");
+    let key = fit_key(&[
+        &hud.settings.language,
+        &hud.settings.ui_scale_percent,
+        &hud.editor.slots.len(),
+    ]);
+    let level = fit_level(ctx, hud, "hotbar", budget, key, MAX_LEVEL);
     let response = island(
         ctx,
         hud,
@@ -37,29 +47,33 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let current = color_of(hud, hud.editor.color());
-                let (area, _) = ui.allocate_exact_size(vec2(54.0, 40.0), Sense::hover());
-                let swatch = egui::Rect::from_center_size(area.center_top() + vec2(0.0, 13.0), vec2(48.0, 24.0));
-                ui.painter().rect(
-                    swatch,
-                    7,
-                    current,
-                    Stroke::new(1.0, Color32::from_black_alpha(128)),
-                    StrokeKind::Inside,
-                );
-                ui.painter().text(
-                    area.center_bottom() - vec2(0.0, 2.0),
-                    Align2::CENTER_BOTTOM,
-                    hex(current),
-                    FontId::monospace(9.0),
-                    theme::MUTED,
-                );
+                if level < MAX_LEVEL {
+                    let (area, _) = ui.allocate_exact_size(vec2(54.0, 40.0), Sense::hover());
+                    let swatch = egui::Rect::from_center_size(area.center_top() + vec2(0.0, 13.0), vec2(48.0, 24.0));
+                    ui.painter().rect(
+                        swatch,
+                        7,
+                        current,
+                        Stroke::new(1.0, Color32::from_black_alpha(128)),
+                        StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        area.center_bottom() - vec2(0.0, 2.0),
+                        Align2::CENTER_BOTTOM,
+                        hex(current),
+                        FontId::monospace(9.0),
+                        theme::MUTED,
+                    );
+                }
+                let slot_size = if level >= 2 { 30.0 } else { 36.0 };
                 for slot in 0..hud.editor.slots.len() {
-                    slot_button(ui, hud, slot);
+                    slot_button(ui, hud, slot, slot_size);
                 }
                 widgets::divider(ui, 36.0);
                 let look = if hud.ui.palette_open { Look::On } else { Look::Plain };
                 let count = hud.editor.scene.palette().len().to_string();
-                if widgets::icon_text_button(ui, Icon::Palette, &hud.tr("palette"), &count, look).clicked() {
+                let label = if level >= 1 { String::new() } else { hud.tr("palette") };
+                if widgets::icon_text_button(ui, Icon::Palette, &label, &count, look).clicked() {
                     hud.ui.palette_open = !hud.ui.palette_open;
                 }
             });
@@ -68,12 +82,12 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
     palette_popover(ctx, hud, response.response.rect);
 }
 
-fn slot_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, slot: usize) {
+fn slot_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, slot: usize, size: f32) {
     let selected = slot == hud.editor.active_slot;
     let lift = ui
         .ctx()
         .animate_bool_with_time(Id::unique(("slot-lift", slot)), selected, 0.18);
-    let (rect, response) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     let rect = rect.translate(vec2(0.0, -6.0 * lift));
     let color = color_of(hud, hud.editor.slots[slot]);
     let painter = ui.painter();
@@ -141,29 +155,33 @@ fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
                     .corner_radius(4)
                     .inner_margin(1)
                     .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
-                        for row in ids.chunks(16) {
-                            ui.horizontal(|ui| {
-                                for id in row {
-                                    let color = color_of(hud, *id);
-                                    let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
-                                    let hovered = response.hovered();
-                                    let draw_rect = if hovered { rect.expand(2.0) } else { rect };
-                                    ui.painter().rect_filled(draw_rect, 0, color);
-                                    if *id == current || hovered {
-                                        ui.painter().rect_stroke(
-                                            draw_rect,
-                                            0,
-                                            Stroke::new(2.0, Color32::WHITE),
-                                            StrokeKind::Inside,
-                                        );
-                                    }
-                                    if response.on_hover_text(hex(color)).clicked() {
-                                        let slot = hud.editor.active_slot;
-                                        hud.editor.slots[slot] = *id;
-                                    }
-                                }
-                            });
+                        // Laid out by hand so the cells form one continuous grid.
+                        const COLUMNS: usize = 16;
+                        const CELL: f32 = 22.0;
+                        const STEP: f32 = CELL + 1.0;
+                        let rows = ids.len().div_ceil(COLUMNS);
+                        let size = vec2(COLUMNS as f32 * STEP - 1.0, rows as f32 * STEP - 1.0);
+                        let (area, _) = ui.allocate_exact_size(size, Sense::hover());
+                        for (index, id) in ids.iter().enumerate() {
+                            let cell = vec2((index % COLUMNS) as f32 * STEP, (index / COLUMNS) as f32 * STEP);
+                            let rect = egui::Rect::from_min_size(area.min + cell, vec2(CELL, CELL));
+                            let response = ui.interact(rect, Id::unique(("palette-cell", index)), Sense::click());
+                            let color = color_of(hud, *id);
+                            let hovered = response.hovered();
+                            let draw_rect = if hovered { rect.expand(2.0) } else { rect };
+                            ui.painter().rect_filled(draw_rect, 0, color);
+                            if *id == current || hovered {
+                                ui.painter().rect_stroke(
+                                    draw_rect,
+                                    0,
+                                    Stroke::new(2.0, Color32::WHITE),
+                                    StrokeKind::Inside,
+                                );
+                            }
+                            if response.on_hover_text(hex(color)).clicked() {
+                                let slot = hud.editor.active_slot;
+                                hud.editor.slots[slot] = *id;
+                            }
                         }
                     });
             });

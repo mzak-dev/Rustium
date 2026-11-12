@@ -1,28 +1,17 @@
-//! Pointer interaction with the 3D view: picking, Tool gestures, the marquee, the Tool wheel and camera navigation.
+//! Pointer interaction with the 3D view: picking, Tool gestures, the marquee and camera navigation.
 
-use egui::{Align2, Context, Id, LayerId, Order, PointerButton, Pos2, Rect, Response, Sense, Stroke, StrokeKind, vec2};
+use egui::{Context, Id, LayerId, Order, PointerButton, Pos2, Rect, Response, Stroke, StrokeKind};
 use glam::{Vec2 as GlamVec2, Vec3, Vec4};
 use rustium_core::{HitTarget, NodeId};
 
 use super::Hud;
-use super::widgets::{self, Look};
 use crate::editor::{SelectionEdit, Tool};
-use crate::theme;
 
-/// Radius of the ring the Tool wheel places its buttons on, in points.
-const WHEEL_RADIUS: f32 = 82.0;
-const WHEEL_BUTTON: f32 = 44.0;
 /// Pointer travel (points) below which a press on the marquee is a click.
 const CLICK_SLOP: f32 = 4.0;
 
 /// Handles everything that happens in the 3D view once the window frame zones have been ruled out.
 pub(super) fn interact(ctx: &Context, hud: &mut Hud<'_>, response: &Response, screen: Rect, pointer: Option<Pos2>) {
-    if let Some(centre) = hud.ui.tool_wheel {
-        hud.editor.clear_hover();
-        tool_wheel(ctx, hud, centre);
-        return;
-    }
-
     let aspect = screen.width() / screen.height().max(1.0);
     let stroking = hud.editor.is_stroking() || hud.ui.marquee.is_some();
     let ray = pointer.filter(|_| response.hovered() || stroking).map(|position| {
@@ -47,10 +36,6 @@ pub(super) fn interact(ctx: &Context, hud: &mut Hud<'_>, response: &Response, sc
     }
 
     primary_button(ctx, hud, response, screen, ray, pointer);
-
-    if response.secondary_clicked() && !hud.editor.is_stroking() {
-        hud.ui.tool_wheel = pointer;
-    }
 
     // Camera: middle drag orbits, Shift + middle drag pans, the wheel zooms towards the cursor.
     if response.dragged_by(PointerButton::Middle) {
@@ -176,73 +161,4 @@ fn marquee_select(hud: &mut Hud<'_>, rect: Rect, screen: Rect, extend: bool) {
             SelectionEdit::Replace
         },
     );
-}
-
-/// The radial Tool menu opened with a right click.
-fn tool_wheel(ctx: &Context, hud: &mut Hud<'_>, centre: Pos2) {
-    let screen = ctx.content_rect();
-    let margin = WHEEL_RADIUS + WHEEL_BUTTON;
-    let centre = Pos2::new(
-        centre.x.clamp(
-            screen.min.x + margin,
-            (screen.max.x - margin).max(screen.min.x + margin),
-        ),
-        centre.y.clamp(
-            screen.min.y + margin,
-            (screen.max.y - margin).max(screen.min.y + margin),
-        ),
-    );
-    let mut chosen = None;
-    egui::Area::new(Id::unique("tool-wheel"))
-        .order(Order::Foreground)
-        .fixed_pos(centre - vec2(margin, margin))
-        .show(ctx, |ui| {
-            let (_, _) = ui.allocate_exact_size(vec2(margin * 2.0, margin * 2.0), Sense::hover());
-            ui.painter()
-                .circle_filled(centre, WHEEL_RADIUS + WHEEL_BUTTON / 2.0 + 8.0, theme::PANEL);
-            ui.painter().circle_stroke(
-                centre,
-                WHEEL_RADIUS + WHEEL_BUTTON / 2.0 + 8.0,
-                Stroke::new(1.0, theme::BORDER),
-            );
-            ui.painter().text(
-                centre,
-                Align2::CENTER_CENTER,
-                hud.tr(hud.editor.tool.message_key()),
-                theme::bold(12.0),
-                theme::TEXT,
-            );
-            for (index, tool) in Tool::ALL.into_iter().enumerate() {
-                let angle =
-                    -std::f32::consts::FRAC_PI_2 + index as f32 / Tool::ALL.len() as f32 * std::f32::consts::TAU;
-                let position = centre + vec2(angle.cos(), angle.sin()) * WHEEL_RADIUS;
-                let look = if hud.editor.tool == tool {
-                    Look::Accent
-                } else {
-                    Look::Plain
-                };
-                let rect = Rect::from_center_size(position, vec2(WHEEL_BUTTON, WHEEL_BUTTON));
-                let button = ui.put(rect, |ui: &mut egui::Ui| {
-                    widgets::icon_button(ui, tool.icon(), WHEEL_BUTTON, look, true)
-                });
-                if button.on_hover_text(hud.tr(tool.message_key())).clicked() {
-                    chosen = Some(tool);
-                }
-            }
-        });
-    if let Some(tool) = chosen {
-        hud.editor.tool = tool;
-        hud.ui.tool_wheel = None;
-        return;
-    }
-    let outside = ctx.input(|input| {
-        let away = input
-            .pointer
-            .interact_pos()
-            .is_none_or(|position| position.distance(centre) > margin);
-        (input.pointer.any_pressed() && away) || input.key_pressed(egui::Key::Escape)
-    });
-    if outside {
-        hud.ui.tool_wheel = None;
-    }
 }

@@ -151,16 +151,16 @@ fn used_by(ui: &mut Ui, hud: &Hud<'_>, size: f32, limit: usize) {
 }
 
 /// Name, key, description key and icon of a graph Tool or action.
-struct ToolInfo {
-    icon: Icon,
-    key: &'static str,
+pub(super) struct ToolInfo {
+    pub(super) icon: Icon,
+    pub(super) key: &'static str,
     key_label: &'static str,
     letter: bool,
-    tool: Option<GraphTool>,
+    pub(super) tool: Option<GraphTool>,
     gap: bool,
 }
 
-const TOOLS: [ToolInfo; 6] = [
+pub(super) const TOOLS: [ToolInfo; 6] = [
     ToolInfo {
         icon: Icon::Pointer,
         key: "gt-select",
@@ -270,7 +270,7 @@ pub(crate) fn tools(ctx: &Context, hud: &mut Hud<'_>) {
     );
 }
 
-fn run_tool(ctx: &Context, hud: &mut Hud<'_>, info: &ToolInfo) {
+pub(super) fn run_tool(ctx: &Context, hud: &mut Hud<'_>, info: &ToolInfo) {
     if let Some(tool) = info.tool {
         hud.ui.effects.tool = tool;
         return;
@@ -671,6 +671,7 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                 for (button, key) in [
                     ("Tab", "hint-add-node"),
                     ("LMB", "hint-connect"),
+                    ("RMB", "hint-tool-wheel"),
                     ("MMB", "hint-pan-graph"),
                 ] {
                     ui.horizontal(|ui| {

@@ -117,6 +117,8 @@ pub(crate) struct Settings {
     pub(crate) translucent_panels: bool,
     pub(crate) motion: Motion,
     pub(crate) shortcut_letters: bool,
+    /// Draw tool-aware cursors over the 3D view, node canvas and render frame instead of system ones.
+    pub(crate) custom_cursors: bool,
     pub(crate) tooltip_delay_seconds: f32,
     pub(crate) orbit_style: OrbitStyle,
     pub(crate) background: [u8; 3],
@@ -147,6 +149,7 @@ impl Default for Settings {
             translucent_panels: true,
             motion: Motion::Full,
             shortcut_letters: true,
+            custom_cursors: true,
             tooltip_delay_seconds: 0.3,
             orbit_style: OrbitStyle::Turntable,
             background: [0x1a, 0x1d, 0x22],
@@ -213,6 +216,7 @@ impl Settings {
                 self.translucent_panels = defaults.translucent_panels;
                 self.motion = defaults.motion;
                 self.shortcut_letters = defaults.shortcut_letters;
+                self.custom_cursors = defaults.custom_cursors;
                 self.tooltip_delay_seconds = defaults.tooltip_delay_seconds;
             }
             Section::Viewport => {
@@ -267,6 +271,29 @@ mod tests {
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn custom_cursors_default_on_and_persist() {
+        assert!(Settings::default().custom_cursors);
+        let settings: Settings = toml::from_str("vsync = false").unwrap();
+        assert!(settings.custom_cursors);
+        let off = Settings {
+            custom_cursors: false,
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&off).unwrap();
+        assert!(!toml::from_str::<Settings>(&text).unwrap().custom_cursors);
+    }
+
+    #[test]
+    fn resetting_interface_restores_custom_cursors() {
+        let mut settings = Settings {
+            custom_cursors: false,
+            ..Settings::default()
+        };
+        settings.reset_section(crate::settings_window::Section::Interface);
+        assert!(settings.custom_cursors);
     }
 
     #[test]

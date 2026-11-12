@@ -7,6 +7,7 @@
 mod app;
 mod automation;
 mod camera;
+mod cursor;
 mod editor;
 mod effects_preview;
 mod files;

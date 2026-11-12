@@ -102,6 +102,15 @@ impl Tool {
     }
 }
 
+/// Why the current Tool would do nothing at the pointer; the viewport cursor shows it as not allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolBlock {
+    /// The Tool needs a Model in Focus.
+    NeedsModel,
+    /// Nothing under the pointer that the Tool can act on.
+    NoTarget,
+}
+
 /// A brush gesture in progress; its Edits fold into one History step.
 #[derive(Debug)]
 struct Stroke {
@@ -331,6 +340,53 @@ impl Editor {
     /// Whether the current Tool can do anything in the current Focus.
     pub(crate) fn tool_ready(&self) -> bool {
         self.focus_is_model() || !self.tool.needs_model()
+    }
+
+    /// Whether a press at the current hover would do nothing, mirroring the checks of [`Editor::press`].
+    pub(crate) fn tool_block(&self) -> Option<ToolBlock> {
+        if !self.tool_ready() {
+            return Some(ToolBlock::NeedsModel);
+        }
+        let Some(hit) = self.hover.as_ref() else {
+            // A click on nothing with Select box clears the selection.
+            return (self.tool != Tool::SelectBox).then_some(ToolBlock::NoTarget);
+        };
+        let local = self.local_hit(hit);
+        let on_voxel = local.target == HitTarget::Voxel;
+        let usable = match self.tool {
+            Tool::SelectBox | Tool::Measure | Tool::Attach => true,
+            Tool::Erase | Tool::Paint => on_voxel,
+            Tool::Fill => on_voxel || self.fill_mode == FillMode::Volume,
+            Tool::Pick => self.color_under_hover().is_some(),
+            Tool::SelectColor => self.focus_color_at(&local).is_some(),
+            Tool::Move if self.focus_is_model() => on_voxel && self.selection.contains(local.voxel),
+            Tool::Move => hit
+                .node
+                .and_then(|node| self.scene.child_toward(self.focus, node))
+                .is_some(),
+        };
+        (!usable).then_some(ToolBlock::NoTarget)
+    }
+
+    /// The Color of the Voxel under the pointer, as the Pick color Tool would take it.
+    pub(crate) fn color_under_hover(&self) -> Option<ColorId> {
+        self.hover.as_ref().and_then(|hit| self.picked_color(hit))
+    }
+
+    fn picked_color(&self, hit: &SceneHit) -> Option<ColorId> {
+        if hit.world.target != HitTarget::Voxel {
+            return None;
+        }
+        let (_, shape) = self.scene.model_shape(hit.node?)?;
+        shape.get(hit.local.voxel)
+    }
+
+    /// The Color at a hit in the Focus Model's cells; `None` on the ground, in air or when the Focus is a Group.
+    fn focus_color_at(&self, local: &RayHit) -> Option<ColorId> {
+        let (_, shape) = self.scene.model_shape(self.focus)?;
+        (local.target == HitTarget::Voxel)
+            .then(|| shape.get(local.voxel))
+            .flatten()
     }
 
     /// Transform from the Focus's cells to the Scene.
@@ -602,10 +658,7 @@ impl Editor {
     // ---- Tools -------------------------------------------------------------------------------------------
 
     fn pick_color(&mut self, hit: &SceneHit) {
-        if let (HitTarget::Voxel, Some(node)) = (hit.world.target, hit.node)
-            && let Some((_, shape)) = self.scene.model_shape(node)
-            && let Some(color) = shape.get(hit.local.voxel)
-        {
+        if let Some(color) = self.picked_color(hit) {
             self.slots[self.active_slot] = color;
         }
     }
@@ -711,11 +764,7 @@ impl Editor {
         let Some((_, shape)) = self.scene.model_shape(self.focus) else {
             return;
         };
-        let local = self.local_hit(hit);
-        let Some(color) = (local.target == HitTarget::Voxel)
-            .then(|| shape.get(local.voxel))
-            .flatten()
-        else {
+        let Some(color) = self.focus_color_at(&self.local_hit(hit)) else {
             return;
         };
         let picked = select_by_color(shape, color);

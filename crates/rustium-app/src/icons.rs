@@ -51,6 +51,10 @@ pub(crate) enum Icon {
     Pointer,
     AddNode,
     Fit,
+    Hand,
+    Grab,
+    Forbidden,
+    Scissors,
 }
 
 impl Icon {
@@ -103,15 +107,35 @@ impl Icon {
             Self::Pointer => "M5 3l14 8-6 2-2 6z",
             Self::AddNode => "M4 4h16v16H4z M12 8v8 M8 12h8",
             Self::Fit => "M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5",
+            Self::Hand => {
+                "M8 13V6a1.5 1.5 0 0 1 3 0v5 M11 11V4.5a1.5 1.5 0 0 1 3 0V11 M14 11V6a1.5 1.5 0 0 1 3 0v8c0 4-2 6-5 6h-1c-2 0-3-1-4-3l-2-4a1.5 1.5 0 0 1 2.5-1.5L8 14"
+            }
+            Self::Grab => {
+                "M7 13v-2a1.5 1.5 0 0 1 3 0 M10 11v-1.5a1.5 1.5 0 0 1 3 0 M13 10v-.5a1.5 1.5 0 0 1 3 0V14c0 4-2 6-5 6h-1c-2 0-3-1-4-3l-1-3a1.5 1.5 0 0 1 2.5-1.5L7 13"
+            }
+            Self::Forbidden => "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z M6.3 6.3l11.4 11.4",
+            Self::Scissors => {
+                "M6 4a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z M6 15a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z M8 8l12 9 M8 16L20 7"
+            }
             Self::Unlock => "M6 11h12v9H6z M8 11V8a4 4 0 0 1 7.5-2",
         }
     }
 
     /// Paints the icon centred in `rect`, scaled so the 24-unit view box fills it.
     pub(crate) fn paint(self, painter: &Painter, rect: Rect, color: Color32) {
+        self.stroke(painter, rect, color, 0.0);
+    }
+
+    /// Like [`Icon::paint`], with a dark outline one point wide on each side so the icon reads on any background.
+    pub(crate) fn paint_outlined(self, painter: &Painter, rect: Rect, color: Color32, outline: Color32) {
+        self.stroke(painter, rect, outline, 2.0);
+        self.stroke(painter, rect, color, 0.0);
+    }
+
+    fn stroke(self, painter: &Painter, rect: Rect, color: Color32, extra_width: f32) {
         let scale = rect.width().min(rect.height()) / 24.0;
         let origin = rect.center() - vec2(12.0, 12.0) * scale;
-        let stroke = Stroke::new((1.75 * scale).max(1.0), color);
+        let stroke = Stroke::new((1.75 * scale).max(1.0) + extra_width, color);
         for polyline in flatten(self.path()) {
             let points: Vec<Pos2> = polyline.iter().map(|point| origin + point.to_vec2() * scale).collect();
             if points.len() >= 2 {

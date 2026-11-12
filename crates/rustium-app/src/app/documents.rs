@@ -23,6 +23,9 @@ impl Running {
     /// Asks about unsaved changes when there are any, then does `action`. Returns `true` when the app should quit.
     pub(super) fn request(&mut self, action: Pending, settings: &Settings) -> bool {
         if self.is_dirty() {
+            if let Some(Prompt::Recovery(offer)) = self.ui.prompt.take() {
+                self.dismiss_recovery(offer);
+            }
             self.ui.prompt = Some(Prompt::Unsaved(action));
             return false;
         }
@@ -53,12 +56,19 @@ impl Running {
             Pending::Quit => {
                 // Synchronous on purpose: the process is about to end and a queued job would never run. A recovery
                 // copy still queued or being written must not come back after the delete.
-                self.io
-                    .delete_for_quit(&files::recovery_files(self.doc.path.as_deref()));
+                self.io.delete_for_quit(&self.recovery_files_to_delete());
                 return true;
             }
         }
         false
+    }
+
+    /// Dismissing a recovery offer keeps the copy for the next start, but the document that is open now (a never-saved
+    /// one writes and deletes the same file name) must not be able to destroy it.
+    fn dismiss_recovery(&mut self, offer: files::RecoveryOffer) {
+        if offer.original.is_none() && offer.recovery == files::recovery_path(None) {
+            self.io.submit(IoJob::Shelve(offer.recovery));
+        }
     }
 
     /// Remembers that the user has dealt with the changes made so far (saved or discarded them), so a file that
@@ -72,9 +82,18 @@ impl Running {
         self.is_dirty() && self.accepted_loss != Some((self.doc.id(), self.editor.revision))
     }
 
+    /// The recovery files of the open document, except one that is still offered to the user: a never-saved document
+    /// shares its file name with the offered copy of an earlier session.
+    fn recovery_files_to_delete(&self) -> Vec<PathBuf> {
+        let mut files = files::recovery_files(self.doc.path.as_deref());
+        if let Some(Prompt::Recovery(offer)) = &self.ui.prompt {
+            files.retain(|file| *file != offer.recovery);
+        }
+        files
+    }
+
     fn new_document(&mut self, settings: &Settings) {
-        self.io
-            .submit(IoJob::Delete(files::recovery_files(self.doc.path.as_deref())));
+        self.io.submit(IoJob::Delete(self.recovery_files_to_delete()));
         self.editor
             .new_scene(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
         self.viewport.clear_chunks();
@@ -175,8 +194,17 @@ impl Running {
                 }
             }
             (Prompt::Unsaved(action), PromptAnswer::Secondary) => return self.perform(action, settings),
-            (Prompt::Recovery(offer), PromptAnswer::Primary) => self.io.submit(IoJob::LoadRecovery(offer)),
+            (Prompt::Recovery(offer), PromptAnswer::Primary) => {
+                let set_aside = offer.recovery != files::recovery_path(offer.original.as_deref());
+                let recovery = offer.recovery.clone();
+                self.io.submit(IoJob::LoadRecovery(offer));
+                if set_aside {
+                    // The restored Scene is unsaved work again and is autosaved under the standard name.
+                    self.io.submit(IoJob::Delete(vec![recovery]));
+                }
+            }
             (Prompt::Recovery(offer), PromptAnswer::Secondary) => self.io.submit(IoJob::Delete(vec![offer.recovery])),
+            (Prompt::Recovery(offer), PromptAnswer::Cancel) => self.dismiss_recovery(offer),
             (_, PromptAnswer::Cancel) => {}
         }
         false
@@ -184,7 +212,7 @@ impl Running {
 
     /// Writes a recovery copy when the interval has passed and the Scene changed since the last one.
     pub(super) fn autosave_tick(&mut self, settings: &Settings) {
-        if !settings.autosave || self.doc.saving {
+        if !settings.autosave || self.doc.saving || matches!(self.ui.prompt, Some(Prompt::Recovery(_))) {
             return;
         }
         let now = Instant::now();
@@ -204,6 +232,7 @@ impl Running {
     pub(super) fn next_autosave(&self, settings: &Settings) -> Option<Instant> {
         let waiting = settings.autosave
             && !self.doc.saving
+            && !matches!(self.ui.prompt, Some(Prompt::Recovery(_)))
             && self.is_dirty()
             && self.doc.autosaved_revision() != Some(self.editor.revision);
         waiting.then(|| self.doc.next_autosave(autosave_interval(settings)))

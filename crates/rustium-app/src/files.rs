@@ -77,6 +77,8 @@ pub(crate) enum IoJob {
         path: PathBuf,
     },
     LoadRecovery(RecoveryOffer),
+    /// Set a recovery copy aside, see [`shelve_recovery`].
+    Shelve(PathBuf),
     ImportVox {
         path: PathBuf,
     },
@@ -375,13 +377,59 @@ pub(crate) fn recovery_path(document: Option<&Path>) -> PathBuf {
             name.push(".recovery");
             PathBuf::from(name)
         }
-        None => data_dir().join("recovery").join("untitled.ruv.recovery"),
+        None => untitled_recovery_dir().join("untitled.ruv.recovery"),
     }
+}
+
+/// The directory of the recovery copies of Scenes that were never saved.
+fn untitled_recovery_dir() -> PathBuf {
+    data_dir().join("recovery")
+}
+
+/// The newest recovery copy of a never-saved Scene in `dir`: the live one or one that was set aside by
+/// [`shelve_recovery`].
+fn newest_untitled_recovery(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("untitled") && name.ends_with(".ruv.recovery")
+        })
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .max()
+        .map(|(_, path)| path)
+}
+
+/// Moves the recovery copy at `recovery` aside under a name with the current time, so that the unsaved Scene that is
+/// open now (and writes the standard file) cannot overwrite or delete a copy the user has not decided about. The
+/// copy is still offered at the next start. Returns the new path.
+///
+/// # Errors
+///
+/// The error of the failed rename.
+pub(crate) fn shelve_recovery(recovery: &Path) -> std::io::Result<PathBuf> {
+    let dir = recovery.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+    let seconds = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let mut target = dir.join(format!("untitled-{seconds}.ruv.recovery"));
+    let mut number = 1;
+    while target.exists() {
+        target = dir.join(format!("untitled-{seconds}-{number}.ruv.recovery"));
+        number += 1;
+    }
+    fs::rename(recovery, &target)?;
+    Ok(target)
 }
 
 /// A recovery copy for `document` that is newer than the document itself (or the document is gone).
 pub(crate) fn find_recovery(document: Option<&Path>) -> Option<RecoveryOffer> {
-    let recovery = recovery_path(document);
+    let recovery = match document {
+        Some(_) => recovery_path(document),
+        None => newest_untitled_recovery(&untitled_recovery_dir())?,
+    };
     let recovered = fs::metadata(&recovery).ok()?.modified().ok()?;
     let saved: Option<SystemTime> = document.and_then(|path| fs::metadata(path).ok()?.modified().ok());
     if saved.is_some_and(|saved| saved >= recovered) {
@@ -631,6 +679,13 @@ fn run(job: IoJob) -> Option<IoOutcome> {
             Ok(colors) => IoOutcome::PaletteLoaded(colors),
             Err(error) => failure(Operation::Palette, &path, error),
         },
+        IoJob::Shelve(path) => {
+            match shelve_recovery(&path) {
+                Ok(target) => info!(path = %target.display(), "recovery copy set aside"),
+                Err(error) => warn!(path = %path.display(), %error, "could not set the recovery copy aside"),
+            }
+            return None;
+        }
         IoJob::Delete(paths) => {
             for path in paths {
                 let _ = fs::remove_file(path);
@@ -824,6 +879,29 @@ mod tests {
             .unwrap();
         assert_eq!(read_palette(&png_path).unwrap(), colors);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_shelved_recovery_copy_is_found_again_and_survives_the_live_one() {
+        let dir = directory("shelve");
+        let live = dir.join("untitled.ruv.recovery");
+        fs::write(&live, b"offered").unwrap();
+        let shelved = shelve_recovery(&live).unwrap();
+        assert!(!live.exists(), "the standard name is free for the new document");
+        assert_eq!(fs::read(&shelved).unwrap(), b"offered");
+        assert_eq!(newest_untitled_recovery(&dir), Some(shelved.clone()));
+        // The new document autosaves under the standard name; the shelved copy is not touched.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&live, b"new work").unwrap();
+        assert_eq!(fs::read(&shelved).unwrap(), b"offered");
+        assert_eq!(newest_untitled_recovery(&dir), Some(live.clone()));
+        fs::remove_file(&live).unwrap();
+        assert_eq!(newest_untitled_recovery(&dir), Some(shelved.clone()));
+        // Two copies set aside in the same second get different names.
+        fs::write(&live, b"second").unwrap();
+        let second = shelve_recovery(&live).unwrap();
+        assert_ne!(second, shelved);
+        assert_eq!(fs::read(&shelved).unwrap(), b"offered");
     }
 
     #[test]

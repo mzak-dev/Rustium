@@ -124,6 +124,10 @@ fn slot_button(ui: &mut egui::Ui, hud: &mut Hud<'_>, slot: usize, size: f32) {
 }
 
 fn palette_popover(ctx: &Context, hud: &mut Hud<'_>, hotbar: egui::Rect) {
+    // Escape closes the popover; the HUD consumes the key afterwards so it does not also step out of the Focus.
+    if hud.ui.palette_open && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        hud.ui.palette_open = false;
+    }
     let duration = if hud.settings.motion == Motion::Off { 0.0 } else { 0.2 };
     let openness = ctx.animate_bool_with_time(Id::unique("palette-open"), hud.ui.palette_open, duration);
     if openness < 0.01 {

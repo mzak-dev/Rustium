@@ -596,6 +596,9 @@ fn material_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
                 ui.end_row();
             });
     });
+    if hud.ui.effects.assign_open && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        hud.ui.effects.assign_open = false;
+    }
     if hud.ui.effects.assign_open {
         assign_grid(ui, hud, index);
     }

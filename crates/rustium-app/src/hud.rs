@@ -451,6 +451,8 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
 /// one of the Effects popups.
 fn escape_owner_open(ctx: &Context, hud: &Hud<'_>) -> bool {
     egui::Popup::is_any_open(ctx)
+        || (hud.ui.mode == Mode::Model && hud.ui.palette_open)
+        || (hud.ui.mode == Mode::Effects && hud.ui.effects.assign_open)
         || hud.ui.tool_wheel.is_some()
         || hud.ui.renaming.is_some()
         || hud.ui.effects.add_popup.is_some()

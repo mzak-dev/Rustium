@@ -369,8 +369,10 @@ impl RenderState {
     }
 
     /// Names Shot `index`; an empty or blank name goes back to "Shot n". Spaces are kept so the name can be typed.
+    ///
+    /// Naming a Shot is not managing Shots: the queue keeps rendering the live view until a Shot is added, updated or
+    /// deleted.
     pub(crate) fn rename_shot(&mut self, index: usize, name: &str) {
-        self.shots_touched = true;
         if let Some(shot) = self.shots.get_mut(index) {
             shot.name = (!name.trim().is_empty()).then(|| name.chars().take(40).collect());
         }
@@ -386,7 +388,7 @@ impl RenderState {
             camera: camera.clone(),
             lens_mm: self.lens_mm,
             size: self.size,
-            name: None,
+            name: self.shots.get(self.active_shot).and_then(|shot| shot.name.clone()),
         }]
     }
 
@@ -645,6 +647,18 @@ mod tests {
     fn a_35mm_lens_sees_about_38_degrees() {
         assert!((lens_to_fov_degrees(35.0) - 37.85).abs() < 0.1);
         assert!(lens_to_fov_degrees(14.0) > lens_to_fov_degrees(85.0));
+    }
+
+    #[test]
+    fn naming_the_default_shot_keeps_the_queue_on_the_live_view() {
+        let (mut render, mut camera) = state();
+        render.rename_shot(0, "Hero");
+        assert!(!render.shots_touched);
+        camera.yaw = 2.0;
+        let queued = render.queued_shots(&camera);
+        assert_eq!(queued.len(), 1);
+        assert!((queued[0].camera.yaw - 2.0).abs() < 1e-6, "the orbited view is queued");
+        assert_eq!(queued[0].name.as_deref(), Some("Hero"));
     }
 
     #[test]

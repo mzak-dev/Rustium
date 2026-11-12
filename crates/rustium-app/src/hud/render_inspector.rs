@@ -38,6 +38,8 @@ fn caption(ui: &mut Ui, text: &str) {
 
 /// Width of the label column of a property grid.
 const LABEL_WIDTH: f32 = 92.0;
+/// Colour of a message that says why something cannot be done.
+const WARNING: Color32 = Color32::from_rgb(0xf0, 0x8a, 0x72);
 
 /// A grid of labelled rows; `add_rows` gets the width the value column leaves, so fields can fill it.
 fn properties(ui: &mut Ui, id: &str, add_rows: impl FnOnce(&mut Ui, f32)) {
@@ -496,12 +498,36 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
     ];
     let mut format = hud.ui.render.format;
     let mut backdrop = hud.ui.render.backdrop;
+    let video = format == ImageFormat::Mp4;
+    let video_no_alpha = hud.tr("video-no-alpha");
+    let video_only = hud.tr("turntable-video-only");
+    let problem = hud.ui.render.size_problem(hud.ui.render.size);
+    let problem_text = problem.map(|problem| {
+        let size = hud.ui.render.size;
+        hud.i18n.tr_args(
+            "size-too-large",
+            &[
+                ("width", fluent_bundle::FluentValue::from(size.0)),
+                ("height", fluent_bundle::FluentValue::from(size.1)),
+                (
+                    "needed",
+                    fluent_bundle::FluentValue::from(format!("{:.1}", problem.needed as f64 / f64::from(1u32 << 30))),
+                ),
+                (
+                    "allowed",
+                    fluent_bundle::FluentValue::from(format!("{:.1}", problem.allowed as f64 / f64::from(1u32 << 30))),
+                ),
+                ("side", fluent_bundle::FluentValue::from(problem.max_side)),
+            ],
+        )
+    });
     let i18n = hud.i18n;
     let frames_format = |value: f64, _range: std::ops::RangeInclusive<usize>| frames_label(i18n, value);
     properties(ui, "output-tab", |ui, width| {
         let render = &mut hud.ui.render;
         ui.label(widgets::muted(&labels[0]));
         let half = (width - 4.0) / 2.0;
+        let size_before = render.size;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             number(
@@ -521,18 +547,35 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
                     .speed(4.0),
             );
         });
+        if render.size != size_before {
+            // A message about the old size (too large, saved) no longer describes this one.
+            render.message = None;
+        }
         ui.end_row();
+        if let Some(text) = &problem_text {
+            ui.label("");
+            ui.add(egui::Label::new(RichText::new(text).color(WARNING).size(11.0)).wrap());
+            ui.end_row();
+        }
         ui.label(widgets::muted(&labels[1]));
         widgets::segmented(ui, &mut format, &format_options, true);
         ui.end_row();
         ui.label(widgets::muted(&labels[2]));
-        widgets::segmented(ui, &mut backdrop, &backdrop_options, true);
+        if video {
+            // A video has no alpha channel: it is always rendered on the background.
+            let mut shown = Backdrop::Keep;
+            ui.scope(|ui| widgets::segmented(ui, &mut shown, &backdrop_options, false))
+                .response
+                .on_hover_text(&video_no_alpha);
+        } else {
+            widgets::segmented(ui, &mut backdrop, &backdrop_options, true);
+        }
         ui.end_row();
         ui.label(widgets::muted(&labels[3]));
         number(
             ui,
             width,
-            true,
+            video,
             DragValue::new(&mut render.turntable_frames)
                 .range(TURNTABLE_RANGE.0..=TURNTABLE_RANGE.1)
                 .speed(0.5)
@@ -543,14 +586,15 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
                         .find(|part| !part.is_empty())
                         .and_then(|digits| digits.parse().ok())
                 }),
-        );
+        )
+        .on_disabled_hover_text(&video_only);
         ui.end_row();
     });
     hud.ui.render.format = format;
     hud.ui.render.backdrop = backdrop;
 
     let running = hud.ui.render.job.is_some();
-    let video = format == ImageFormat::Mp4;
+    let too_large = problem.is_some();
     let save_label = hud.tr(if video { "save-video" } else { "save-image" });
     let save_hint = hud.tr(if video { "save-video-hint" } else { "save-image-hint" });
     let queue_label = hud.tr("queue-shots");
@@ -579,7 +623,10 @@ fn output_tab(ui: &mut Ui, hud: &mut Hud<'_>) {
             );
             response
         };
-        if button(ui, &save_label, !running).on_hover_text(save_hint).clicked() {
+        if button(ui, &save_label, !running && !too_large)
+            .on_hover_text(save_hint)
+            .clicked()
+        {
             hud.send(AppCommand::SaveImage);
         }
         if button(ui, &queue_label, !running).on_hover_text(queue_hint).clicked() {

@@ -24,7 +24,20 @@ const PREVIEW_MAX_PIXELS: f32 = 1_300_000.0;
 /// Smallest side of the interactive preview.
 const PREVIEW_MIN_SIDE: u32 = 16;
 /// Range of an output side in pixels.
-pub(crate) const SIDE_RANGE: (u32, u32) = (16, 8192);
+pub(crate) const SIDE_RANGE: (u32, u32) = (16, 32768);
+/// What a GPU that has not been asked yet is assumed to allow: the side of an image and the bytes its textures take.
+const DEFAULT_IMAGE_LIMITS: (u32, u64) = (8192, 3 << 30);
+
+/// Why an output size cannot be rendered on this GPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SizeProblem {
+    /// GPU memory the image needs, in bytes.
+    pub(crate) needed: u64,
+    /// GPU memory one image may take, in bytes.
+    pub(crate) allowed: u64,
+    /// The longest side a texture may have.
+    pub(crate) max_side: u32,
+}
 /// Range of the aperture as an f-number.
 pub(crate) const APERTURE_RANGE: (f32, f32) = (1.0, 32.0);
 /// Range of the exposure compensation in stops.
@@ -142,7 +155,12 @@ pub(crate) struct Shot {
     pub(crate) size: (u32, u32),
     /// Name given by the user; `None` shows "Shot n".
     pub(crate) name: Option<String>,
+    /// The icon of the Shot's tile; it stays with the Shot when others are deleted.
+    pub(crate) icon: Icon,
 }
+
+/// The icons Shot tiles take, in the order new Shots pick them.
+pub(crate) const SHOT_ICONS: [Icon; 5] = [Icon::Cube, Icon::Fit, Icon::Palette, Icon::Grid, Icon::Eye];
 
 /// What the render is doing, for the status readout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +199,10 @@ pub(crate) struct RenderState {
     pub(crate) turntable_frames: u32,
     /// The Save video or Queue job running on a worker thread.
     pub(crate) job: Option<JobHandle>,
+    /// The longest image side and most GPU bytes an image may take on this GPU.
+    pub(crate) image_limits: (u32, u64),
+    /// Locale key of the message for a failed job, by what the job was (still, video, queue).
+    pub(crate) failure_key: &'static str,
     pub(crate) sun_turn_degrees: f32,
     pub(crate) sun_height_degrees: f32,
     pub(crate) sky: Sky,
@@ -236,6 +258,8 @@ impl RenderState {
             focus_marker: None,
             turntable_frames: 72,
             job: None,
+            image_limits: DEFAULT_IMAGE_LIMITS,
+            failure_key: "save-failed",
             sun_turn_degrees: 135.0,
             sun_height_degrees: 42.0,
             sky: Sky::Clear,
@@ -248,6 +272,7 @@ impl RenderState {
                 lens_mm,
                 size,
                 name: None,
+                icon: SHOT_ICONS[0],
             }],
             active_shot: 0,
             shots_touched: false,
@@ -326,12 +351,23 @@ impl RenderState {
             })
     }
 
-    /// Replaces the active Shot's saved view with the live one.
+    /// Replaces Shot `index`'s saved view with the live one and makes it the active Shot. The Shot that was active
+    /// keeps what it saved.
     pub(crate) fn update_shot(&mut self, index: usize, camera: &OrbitCamera) {
-        self.shots_touched = true;
-        if index == self.active_shot {
-            self.sync_active_shot(camera);
+        if index >= self.shots.len() {
+            return;
         }
+        self.shots_touched = true;
+        self.active_shot = index;
+        self.sync_active_shot(camera);
+    }
+
+    /// The icon for a new Shot: the first one no Shot uses yet.
+    fn free_shot_icon(&self) -> Icon {
+        SHOT_ICONS
+            .into_iter()
+            .find(|icon| self.shots.iter().all(|shot| shot.icon != *icon))
+            .unwrap_or(SHOT_ICONS[self.shots.len() % SHOT_ICONS.len()])
     }
 
     /// Adds a Shot from the current view and makes it active; `false` when all [`MAX_SHOTS`] are used. The Shots that
@@ -341,11 +377,13 @@ impl RenderState {
             return false;
         }
         self.shots_touched = true;
+        let icon = self.free_shot_icon();
         self.shots.push(Shot {
             camera: camera.clone(),
             lens_mm: self.lens_mm,
             size: self.size,
             name: None,
+            icon,
         });
         self.active_shot = self.shots.len() - 1;
         true
@@ -389,6 +427,7 @@ impl RenderState {
             lens_mm: self.lens_mm,
             size: self.size,
             name: self.shots.get(self.active_shot).and_then(|shot| shot.name.clone()),
+            icon: self.shots.get(self.active_shot).map_or(SHOT_ICONS[0], |shot| shot.icon),
         }]
     }
 
@@ -556,6 +595,17 @@ impl RenderState {
         }
     }
 
+    /// Why an image of `size` cannot be rendered on this GPU, or `None` when it can.
+    pub(crate) fn size_problem(&self, size: (u32, u32)) -> Option<SizeProblem> {
+        let (max_side, allowed) = self.image_limits;
+        let needed = rustium_render::trace_image_bytes(size);
+        (size.0 > max_side || size.1 > max_side || needed > allowed).then_some(SizeProblem {
+            needed,
+            allowed,
+            max_side,
+        })
+    }
+
     /// Whether the renderer still wants frames.
     pub(crate) fn is_accumulating(&self) -> bool {
         self.running && self.progress.samples < self.progress.target
@@ -574,6 +624,10 @@ impl RenderState {
                 .paused_since
                 .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
         let elapsed = now.saturating_duration_since(self.started).saturating_sub(paused);
+        if elapsed.is_zero() {
+            // Paused before any time was spent rendering: there is no pace to estimate from.
+            return None;
+        }
         Some(elapsed.mul_f64((f64::from(self.progress.target) - done) / done))
     }
 
@@ -890,6 +944,32 @@ mod tests {
         render.delete_shot(1, &mut camera);
         render.delete_shot(0, &mut camera);
         assert_eq!(render.shots.len(), 1, "the last shot stays");
+    }
+
+    #[test]
+    fn another_shot_can_be_overwritten_with_the_live_view() {
+        let (mut render, mut camera) = state();
+        render.add_shot(&camera);
+        render.select_shot(0, &mut camera);
+        camera.yaw += 0.7;
+        render.update_shot(1, &camera);
+        assert_eq!(render.shots[1].camera, camera, "Shot 2 takes the live view");
+        assert_eq!(render.active_shot, 1, "and becomes the active Shot");
+        assert_ne!(render.shots[0].camera, camera, "Shot 1 keeps what it saved");
+    }
+
+    #[test]
+    fn a_shot_keeps_its_icon_when_others_are_deleted() {
+        let (mut render, mut camera) = state();
+        for _ in 0..4 {
+            render.add_shot(&camera);
+        }
+        let icons: Vec<_> = render.shots.iter().map(|shot| shot.icon).collect();
+        assert_eq!(icons, SHOT_ICONS, "every Shot starts with its own icon");
+        render.delete_shot(3, &mut camera);
+        assert_eq!(render.shots[3].icon, SHOT_ICONS[4], "the fifth Shot keeps its icon");
+        render.add_shot(&camera);
+        assert_eq!(render.shots[4].icon, SHOT_ICONS[3], "a new Shot takes the free icon");
     }
 
     #[test]

@@ -126,9 +126,6 @@ fn draw_label(painter: &egui::Painter, rect: egui::Rect, galley: std::sync::Arc<
     );
 }
 
-/// Icons of the Shot tiles, by position.
-const SHOT_ICONS: [Icon; 5] = [Icon::Cube, Icon::Fit, Icon::Palette, Icon::Grid, Icon::Eye];
-
 /// The name shown for Shot `index`: the one the user gave it, else "Shot n".
 pub(crate) fn shot_label(hud: &Hud<'_>, index: usize) -> String {
     hud.ui
@@ -165,7 +162,8 @@ fn shot_tile(ui: &mut egui::Ui, hud: &mut Hud<'_>, index: usize, width: f32) {
         StrokeKind::Inside,
     );
     let dark = Color32::from_rgb(0x2a, 0x2d, 0x32);
-    SHOT_ICONS[index % SHOT_ICONS.len()].paint(
+    let icon = hud.ui.render.shots.get(index).map_or(Icon::Cube, |shot| shot.icon);
+    icon.paint(
         painter,
         egui::Rect::from_center_size(rect.center() + vec2(4.0, 2.0), vec2(18.0, 18.0)),
         dark,
@@ -204,22 +202,13 @@ fn shot_menu(response: &egui::Response, hud: &mut Hud<'_>, index: usize, modifie
     let rename_label = hud.tr("shot-rename");
     let update_label = hud.tr("shot-update");
     let delete_label = hud.tr("shot-delete");
+    let unchanged_hint = hud.tr("shot-update-unchanged");
     response.context_menu(|ui| {
         ui.set_min_width(190.0);
         ui.label(RichText::new(rename_label).color(theme::SUBTLE).size(10.0));
-        let mut name = hud
-            .ui
-            .render
-            .shots
-            .get(index)
-            .and_then(|shot| shot.name.clone())
-            .unwrap_or_default();
-        let hint = shot_label(hud, index);
-        let edit = ui.add(
-            egui::TextEdit::singleline(&mut name)
-                .hint_text(hint)
-                .desired_width(170.0),
-        );
+        // The field starts with the name the tile shows, so "Shot 2" can be edited rather than typed from nothing.
+        let mut name = shot_label(hud, index);
+        let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(170.0));
         if edit.changed() {
             hud.ui.render.rename_shot(index, &name);
         }
@@ -227,13 +216,12 @@ fn shot_menu(response: &egui::Response, hud: &mut Hud<'_>, index: usize, modifie
             ui.close();
         }
         ui.separator();
-        if ui
-            .add_enabled(
-                modified && index == hud.ui.render.active_shot,
-                egui::Button::new(update_label),
-            )
-            .clicked()
-        {
+        // Another Shot can be overwritten with what is on screen; the active one only when it differs from its save.
+        let unchanged = index == hud.ui.render.active_shot && !modified;
+        let update = ui.add_enabled(!unchanged, egui::Button::new(update_label));
+        if unchanged {
+            update.on_disabled_hover_text(unchanged_hint);
+        } else if update.clicked() {
             hud.ui.render.update_shot(index, hud.camera);
             ui.close();
         }
@@ -259,7 +247,7 @@ fn fixed_cell(ui: &mut egui::Ui, width: f32, align: egui::Align, content: impl F
 
 /// Bottom corners: mouse hints on the left, status, samples and time left on the right.
 pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
-    // Level 1 drops one hint and the sample count, level 2 keeps one hint and only the status.
+    // Level 1 drops one hint and the time left, level 2 keeps one hint and only the status.
     let budget = corner_budget(ctx);
     let key = fit_key(&[&hud.settings.language, &hud.settings.ui_scale_percent]);
     let hints_level = fit_level(ctx, hud, "render-hints", budget, key, 2);
@@ -343,7 +331,7 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                 fixed_cell(ui, 78.0, egui::Align::LEFT, |ui| {
                     ui.label(RichText::new(status).font(theme::bold(11.0)).color(theme::TEXT));
                 });
-                if readout_level == 0 {
+                if readout_level < 2 {
                     // More samples than asked (the target was lowered) read as finished, not as "101 / 64".
                     let done = render.progress.samples.min(render.progress.target);
                     fixed_cell(ui, 100.0, egui::Align::RIGHT, |ui| {
@@ -360,7 +348,7 @@ pub(crate) fn corners(ctx: &Context, hud: &mut Hud<'_>) {
                         },
                     ),
                 };
-                if readout_level < 2 {
+                if readout_level == 0 {
                     fixed_cell(ui, 112.0, egui::Align::RIGHT, |ui| {
                         ui.label(widgets::mono(eta, 11.0));
                     });

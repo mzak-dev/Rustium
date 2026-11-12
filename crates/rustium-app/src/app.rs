@@ -697,7 +697,7 @@ impl Running {
             let Some(shape) = self.editor.scene.shape(shape_id) else {
                 continue;
             };
-            mesh_chunk(shape, coord, &mut self.mesh);
+            mesh_chunk(shape, coord, self.editor.transparency(), &mut self.mesh);
             self.viewport.upload_chunk(&self.gpu, shape_id, coord, &self.mesh);
         }
     }

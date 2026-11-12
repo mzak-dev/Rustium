@@ -2,7 +2,8 @@
 
 use glam::IVec3;
 use rustium_core::{
-    Brush, ChunkCoord, ChunkMesh, ColorId, Command, Face, HitTarget, Mirror, NodeId, RayHit, Scene, Shape, VoxelTool,
+    Brush, ChunkCoord, ChunkMesh, ColorId, Command, Face, HitTarget, Mirror, NodeId, RayHit, Scene, Shape,
+    Transparency, VoxelTool,
 };
 
 fn main() {
@@ -45,7 +46,14 @@ fn filled_scene(size: u32) -> Scene {
 fn solid_cube_32(bencher: divan::Bencher<'_, '_>) {
     let scene = filled_scene(32);
     let mut mesh = ChunkMesh::default();
-    bencher.bench_local(|| rustium_core::mesh_chunk(shape_of(&scene), ChunkCoord(IVec3::ZERO), &mut mesh));
+    bencher.bench_local(|| {
+        rustium_core::mesh_chunk(
+            shape_of(&scene),
+            ChunkCoord(IVec3::ZERO),
+            &Transparency::OPAQUE,
+            &mut mesh,
+        );
+    });
 }
 
 #[divan::bench]
@@ -72,5 +80,12 @@ fn checkerboard_cubes(bencher: divan::Bencher<'_, '_>) {
         }
     }
     let mut mesh = ChunkMesh::default();
-    bencher.bench_local(|| rustium_core::mesh_chunk(shape_of(&scene), ChunkCoord(IVec3::ZERO), &mut mesh));
+    bencher.bench_local(|| {
+        rustium_core::mesh_chunk(
+            shape_of(&scene),
+            ChunkCoord(IVec3::ZERO),
+            &Transparency::OPAQUE,
+            &mut mesh,
+        );
+    });
 }

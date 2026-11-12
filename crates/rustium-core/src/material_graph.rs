@@ -264,6 +264,7 @@ const SURFACE_ROUGHNESS: usize = 2;
 const SURFACE_EMISSION: usize = 4;
 const SURFACE_EMISSION_STRENGTH: usize = 5;
 const SURFACE_TRANSMISSION: usize = 6;
+const SURFACE_TRANSMISSION_SOCKET: u8 = 6;
 const SURFACE_IOR: usize = 7;
 
 /// A named Material: a node graph that decides what a Color looks like beyond its base color.
@@ -413,6 +414,30 @@ impl MaterialGraph {
     /// The Volume output node, if the graph has one.
     pub fn volume_output(&self) -> Option<&GraphNode> {
         self.nodes.iter().find(|node| node.kind == GraphNodeKind::VolumeOutput)
+    }
+
+    /// Whether the Material may let light through: a transmission above zero (or linked), or a Volume output.
+    ///
+    /// The raster pass turns on its dithered transparency only for such Materials, and the mesher keeps the faces
+    /// of opaque voxels that touch them.
+    pub fn is_transparent(&self) -> bool {
+        if self.volume_output().is_some() {
+            return true;
+        }
+        let Some(surface) = self.surface_output() else {
+            return false;
+        };
+        let linked = self
+            .link_to(InputRef {
+                node: surface.id,
+                socket: SURFACE_TRANSMISSION_SOCKET,
+            })
+            .is_some();
+        let constant = matches!(
+            surface.inputs.get(SURFACE_TRANSMISSION),
+            Some(&InputValue::Float(value)) if value > 0.0
+        );
+        linked || constant
     }
 
     /// Nodes `node` reads from: through all linked inputs, or only the bypass input while bypassed.

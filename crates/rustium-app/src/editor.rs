@@ -1,13 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use glam::{IVec3, Vec3};
 use rustium_core::{
     Brush, BrushKind, ChunkCoord, ColorId, Command, Edit, Face, FillMode, GraphEdit, History, HitTarget, Mirror,
-    NodeId, Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, Transparency, Volume, VoxelTool, apply,
-    brush_bounds, pick_scene, select_box, select_by_color,
+    NodeId, Placement, Ray, RayHit, Scene, SceneHit, Selection, Shape, ShapeId, Transparency, Volume, Voxel, VoxelTool,
+    apply, brush_bounds, brush_positions, pick, pick_background, pick_scene, select_box, select_by_color,
 };
 use tracing::warn;
 
+use crate::camera::OrbitCamera;
 use crate::icons::Icon;
 
 /// The Tools on the left toolbar, in mockup order.
@@ -102,25 +103,93 @@ impl Tool {
     }
 }
 
-/// Why the current Tool would do nothing at the pointer; the viewport cursor shows it as not allowed.
+/// Why the current Tool would do nothing at the pointer; the viewport cursor shows it as not allowed and a hint
+/// beside the pointer says why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolBlock {
     /// The Tool needs a Model in Focus.
     NeedsModel,
     /// Nothing under the pointer that the Tool can act on.
     NoTarget,
+    /// Erase, Paint or a Surface Fill over the ground or air: there is no voxel to change.
+    NoVoxel,
+    /// Move over a voxel that is not selected.
+    NotSelected,
+    /// Pick color or Select color over the ground: there is no Color to take.
+    NoColor,
+}
+
+impl ToolBlock {
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::NeedsModel => "tool-needs-model",
+            Self::NoTarget => "block-no-target",
+            Self::NoVoxel => "block-no-voxel",
+            Self::NotSelected => "block-not-selected",
+            Self::NoColor => "block-no-color",
+        }
+    }
 }
 
 /// A brush gesture in progress; its Edits fold into one History step.
+///
+/// The stroke aims at the Shape as it was at the press, so it never builds on or digs into what it changed itself,
+/// and it remembers the cells it covered: a frame that reaches no new cell does nothing.
 #[derive(Debug)]
 struct Stroke {
     tool: VoxelTool,
-    /// Attach strokes stay on the plane of the first face so they do not stack towards the camera.
-    face: Face,
-    plane: i32,
-    last_hit: RayHit,
+    /// The Focus Model's Shape at the press.
+    snapshot: Shape,
+    /// Cells the stroke already covered (before Mirror).
+    done: HashSet<IVec3>,
+    /// The pointer ray of the previous frame, in the Focus's cells; the stroke fills the way between the two.
+    last_ray: Ray,
     mirror: Mirror,
     edit: Option<Edit>,
+}
+
+/// A Face brush gesture: the press picks the patch, the drag sets how deep it goes, the release applies it.
+#[derive(Debug)]
+struct FaceDrag {
+    tool: VoxelTool,
+    anchor: RayHit,
+    depth: u32,
+    mirror: Mirror,
+}
+
+/// When an edit to voxels happened, for the edit animations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditPhase {
+    /// A frame of a brush stroke that is still running.
+    Stroke,
+    /// A whole gesture at once (Line, Box, Face, Fill).
+    Commit,
+    /// Undo: the change runs backwards.
+    Undo,
+    /// Redo.
+    Redo,
+}
+
+/// What the edit animations need to know about changes to the Scene.
+#[derive(Debug, Clone)]
+pub(crate) enum EditEvent {
+    /// Voxels changed: Shape, cell, voxel before and after.
+    Voxels {
+        phase: EditPhase,
+        changes: Vec<(ShapeId, IVec3, Voxel, Voxel)>,
+        /// Where the gesture started, in the Shape's cells (the Wave spreads from here).
+        origin: IVec3,
+        /// Normal of the face the gesture landed on, in the Shape's cells.
+        normal: IVec3,
+        /// Reflections of the gesture; images of a cell animate together with it.
+        mirror: Mirror,
+        /// Brush size; larger brushes animate with less amplitude.
+        brush: u32,
+    },
+    /// The brush stroke ended and became a History step.
+    StrokeEnd,
+    /// The brush stroke was taken back.
+    StrokeCancel,
 }
 
 /// A Line or Box gesture: it previews while dragging and is applied on release.
@@ -146,12 +215,15 @@ struct MoveDrag {
     coordinate: f32,
     last: IVec3,
     edit: Option<Edit>,
+    /// The voxel Selection at the press; undo puts it back.
+    selection: Selection,
 }
 
 #[derive(Debug)]
 enum Gesture {
     Stroke(Stroke),
     Shape(ShapeDrag),
+    Face(FaceDrag),
     Select(SelectDrag),
     MoveVoxels(MoveDrag),
     MoveNodes(MoveDrag),
@@ -200,6 +272,11 @@ pub(crate) struct Editor {
     pub(crate) brush: Brush,
     pub(crate) fill_mode: FillMode,
     pub(crate) mirror: [bool; 3],
+    /// Where each Model mirrors, as [`Mirror::pivot`] in its cells; the origin column when not set. It stays put
+    /// while the user draws, unlike the centre of the Volume.
+    mirror_pivots: HashMap<NodeId, IVec3>,
+    /// Changes to voxels since the last [`Editor::take_events`], for the edit animations.
+    events: Vec<EditEvent>,
     pub(crate) slots: [ColorId; 10],
     pub(crate) active_slot: usize,
     /// The Node the user has stepped into.
@@ -231,10 +308,16 @@ pub(crate) struct Editor {
 const DEFAULT_SLOTS: [u8; 10] = [2, 5, 9 + 3, 17 + 3, 33 + 3, 41 + 3, 57 + 3, 73 + 3, 81 + 3, 89 + 3];
 
 /// Furthest the pointer ray reaches, in voxels.
-const PICK_DISTANCE: f32 = 4000.0;
+const PICK_DISTANCE: f32 = OrbitCamera::RAY_REACH;
 
-/// Selections up to this size are outlined voxel by voxel; larger ones only get their bounding box.
-const OUTLINE_LIMIT: usize = 1500;
+/// Selections whose outer cells number up to this are outlined cell by cell; larger ones get their bounding box.
+const OUTLINE_LIMIT: usize = 6000;
+
+/// The preview under the pointer shows up to this many cells one by one; beyond it, the box around them.
+const PREVIEW_LIMIT: usize = 20_000;
+
+/// Most samples a stroke takes between two pointer positions.
+const STROKE_SAMPLES: i32 = 256;
 
 impl Editor {
     pub(crate) fn new(voxel_size: f32, undo_steps: usize) -> Self {
@@ -259,6 +342,8 @@ impl Editor {
             brush: Brush::default(),
             fill_mode: FillMode::default(),
             mirror: [false; 3],
+            mirror_pivots: HashMap::new(),
+            events: Vec::new(),
             slots,
             active_slot: 2,
             focus,
@@ -354,19 +439,27 @@ impl Editor {
         };
         let local = self.local_hit(hit);
         let on_voxel = local.target == HitTarget::Voxel;
-        let usable = match self.tool {
-            Tool::SelectBox | Tool::Measure | Tool::Attach => true,
-            Tool::Erase | Tool::Paint => on_voxel,
-            Tool::Fill => on_voxel || self.fill_mode == FillMode::Volume,
-            Tool::Pick => self.color_under_hover().is_some(),
-            Tool::SelectColor => self.focus_color_at(&local).is_some(),
-            Tool::Move if self.focus_is_model() => on_voxel && self.selection.contains(local.voxel),
-            Tool::Move => hit
-                .node
-                .and_then(|node| self.scene.child_toward(self.focus, node))
-                .is_some(),
-        };
-        (!usable).then_some(ToolBlock::NoTarget)
+        let usable = |ok: bool, block: ToolBlock| (!ok).then_some(block);
+        match self.tool {
+            Tool::SelectBox | Tool::Measure | Tool::Attach => None,
+            Tool::Erase | Tool::Paint => usable(on_voxel, ToolBlock::NoVoxel),
+            Tool::Fill => usable(on_voxel || self.fill_mode == FillMode::Volume, ToolBlock::NoVoxel),
+            Tool::Pick => usable(self.color_under_hover().is_some(), ToolBlock::NoColor),
+            Tool::SelectColor => usable(self.focus_color_at(&local).is_some(), ToolBlock::NoColor),
+            Tool::Move if self.focus_is_model() => {
+                if on_voxel {
+                    usable(self.selection.contains(local.voxel), ToolBlock::NotSelected)
+                } else {
+                    Some(ToolBlock::NoTarget)
+                }
+            }
+            Tool::Move => usable(
+                hit.node
+                    .and_then(|node| self.scene.child_toward(self.focus, node))
+                    .is_some(),
+                ToolBlock::NoTarget,
+            ),
+        }
     }
 
     /// The Color of the Voxel under the pointer, as the Pick color Tool would take it.
@@ -476,32 +569,126 @@ impl Editor {
             let volume = Volume::point(drag.anchor).including(current);
             return Some(self.focus_transform().volume(volume));
         }
-        let hit = self.hover.as_ref()?;
-        let focus_is_model = self.focus_is_model();
-        if focus_is_model && let Some(tool) = self.tool.voxel_tool() {
-            let local = self.local_hit(hit);
-            let (anchor, current) = match &self.gesture {
-                Some(Gesture::Shape(drag)) => (drag.anchor, drag.current),
-                _ => (local, local),
-            };
+        if self.focus_is_model() && self.tool.voxel_tool().is_some() {
+            // The voxel Tools preview their cells; the box only stands in when there are too many to show.
+            let (anchor, current, tool, brush) = self.voxel_gesture()?;
+            if self.preview_cells().is_some() {
+                return None;
+            }
             let (_, shape) = self.scene.model_shape(self.focus)?;
-            let bounds = brush_bounds(shape, tool, self.brush, anchor, current)?;
+            let bounds = brush_bounds(shape, tool, brush, anchor, current)?;
             return Some(self.focus_transform().volume(bounds));
         }
-        if !focus_is_model && matches!(self.tool, Tool::SelectBox | Tool::Move) {
+        let hit = self.hover.as_ref()?;
+        if !self.focus_is_model() && matches!(self.tool, Tool::SelectBox | Tool::Move) {
             let child = self.scene.child_toward(self.focus, hit.node?)?;
             return self.scene.world_volume(child);
         }
         hit.is_voxel().then(|| Volume::point(hit.world.voxel))
     }
 
-    /// Bounds of the Shape-drag preview, if a Line or Box gesture is running; used to avoid highlighting twice.
+    /// The press and current hit, Tool and Brush of the voxel gesture the pointer would make or is making.
+    fn voxel_gesture(&self) -> Option<(RayHit, RayHit, VoxelTool, Brush)> {
+        match &self.gesture {
+            Some(Gesture::Shape(drag)) => Some((drag.anchor, drag.current, drag.tool, self.brush)),
+            Some(Gesture::Face(drag)) => Some((
+                drag.anchor,
+                drag.anchor,
+                drag.tool,
+                Brush {
+                    kind: BrushKind::Face,
+                    size: drag.depth,
+                },
+            )),
+            _ => {
+                let local = self.local_hit(self.hover.as_ref()?);
+                Some((local, local, self.tool.voxel_tool()?, self.brush))
+            }
+        }
+    }
+
+    /// The Scene cells the voxel Tool would change at the pointer, Mirror images included: empty cells for Attach,
+    /// filled ones for Erase and Paint. `None` when it is not a voxel Tool or there are too many cells to show.
+    pub(crate) fn preview_cells(&self) -> Option<Vec<IVec3>> {
+        if !self.tool_ready() {
+            return None;
+        }
+        let (anchor, current, tool, brush) = self.voxel_gesture()?;
+        let (_, shape) = self.scene.model_shape(self.focus)?;
+        // During a stroke the aim is the Shape at the press, but what changes is decided by the Shape now.
+        let aimed = match &self.gesture {
+            Some(Gesture::Stroke(stroke)) => &stroke.snapshot,
+            _ => shape,
+        };
+        let cells = brush_positions(aimed, tool, brush, anchor, current);
+        if cells.len() > PREVIEW_LIMIT {
+            return None;
+        }
+        let mirror = match &self.gesture {
+            Some(Gesture::Stroke(stroke)) => stroke.mirror,
+            Some(Gesture::Shape(drag)) => drag.mirror,
+            Some(Gesture::Face(drag)) => drag.mirror,
+            _ => self.mirror_now(),
+        };
+        let transform = self.focus_transform();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for cell in cells {
+            mirror.for_each_image(cell, |image| {
+                let changes = match tool {
+                    VoxelTool::Attach => shape.get(image).is_none(),
+                    VoxelTool::Erase | VoxelTool::Paint => shape.get(image).is_some(),
+                };
+                if changes && seen.insert(image) {
+                    out.push(transform.cell(image));
+                }
+            });
+        }
+        (out.len() <= PREVIEW_LIMIT).then_some(out)
+    }
+
+    /// The face under the pointer that Attach, Fill and the Face brush act on, in Scene cells: the cell and face.
+    pub(crate) fn hover_face(&self) -> Option<(IVec3, Face)> {
+        if !self.tool_ready() || self.tool_block().is_some() {
+            return None;
+        }
+        let shows = matches!(self.tool, Tool::Attach | Tool::Fill)
+            || (self.tool.voxel_tool().is_some() && self.brush.kind == BrushKind::Face);
+        if !shows || matches!(self.gesture, Some(Gesture::Stroke(_))) {
+            return None;
+        }
+        let hit = match &self.gesture {
+            Some(Gesture::Face(drag)) => self.focus_transform().hit(drag.anchor),
+            _ => self.hover?.world,
+        };
+        Some((hit.voxel, hit.face))
+    }
+
+    /// The Focus Model's Mirror pivot (see [`Mirror::pivot`]).
+    pub(crate) fn mirror_pivot(&self) -> IVec3 {
+        self.mirror_pivots.get(&self.focus).copied().unwrap_or(IVec3::ZERO)
+    }
+
+    /// Puts the Focus Model's Mirror planes through the centre of its Volume as it is now (the origin when empty).
+    pub(crate) fn centre_mirror(&mut self) {
+        let volume = self.scene.model_shape(self.focus).and_then(|(_, shape)| shape.volume());
+        let pivot = Mirror::around([true; 3], volume).pivot;
+        self.mirror_pivots.insert(self.focus, pivot);
+    }
+
+    /// The Mirror planes to draw, as quads in the Scene.
     pub(crate) fn mirror_planes(&self) -> Vec<[Vec3; 4]> {
         let Some((_, shape)) = self.scene.model_shape(self.focus) else {
             return Vec::new();
         };
-        let mirror = Mirror::around(self.mirror, shape.volume());
-        let volume = shape.volume().unwrap_or_else(|| Volume::point(IVec3::ZERO));
+        let mirror = self.mirror_now();
+        // Large enough to cover the Model and the plane wherever the pivot is.
+        let pivot_cell = mirror.pivot / 2;
+        let volume = shape
+            .volume()
+            .map_or(Volume::point(pivot_cell), |volume| volume.including(pivot_cell))
+            .including(pivot_cell - 4)
+            .including(pivot_cell + 4);
         let (low, high) = (volume.min.as_vec3() - 2.0, (volume.max + IVec3::ONE).as_vec3() + 2.0);
         let transform = self.focus_transform();
         let mut planes = Vec::new();
@@ -524,12 +711,20 @@ impl Editor {
         planes
     }
 
-    /// Boxes to outline for the selected voxels and nodes, in Scene cells.
+    /// Boxes to outline for the selected voxels and nodes, in Scene cells. Only the outer cells of the voxel
+    /// Selection are outlined (the inner ones would be hidden behind them anyway).
     pub(crate) fn selection_boxes(&self) -> Vec<Volume> {
         let transform = self.focus_transform();
         let mut boxes: Vec<Volume> = Vec::new();
-        if self.selection.len() <= OUTLINE_LIMIT {
-            boxes.extend(self.selection.iter().map(|cell| transform.volume(Volume::point(cell))));
+        let steps = [IVec3::X, IVec3::NEG_X, IVec3::Y, IVec3::NEG_Y, IVec3::Z, IVec3::NEG_Z];
+        let outer: Vec<IVec3> = self
+            .selection
+            .iter()
+            .filter(|cell| steps.iter().any(|step| !self.selection.contains(*cell + *step)))
+            .take(OUTLINE_LIMIT + 1)
+            .collect();
+        if outer.len() <= OUTLINE_LIMIT {
+            boxes.extend(outer.into_iter().map(|cell| transform.volume(Volume::point(cell))));
         } else if let Some(bounds) = self.selection.bounds() {
             boxes.push(transform.volume(bounds));
         }
@@ -573,6 +768,24 @@ impl Editor {
         } else {
             pick_scene(&self.scene, ray, PICK_DISTANCE, NodeId::ROOT)
         };
+        if within == self.focus {
+            // A stroke aims at the Model as it was at the press; an empty Model offers a background on every side.
+            let aimed = match &self.gesture {
+                Some(Gesture::Stroke(stroke)) => Some(&stroke.snapshot),
+                _ => self.scene.model_shape(self.focus).map(|(_, shape)| shape),
+            };
+            if let Some(shape) = aimed
+                && (matches!(self.gesture, Some(Gesture::Stroke(_))) || shape.volume().is_none())
+            {
+                let local = aim(shape, self.local_ray(ray));
+                let transform = self.focus_transform();
+                self.hover = local.map(|local| SceneHit {
+                    node: (local.target == HitTarget::Voxel).then_some(self.focus),
+                    local,
+                    world: transform.hit(local),
+                });
+            }
+        }
     }
 
     pub(crate) fn clear_hover(&mut self) {
@@ -595,7 +808,7 @@ impl Editor {
         match self.tool {
             Tool::Pick => self.pick_color(&hit),
             Tool::Measure => self.measure(&hit),
-            Tool::Attach | Tool::Erase | Tool::Paint if self.focus_is_model() => self.begin_brush(&hit),
+            Tool::Attach | Tool::Erase | Tool::Paint if self.focus_is_model() => self.begin_brush(&hit, ray),
             Tool::Fill if self.focus_is_model() => self.fill(&hit),
             Tool::SelectColor if self.focus_is_model() => self.select_color(&hit, extend),
             Tool::SelectBox if self.focus_is_model() => {
@@ -621,8 +834,9 @@ impl Editor {
         };
         let hit = self.hover.as_ref().map(|hit| self.local_hit(hit));
         self.gesture = Some(match gesture {
-            Gesture::Stroke(stroke) => Gesture::Stroke(self.drag_stroke(stroke, hit)),
+            Gesture::Stroke(stroke) => Gesture::Stroke(self.drag_stroke(stroke, ray)),
             Gesture::Shape(drag) => Gesture::Shape(self.drag_shape(drag, hit, ray)),
+            Gesture::Face(drag) => Gesture::Face(self.drag_face(drag, ray)),
             Gesture::Select(drag) => {
                 if let (Some(hit), Some((_, shape))) = (hit, self.scene.model_shape(self.focus)) {
                     let boxed = select_box(shape, drag.anchor, select_cell(hit));
@@ -645,15 +859,87 @@ impl Editor {
         let Some(gesture) = self.gesture.take() else {
             return;
         };
+        let mut selection_before = self.selection.clone();
         let edit = match gesture {
-            Gesture::Stroke(stroke) => stroke.edit,
+            Gesture::Stroke(stroke) => {
+                self.events.push(EditEvent::StrokeEnd);
+                stroke.edit
+            }
             Gesture::Shape(drag) => self.finish_shape(&drag),
-            Gesture::MoveVoxels(drag) | Gesture::MoveNodes(drag) => drag.edit,
+            Gesture::Face(drag) => self.finish_face(&drag),
+            Gesture::MoveVoxels(drag) | Gesture::MoveNodes(drag) => {
+                selection_before = drag.selection;
+                drag.edit
+            }
             Gesture::Select(_) => None,
         };
         if let Some(edit) = edit {
-            self.history.push(edit);
+            self.push_history(edit, selection_before);
         }
+    }
+
+    /// Takes back the gesture in progress as if it never happened: no History step, nothing to redo.
+    pub(crate) fn cancel(&mut self) {
+        let Some(gesture) = self.gesture.take() else {
+            return;
+        };
+        let edit = match gesture {
+            Gesture::Stroke(stroke) => {
+                self.events.push(EditEvent::StrokeCancel);
+                stroke.edit
+            }
+            Gesture::MoveVoxels(drag) | Gesture::MoveNodes(drag) => {
+                self.selection = drag.selection;
+                drag.edit
+            }
+            Gesture::Select(drag) => {
+                self.selection = drag.base;
+                None
+            }
+            Gesture::Shape(_) | Gesture::Face(_) => None,
+        };
+        if let Some(edit) = edit {
+            self.history.push(edit);
+            if let Some(changed) = self
+                .history
+                .undo(&mut self.scene)
+                .map(|edit| edit.changed_chunks().collect::<Vec<_>>())
+            {
+                self.mark_dirty(changed);
+                self.revision += 1;
+            }
+            self.history.forget_undone();
+            self.validate();
+        }
+    }
+
+    /// Records a finished gesture as a History step, unless it ended where it started.
+    fn push_history(&mut self, edit: Edit, selection_before: Selection) {
+        if edit.is_noop() {
+            return;
+        }
+        self.history
+            .push(edit.with_selection(selection_before, self.selection.clone()));
+    }
+
+    /// Changes to voxels since the last call, for the edit animations.
+    pub(crate) fn take_events(&mut self) -> Vec<EditEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn note_voxels(&mut self, phase: EditPhase, edit: &Edit, hit: RayHit, mirror: Mirror) {
+        let changes = edit.voxel_changes();
+        if changes.is_empty() {
+            return;
+        }
+        self.events.push(EditEvent::Voxels {
+            phase,
+            changes,
+            origin: hit.voxel,
+            normal: hit.face.normal(),
+            mirror,
+            brush: self.brush.size,
+        });
     }
 
     // ---- Tools -------------------------------------------------------------------------------------------
@@ -678,46 +964,116 @@ impl Editor {
         };
     }
 
-    fn begin_brush(&mut self, hit: &SceneHit) {
+    fn begin_brush(&mut self, hit: &SceneHit, ray: Ray) {
         let Some(tool) = self.tool.voxel_tool() else {
             return;
         };
         let local = self.local_hit(hit);
         let mirror = self.mirror_now();
-        if matches!(self.brush.kind, BrushKind::Line | BrushKind::Box) {
-            self.gesture = Some(Gesture::Shape(ShapeDrag {
-                tool,
-                anchor: local,
-                current: local,
-                mirror,
-            }));
-            return;
+        match self.brush.kind {
+            BrushKind::Line | BrushKind::Box => {
+                self.gesture = Some(Gesture::Shape(ShapeDrag {
+                    tool,
+                    anchor: local,
+                    current: local,
+                    mirror,
+                }));
+            }
+            BrushKind::Face => {
+                self.gesture = Some(Gesture::Face(FaceDrag {
+                    tool,
+                    anchor: local,
+                    depth: self.brush.size,
+                    mirror,
+                }));
+            }
+            BrushKind::Voxel => {
+                let Some((_, shape)) = self.scene.model_shape(self.focus) else {
+                    return;
+                };
+                let mut stroke = Stroke {
+                    tool,
+                    snapshot: shape.clone(),
+                    done: HashSet::new(),
+                    last_ray: self.local_ray(ray),
+                    mirror,
+                    edit: None,
+                };
+                self.stroke_at(&mut stroke, local);
+                self.gesture = Some(Gesture::Stroke(stroke));
+            }
         }
-        let edit = self.run_brush(tool, local, None, mirror);
-        self.gesture = Some(Gesture::Stroke(Stroke {
-            tool,
-            face: local.face,
-            plane: local.voxel[local.face.axis()],
-            last_hit: local,
-            mirror,
-            edit,
-        }));
     }
 
-    fn drag_stroke(&mut self, mut stroke: Stroke, hit: Option<RayHit>) -> Stroke {
-        let Some(hit) = hit else {
-            return stroke;
-        };
-        if hit == stroke.last_hit {
-            return stroke;
+    /// Applies the brush at `hit` unless every cell it covers was already covered by this stroke.
+    fn stroke_at(&mut self, stroke: &mut Stroke, hit: RayHit) {
+        let cells = brush_positions(&stroke.snapshot, stroke.tool, self.brush, hit, hit);
+        if cells.iter().all(|cell| stroke.done.contains(cell)) {
+            return;
         }
-        if stroke.tool == VoxelTool::Attach && (hit.face != stroke.face || hit.voxel[hit.face.axis()] != stroke.plane) {
-            return stroke;
+        stroke.done.extend(cells);
+        let edit = self.run_brush(stroke.tool, self.brush, hit, None, stroke.mirror);
+        if let Some(edit) = &edit {
+            self.note_voxels(EditPhase::Stroke, edit, hit, stroke.mirror);
         }
-        let edit = self.run_brush(stroke.tool, hit, None, stroke.mirror);
-        stroke.last_hit = hit;
         stroke.edit = merge(stroke.edit.take(), edit);
+    }
+
+    /// Covers the way from the previous pointer position to this one, so a fast stroke leaves no gaps.
+    fn drag_stroke(&mut self, mut stroke: Stroke, ray: Ray) -> Stroke {
+        let ray = self.local_ray(ray);
+        let previous = stroke.last_ray;
+        stroke.last_ray = ray;
+        let ends = (aim(&stroke.snapshot, previous), aim(&stroke.snapshot, ray));
+        // One sample per cell of travel; a pointer that slides off the Model gets a fixed number.
+        let samples = match ends {
+            (Some(from), Some(to)) => (to.voxel - from.voxel).abs().max_element(),
+            _ => 16,
+        }
+        .clamp(1, STROKE_SAMPLES);
+        for step in 1..=samples {
+            let t = step as f32 / samples as f32;
+            let sample = Ray {
+                origin: previous.origin.lerp(ray.origin, t),
+                direction: previous.direction.lerp(ray.direction, t),
+            };
+            if let Some(hit) = aim(&stroke.snapshot, sample) {
+                self.stroke_at(&mut stroke, hit);
+            }
+        }
         stroke
+    }
+
+    /// The Face brush depth follows the pointer along the face normal: out of the face for Attach, into it for Erase
+    /// and Paint, starting from the Size.
+    fn drag_face(&mut self, mut drag: FaceDrag, ray: Ray) -> FaceDrag {
+        let ray = self.local_ray(ray);
+        let normal = drag.anchor.face.normal().as_vec3();
+        let centre = drag.anchor.voxel.as_vec3() + Vec3::splat(0.5) + normal * 0.5;
+        // Closest approach between the pointer ray and the line through the face centre along the normal.
+        let direction = ray.direction.normalize_or_zero();
+        let (b, w) = (normal.dot(direction), centre - ray.origin);
+        let denominator = 1.0 - b * b;
+        if denominator < 1e-4 {
+            return drag;
+        }
+        let along = (b * direction.dot(w) - normal.dot(w)) / denominator;
+        let signed = if drag.tool == VoxelTool::Attach { along } else { -along };
+        // The pointer stays inside the outermost layer.
+        let depth = (self.brush.size as f32 + signed.floor()).clamp(1.0, Brush::MAX_SIZE as f32);
+        // The clamp keeps it within 1..=MAX_SIZE, so the conversion is exact.
+        drag.depth = depth as u32;
+        drag
+    }
+
+    fn finish_face(&mut self, drag: &FaceDrag) -> Option<Edit> {
+        let brush = Brush {
+            kind: BrushKind::Face,
+            size: drag.depth,
+        };
+        let edit = self.run_brush(drag.tool, brush, drag.anchor, None, drag.mirror)?;
+        self.note_voxels(EditPhase::Commit, &edit, drag.anchor, drag.mirror);
+        Some(edit)
     }
 
     fn drag_shape(&mut self, mut drag: ShapeDrag, hit: Option<RayHit>, ray: Ray) -> ShapeDrag {
@@ -745,19 +1101,24 @@ impl Editor {
     }
 
     fn finish_shape(&mut self, drag: &ShapeDrag) -> Option<Edit> {
-        self.run_brush(drag.tool, drag.anchor, Some(drag.current), drag.mirror)
+        let edit = self.run_brush(drag.tool, self.brush, drag.anchor, Some(drag.current), drag.mirror)?;
+        self.note_voxels(EditPhase::Commit, &edit, drag.anchor, drag.mirror);
+        Some(edit)
     }
 
     fn fill(&mut self, hit: &SceneHit) {
+        let local = self.local_hit(hit);
+        let mirror = self.mirror_now();
         let command = Command::Fill {
             model: self.focus,
             mode: self.fill_mode,
-            hit: self.local_hit(hit),
+            hit: local,
             color: self.color(),
-            mirror: self.mirror_now(),
+            mirror,
         };
         if let Some(edit) = self.apply_command(&command) {
-            self.history.push(edit);
+            self.note_voxels(EditPhase::Commit, &edit, local, mirror);
+            self.push_history(edit, self.selection.clone());
         }
     }
 
@@ -819,6 +1180,7 @@ impl Editor {
                 coordinate,
                 last: plane_flat(local.voxel, axis),
                 edit: None,
+                selection: self.selection.clone(),
             }));
             return;
         }
@@ -831,6 +1193,7 @@ impl Editor {
         self.gesture = Some(Gesture::MoveNodes(MoveDrag {
             axis,
             coordinate,
+            selection: self.selection.clone(),
             last: plane_flat(local.voxel, axis),
             edit: None,
         }));
@@ -879,15 +1242,24 @@ impl Editor {
     // ---- Commands ----------------------------------------------------------------------------------------
 
     fn mirror_now(&self) -> Mirror {
-        let volume = self.scene.model_shape(self.focus).and_then(|(_, shape)| shape.volume());
-        Mirror::around(self.mirror, volume)
+        Mirror {
+            axes: self.mirror,
+            pivot: self.mirror_pivot(),
+        }
     }
 
-    fn run_brush(&mut self, tool: VoxelTool, hit: RayHit, end: Option<RayHit>, mirror: Mirror) -> Option<Edit> {
+    fn run_brush(
+        &mut self,
+        tool: VoxelTool,
+        brush: Brush,
+        hit: RayHit,
+        end: Option<RayHit>,
+        mirror: Mirror,
+    ) -> Option<Edit> {
         let command = Command::ApplyBrush {
             model: self.focus,
             tool,
-            brush: self.brush,
+            brush,
             hit,
             end,
             color: self.color(),
@@ -931,7 +1303,7 @@ impl Editor {
         let Some(edit) = self.apply_checked(command)? else {
             return Ok(false);
         };
-        self.history.push(edit);
+        self.push_history(edit, self.selection.clone());
         self.validate();
         Ok(true)
     }
@@ -965,42 +1337,59 @@ impl Editor {
             return Vec::new();
         };
         let created = edit.created_nodes().to_vec();
-        self.history.push(edit);
+        self.push_history(edit, self.selection.clone());
         self.validate();
         created
     }
 
     pub(crate) fn undo(&mut self) {
-        self.release();
-        let Some((changed, colors)) = self
-            .history
-            .undo(&mut self.scene)
-            .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
-        else {
-            // Nothing to undo: the document must not look edited.
-            return;
-        };
-        self.revision += 1;
-        self.mark_materials(colors);
-        self.mark_dirty(changed);
-        self.selection = Selection::new();
-        self.validate();
+        self.step_history(EditPhase::Undo);
     }
 
     pub(crate) fn redo(&mut self) {
+        self.step_history(EditPhase::Redo);
+    }
+
+    /// Undo or redo one step; the Selection returns to what it was on that side of the step.
+    fn step_history(&mut self, phase: EditPhase) {
         self.release();
-        let Some((changed, colors)) = self
-            .history
-            .redo(&mut self.scene)
-            .map(|edit| (edit.changed_chunks().collect::<Vec<_>>(), edit.touches_materials()))
-        else {
-            // Nothing to redo: the document must not look edited.
+        let edit = match phase {
+            EditPhase::Undo => self.history.undo(&mut self.scene),
+            _ => self.history.redo(&mut self.scene),
+        };
+        let Some(edit) = edit else {
+            // Nothing to undo or redo: the document must not look edited.
             return;
         };
+        let changed: Vec<_> = edit.changed_chunks().collect();
+        let colors = edit.touches_materials();
+        let selection = match phase {
+            EditPhase::Undo => edit.selection_before(),
+            _ => edit.selection_after(),
+        }
+        .cloned();
+        let mut changes = edit.voxel_changes();
+        if phase == EditPhase::Undo {
+            for (_, _, before, after) in &mut changes {
+                std::mem::swap(before, after);
+            }
+        }
         self.revision += 1;
         self.mark_materials(colors);
         self.mark_dirty(changed);
-        self.selection = Selection::new();
+        if let Some(selection) = selection {
+            self.selection = selection;
+        }
+        if let Some(&(_, origin, _, _)) = changes.first() {
+            self.events.push(EditEvent::Voxels {
+                phase,
+                changes,
+                origin,
+                normal: IVec3::Y,
+                mirror: Mirror::default(),
+                brush: 1,
+            });
+        }
         self.validate();
     }
 
@@ -1075,7 +1464,7 @@ impl Editor {
 
     /// Marks chunks and their 26 neighbours (borders affect culling and AO) for remeshing.
     // ponytail: remeshes every existing neighbour; narrow it to the touched borders if strokes stutter.
-    fn mark_dirty(&mut self, chunks: Vec<(ShapeId, ChunkCoord)>) {
+    pub(crate) fn mark_dirty(&mut self, chunks: Vec<(ShapeId, ChunkCoord)>) {
         for (shape, coord) in chunks {
             for z in -1..=1 {
                 for y in -1..=1 {
@@ -1134,8 +1523,17 @@ fn merge(first: Option<Edit>, next: Option<Edit>) -> Option<Edit> {
 fn world_cell(hit: RayHit) -> IVec3 {
     match hit.target {
         HitTarget::Voxel => hit.voxel,
-        HitTarget::Ground => hit.voxel + IVec3::Y,
+        HitTarget::Ground => hit.voxel + hit.face.normal(),
     }
+}
+
+/// What a ray in a Model's cells hits in `shape`: a voxel, the ground or, for an empty Shape, the background that
+/// faces the camera from any side.
+fn aim(shape: &Shape, ray: Ray) -> Option<RayHit> {
+    if shape.volume().is_none() {
+        return pick_background(ray, PICK_DISTANCE);
+    }
+    pick(shape, ray, PICK_DISTANCE)
 }
 
 /// The cell a Select box corner snaps to.
@@ -1241,6 +1639,145 @@ mod tests {
         assert!(voxel(&editor, IVec3::Y).is_none());
     }
 
+    /// Presses at the first cell, drags through the others (one frame each) and releases.
+    fn stroke(editor: &mut Editor, cells: &[(i32, i32)]) {
+        let (first, rest) = cells.split_first().unwrap();
+        let ray = down(first.0, first.1);
+        editor.update_hover(ray);
+        editor.press(ray, false);
+        for (x, z) in rest {
+            let ray = down(*x, *z);
+            editor.update_hover(ray);
+            editor.drag(ray);
+        }
+        editor.release();
+    }
+
+    #[test]
+    fn an_attach_stroke_climbs_onto_a_step_and_back_down() {
+        let mut editor = Editor::new(0.25, 50);
+        click(&mut editor, 2, 0);
+        stroke(&mut editor, &[(0, 0), (1, 0), (2, 0), (3, 0)]);
+        for cell in [IVec3::ZERO, IVec3::X, IVec3::new(2, 1, 0), IVec3::new(3, 0, 0)] {
+            assert!(voxel(&editor, cell).is_some(), "{cell}");
+        }
+        assert!(
+            voxel(&editor, IVec3::new(2, 2, 0)).is_none(),
+            "the stroke never builds on itself"
+        );
+    }
+
+    #[test]
+    fn a_fast_stroke_fills_the_gap_between_frames() {
+        let mut editor = Editor::new(0.25, 50);
+        stroke(&mut editor, &[(0, 0), (6, 0)]);
+        assert_eq!(used(&editor), 7);
+    }
+
+    #[test]
+    fn an_erase_stroke_takes_one_layer_however_long_it_lingers() {
+        let mut editor = Editor::new(0.25, 50);
+        click(&mut editor, 0, 0);
+        for y in 1..3 {
+            let hit = RayHit {
+                voxel: IVec3::new(0, y - 1, 0),
+                face: Face::PosY,
+                target: HitTarget::Voxel,
+            };
+            editor.run_brush(VoxelTool::Attach, editor.brush, hit, None, Mirror::default());
+        }
+        assert_eq!(used(&editor), 3);
+        editor.tool = Tool::Erase;
+        stroke(&mut editor, &[(0, 0), (0, 0), (0, 0)]);
+        assert_eq!(used(&editor), 2);
+    }
+
+    #[test]
+    fn a_face_drag_sets_the_depth_and_applies_on_release() {
+        let mut editor = Editor::new(0.25, 50);
+        for x in 0..3 {
+            click(&mut editor, x, 0);
+        }
+        editor.brush.kind = BrushKind::Face;
+        let press = down(1, 0);
+        editor.update_hover(press);
+        editor.press(press, false);
+        // A pointer ray from the side, crossing the normal line 2.5 cells above the face.
+        let side = Ray {
+            origin: Vec3::new(20.0, 3.5, 0.5),
+            direction: Vec3::NEG_X,
+        };
+        editor.update_hover(side);
+        editor.drag(side);
+        assert_eq!(used(&editor), 3, "nothing changes before the release");
+        editor.release();
+        assert_eq!(used(&editor), 3 + 3 * 3);
+        assert_eq!(editor.history.done().count(), 4);
+    }
+
+    #[test]
+    fn cancel_takes_a_stroke_back_without_a_history_step() {
+        let mut editor = Editor::new(0.25, 50);
+        let ray = down(0, 0);
+        editor.update_hover(ray);
+        editor.press(ray, false);
+        editor.cancel();
+        assert_eq!(used(&editor), 0);
+        assert!(!editor.history.can_undo() && !editor.history.can_redo());
+    }
+
+    #[test]
+    fn undo_and_redo_bring_the_selection_back() {
+        let mut editor = Editor::new(0.25, 50);
+        click(&mut editor, 0, 0);
+        click(&mut editor, 3, 0);
+        editor.tool = Tool::SelectColor;
+        click(&mut editor, 0, 0);
+        let selected = editor.selection.clone();
+        editor.tool = Tool::Move;
+        stroke(&mut editor, &[(0, 0), (0, 2)]);
+        let moved = editor.selection.clone();
+        editor.undo();
+        assert_eq!(editor.selection, selected);
+        editor.redo();
+        assert_eq!(editor.selection, moved);
+    }
+
+    #[test]
+    fn a_move_dragged_out_and_back_leaves_no_history_step() {
+        let mut editor = Editor::new(0.25, 50);
+        click(&mut editor, 0, 0);
+        editor.tool = Tool::SelectColor;
+        click(&mut editor, 0, 0);
+        editor.tool = Tool::Move;
+        stroke(&mut editor, &[(0, 0), (0, 3), (0, 0)]);
+        assert_eq!(editor.history.done().count(), 1);
+    }
+
+    #[test]
+    fn mirror_stays_put_while_the_model_grows() {
+        let mut editor = Editor::new(0.25, 50);
+        editor.mirror = [true, false, false];
+        click(&mut editor, 3, 0);
+        click(&mut editor, 5, 0);
+        // The pivot is the origin column: x mirrors to -x.
+        assert!(voxel(&editor, IVec3::new(-3, 0, 0)).is_some());
+        assert!(voxel(&editor, IVec3::new(-5, 0, 0)).is_some());
+    }
+
+    #[test]
+    fn an_empty_model_can_be_built_on_from_below() {
+        let mut editor = Editor::new(0.25, 50);
+        let ray = Ray {
+            origin: Vec3::new(1.5, -10.0, 1.5),
+            direction: Vec3::Y,
+        };
+        editor.update_hover(ray);
+        editor.press(ray, false);
+        editor.release();
+        assert!(voxel(&editor, IVec3::new(1, -1, 1)).is_some());
+    }
+
     #[test]
     fn pick_color_puts_the_voxel_color_in_the_active_slot() {
         let mut editor = Editor::new(0.25, 50);
@@ -1275,6 +1812,7 @@ mod tests {
         click(&mut editor, 0, 0);
         click(&mut editor, 8, 0);
         editor.mirror = [true, false, false];
+        editor.centre_mirror();
         click(&mut editor, 2, 0);
         assert!(voxel(&editor, IVec3::new(2, 0, 0)).is_some());
         assert!(voxel(&editor, IVec3::new(6, 0, 0)).is_some());

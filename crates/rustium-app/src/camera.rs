@@ -82,15 +82,29 @@ impl OrbitCamera {
     }
 
     /// The ray through `ndc` (normalized device coordinates, y up) for a viewport with `aspect`.
+    ///
+    /// Built from the camera's axes rather than by inverting the projection, which loses precision far from the
+    /// target. The orthographic ray starts on the near plane, behind the eye, because that view also draws what lies
+    /// behind the eye; the direction is linear in `ndc`, so blending two rays blends the pointer positions.
     pub(crate) fn ray(&self, ndc: Vec2, aspect: f32) -> Ray {
-        let inverse = self.view_proj(aspect).inverse();
-        let near = inverse.project_point3(ndc.extend(0.0));
-        let far = inverse.project_point3(ndc.extend(1.0));
-        Ray {
-            origin: near,
-            direction: far - near,
+        let rotation = self.rotation();
+        let (right, up, forward) = (rotation.x_axis, rotation.y_axis, -rotation.z_axis);
+        let half_height = (self.field_of_view_degrees.to_radians() / 2.0).tan();
+        let across = right * (ndc.x * half_height * aspect) + up * (ndc.y * half_height);
+        match self.projection {
+            Projection::Perspective => Ray {
+                origin: self.eye(),
+                direction: forward + across,
+            },
+            Projection::Orthographic => Ray {
+                origin: self.eye() + across * self.distance - forward * MAX_DISTANCE,
+                direction: forward,
+            },
         }
     }
+
+    /// How far a pointer ray must reach to cover everything the view draws.
+    pub(crate) const RAY_REACH: f32 = MAX_DISTANCE * 3.0;
 
     pub(crate) fn orbit(&mut self, delta: Vec2, style: OrbitStyle) {
         self.yaw = (self.yaw - delta.x * ORBIT_SPEED).rem_euclid(TAU);
@@ -195,6 +209,25 @@ mod tests {
         let ray = camera.ray(Vec2::ZERO, 16.0 / 9.0);
         let to_target = (camera.target - ray.origin).normalize();
         assert!(ray.direction.normalize().dot(to_target) > 0.9999);
+    }
+
+    #[test]
+    fn rays_go_through_what_the_projection_draws_there() {
+        for projection in [Projection::Perspective, Projection::Orthographic] {
+            let mut camera = OrbitCamera {
+                projection,
+                distance: 900.0,
+                ..OrbitCamera::default()
+            };
+            camera.orbit(Vec2::new(70.0, -30.0), OrbitStyle::Turntable);
+            let ndc = Vec2::new(0.6, -0.35);
+            let ray = camera.ray(ndc, 16.0 / 9.0);
+            for along in [300.0, 4500.0, 7000.0] {
+                let point = ray.origin + ray.direction.normalize() * along;
+                let landed = screen(&camera, point);
+                assert!((landed - ndc).length() < 1e-3, "{projection:?} at {along}: {landed}");
+            }
+        }
     }
 
     /// Where `point` lands in normalized device coordinates.

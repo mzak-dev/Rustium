@@ -16,11 +16,77 @@ pub enum GraphicsBackend {
     DirectX12,
 }
 
+impl GraphicsBackend {
+    fn backends(self) -> wgpu::Backends {
+        match self {
+            Self::Automatic => wgpu::Backends::PRIMARY,
+            Self::Vulkan => wgpu::Backends::VULKAN,
+            Self::DirectX12 => wgpu::Backends::DX12,
+        }
+    }
+
+    fn of(backend: wgpu::Backend) -> Option<Self> {
+        match backend {
+            wgpu::Backend::Vulkan => Some(Self::Vulkan),
+            wgpu::Backend::Dx12 => Some(Self::DirectX12),
+            _ => None,
+        }
+    }
+}
+
 /// GPU choices that take effect when the [`GpuContext`] is created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GpuPreferences {
     /// Requested graphics API.
     pub backend: GraphicsBackend,
+    /// Name of the graphics device to use; `None` lets wgpu pick the best one.
+    pub adapter: Option<String>,
+}
+
+/// A graphics device the machine offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterChoice {
+    /// Device name as the driver reports it.
+    pub name: String,
+    /// Graphics API the device is reachable through; `None` for APIs the user cannot pick (Metal, OpenGL).
+    pub backend: Option<GraphicsBackend>,
+}
+
+/// Lists the graphics devices of every native API on this machine.
+pub async fn available_adapters() -> Vec<AdapterChoice> {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    descriptor.backends = wgpu::Backends::PRIMARY;
+    let instance = wgpu::Instance::new(descriptor);
+    let mut choices: Vec<AdapterChoice> = Vec::new();
+    for adapter in instance.enumerate_adapters(wgpu::Backends::PRIMARY).await {
+        let info = adapter.get_info();
+        let choice = AdapterChoice {
+            name: info.name,
+            backend: GraphicsBackend::of(info.backend),
+        };
+        if !choices.contains(&choice) {
+            choices.push(choice);
+        }
+    }
+    choices
+}
+
+/// The graphics APIs worth offering: Automatic, plus every API that has at least one device.
+pub fn selectable_backends(adapters: &[AdapterChoice]) -> Vec<GraphicsBackend> {
+    let mut list = vec![GraphicsBackend::Automatic];
+    for backend in [GraphicsBackend::Vulkan, GraphicsBackend::DirectX12] {
+        if adapters.iter().any(|adapter| adapter.backend == Some(backend)) {
+            list.push(backend);
+        }
+    }
+    list
+}
+
+/// What to try when opening the GPU with `requested` failed: Automatic with no chosen device, or `None`
+/// when that is exactly what was requested (nothing left to fall back to).
+pub fn startup_fallback(requested: &GpuPreferences) -> Option<GpuPreferences> {
+    let automatic = GpuPreferences::default();
+    (*requested != automatic).then_some(automatic)
 }
 
 /// The wgpu device, queue and window surface.
@@ -47,20 +113,28 @@ impl GpuContext {
         preferences: GpuPreferences,
     ) -> Result<Self, Error> {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-        descriptor.backends = match preferences.backend {
-            GraphicsBackend::Automatic => wgpu::Backends::PRIMARY,
-            GraphicsBackend::Vulkan => wgpu::Backends::VULKAN,
-            GraphicsBackend::DirectX12 => wgpu::Backends::DX12,
-        };
+        descriptor.backends = preferences.backend.backends();
         let instance = wgpu::Instance::new(descriptor);
         let surface = instance.create_surface(target)?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            })
-            .await?;
+        let adapter = match &preferences.adapter {
+            Some(name) => {
+                let found = instance
+                    .enumerate_adapters(preferences.backend.backends())
+                    .await
+                    .into_iter()
+                    .find(|adapter| adapter.get_info().name == *name && adapter.is_surface_supported(&surface));
+                found.ok_or_else(|| Error::AdapterNotFound(name.clone()))?
+            }
+            None => {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: Some(&surface),
+                        ..Default::default()
+                    })
+                    .await?
+            }
+        };
         let adapter_info = adapter.get_info();
         info!(
             name = %adapter_info.name,
@@ -251,5 +325,46 @@ fn fallback_config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {
         alpha_mode: wgpu::CompositeAlphaMode::Auto,
         view_formats: Vec::new(),
         color_space: wgpu::SurfaceColorSpace::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn choice(name: &str, backend: Option<GraphicsBackend>) -> AdapterChoice {
+        AdapterChoice {
+            name: name.to_owned(),
+            backend,
+        }
+    }
+
+    #[test]
+    fn a_failed_custom_choice_falls_back_to_automatic() {
+        let broken = GpuPreferences {
+            backend: GraphicsBackend::DirectX12,
+            adapter: None,
+        };
+        assert_eq!(startup_fallback(&broken), Some(GpuPreferences::default()));
+        let missing_device = GpuPreferences {
+            backend: GraphicsBackend::Automatic,
+            adapter: Some("Gone GPU".to_owned()),
+        };
+        assert_eq!(startup_fallback(&missing_device), Some(GpuPreferences::default()));
+    }
+
+    #[test]
+    fn automatic_has_nothing_to_fall_back_to() {
+        assert_eq!(startup_fallback(&GpuPreferences::default()), None);
+    }
+
+    #[test]
+    fn only_backends_with_a_device_are_offered() {
+        let adapters = [choice("A", Some(GraphicsBackend::Vulkan)), choice("B", None)];
+        assert_eq!(
+            selectable_backends(&adapters),
+            vec![GraphicsBackend::Automatic, GraphicsBackend::Vulkan]
+        );
+        assert_eq!(selectable_backends(&[]), vec![GraphicsBackend::Automatic]);
     }
 }

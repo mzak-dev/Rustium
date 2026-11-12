@@ -7,6 +7,9 @@ pub enum Error {
     /// No GPU adapter can present to the window.
     #[error("no compatible graphics adapter found")]
     RequestAdapter(#[from] wgpu::RequestAdapterError),
+    /// The graphics device the user picked is not present.
+    #[error("graphics device \"{0}\" not found")]
+    AdapterNotFound(String),
     /// The adapter refused to create a device.
     #[error("cannot open the graphics device")]
     RequestDevice(#[from] wgpu::RequestDeviceError),

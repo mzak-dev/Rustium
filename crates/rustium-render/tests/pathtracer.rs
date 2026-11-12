@@ -1698,3 +1698,174 @@ fn the_depth_pass_spans_the_models_from_near_to_far() {
         "the near floor corner ({near}) is much brighter than the far one ({far}): the range spans the Models"
     );
 }
+
+/// Size of the images of the interactive preview tests: taller than the first band of a sweep, so a changed view
+/// cannot be traced in one frame.
+const PREVIEW_SIZE: u32 = 256;
+
+fn preview_frame(camera: &Camera, samples: u32) -> TraceFrame {
+    TraceFrame {
+        inv_view_proj: camera.view_proj.inverse().to_cols_array_2d(),
+        size: (PREVIEW_SIZE, PREVIEW_SIZE),
+        samples,
+        bounces: 3,
+        sun_turn_degrees: 135.0,
+        sun_height_degrees: 45.0,
+        sky: Sky::Clear,
+        ground: Ground::None,
+        transparent: false,
+        region: None,
+        running: true,
+        frame_rect: [0.0, 0.0, PREVIEW_SIZE as f32, PREVIEW_SIZE as f32],
+        exposure: EXPOSURE,
+        style: RenderStyle::Traced,
+        denoise: true,
+        lens: None,
+        pass: RenderPass::Beauty,
+    }
+}
+
+/// The display brightness of every pixel the tracer drew into `target`.
+fn picture_of(gpu: &Gpu, target: &wgpu::Texture) -> Vec<f32> {
+    let row_bytes = PREVIEW_SIZE * 4;
+    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test readback"),
+        size: u64::from(row_bytes * PREVIEW_SIZE),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes),
+                rows_per_image: Some(PREVIEW_SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: PREVIEW_SIZE,
+            height: PREVIEW_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu.queue.submit(std::iter::once(encoder.finish()));
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |result| result.unwrap());
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = slice.get_mapped_range().unwrap();
+    let mut picture = Vec::new();
+    for pixel in data.as_chunks::<4>().0 {
+        picture.push((f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2])) / (3.0 * 255.0));
+    }
+    picture
+}
+
+/// Mean absolute difference of two pictures within one horizontal third.
+fn third_distance(a: &[f32], b: &[f32], third: usize) -> f32 {
+    let size = (PREVIEW_SIZE * PREVIEW_SIZE) as usize;
+    let range = third * size / 3..(third + 1) * size / 3;
+    let total: f32 = a[range.clone()]
+        .iter()
+        .zip(&b[range.clone()])
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    total / range.len() as f32
+}
+
+fn preview_target(gpu: &Gpu) -> wgpu::Texture {
+    gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test target"),
+        size: wgpu::Extent3d {
+            width: PREVIEW_SIZE,
+            height: PREVIEW_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn encode_frame(gpu: &Gpu, tracer: &mut PathTracer, target: &wgpu::Texture, frame: &TraceFrame) {
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+    tracer.encode(&gpu.device, &gpu.queue, &mut encoder, &view, frame);
+    gpu.queue.submit(std::iter::once(encoder.finish()));
+}
+
+#[test]
+fn a_changed_view_never_shows_the_old_one_in_part_of_the_picture() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter: skipped");
+        return;
+    };
+    let (scene, _) = showpiece();
+    // Looking down at the floor, then at the sky: every third of the picture differs clearly from the view of the cubes
+    // and the floor.
+    let camera_a = Camera::looking_at(Vec3::new(0.0, 30.0, 2.0), Vec3::new(0.0, 0.0, 0.0));
+    let camera_b = Camera::looking_at(Vec3::new(14.0, 14.0, 20.0), Vec3::new(14.0, 60.0, -30.0));
+    let buffers = MaterialBuffers::new(&gpu.device);
+    buffers.write_colors(&gpu.queue, scene.palette(), scene.material_graphs());
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let new_tracer = || {
+        let mut tracer = PathTracer::new(&gpu.device, &buffers, format, RayTracing::Software);
+        tracer
+            .set_materials(&gpu.device, &gpu.queue, scene.material_graphs())
+            .unwrap();
+        tracer.upload_scene(&gpu.device, &gpu.queue, &scene);
+        tracer
+    };
+
+    // What the view B looks like when the whole picture is traced at once.
+    let mut reference = new_tracer();
+    reference.set_time_budget(false);
+    let target = preview_target(&gpu);
+    encode_frame(&gpu, &mut reference, &target, &preview_frame(&camera_b, 1));
+    let wanted = picture_of(&gpu, &target);
+
+    let mut tracer = new_tracer();
+    let frame_a = preview_frame(&camera_a, 4);
+    for _ in 0..40 {
+        encode_frame(&gpu, &mut tracer, &target, &frame_a);
+        if tracer.progress().samples >= 1 {
+            break;
+        }
+    }
+    let old = picture_of(&gpu, &target);
+    for third in 0..3 {
+        assert!(
+            third_distance(&old, &wanted, third) > 0.05,
+            "the two views must differ in third {third}"
+        );
+    }
+
+    // Every frame after the camera moved, until the first sample of the new view is complete, shows view B all over.
+    let frame_b = preview_frame(&camera_b, 4);
+    for step in 0..40 {
+        encode_frame(&gpu, &mut tracer, &target, &frame_b);
+        let shown = picture_of(&gpu, &target);
+        for third in 0..3 {
+            assert!(
+                third_distance(&shown, &wanted, third) < third_distance(&shown, &old, third),
+                "frame {step}: third {third} still shows the old view"
+            );
+        }
+        if tracer.progress().samples >= 1 {
+            break;
+        }
+    }
+    assert!(
+        tracer.progress().samples >= 1,
+        "the first sample of the new view completes"
+    );
+}

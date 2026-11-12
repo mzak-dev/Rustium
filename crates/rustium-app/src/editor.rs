@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use glam::{IVec3, Vec3};
 use rustium_core::{
     Brush, BrushKind, ChunkCoord, ColorId, Command, Edit, Face, FillMode, GraphEdit, History, HitTarget, Mirror,
-    NodeId, Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, Volume, VoxelTool, apply, brush_bounds,
-    pick_scene, select_box, select_by_color,
+    NodeId, Placement, Ray, RayHit, Scene, SceneHit, Selection, ShapeId, Transparency, Volume, VoxelTool, apply,
+    brush_bounds, pick_scene, select_box, select_by_color,
 };
 use tracing::warn;
 
@@ -210,6 +210,9 @@ pub(crate) struct Editor {
     /// Material graph edits of the current slider drag, folded into one History step when the drag ends.
     material_edit: Option<Edit>,
     palette_dirty: bool,
+    /// Which Colors the mesher treats as transparent, and whether Materials changed since it was computed.
+    transparency: Transparency,
+    transparency_stale: bool,
     /// Increases with every change to the Scene; the path tracer re-uploads when it moves.
     pub(crate) revision: u64,
 }
@@ -260,6 +263,8 @@ impl Editor {
             remesh_all: true,
             material_edit: None,
             palette_dirty: true,
+            transparency: Transparency::OPAQUE,
+            transparency_stale: true,
             revision: 0,
         }
     }
@@ -866,7 +871,7 @@ impl Editor {
         let changed: Vec<(ShapeId, ChunkCoord)> = edit.changed_chunks().collect();
         self.mark_dirty(changed);
         self.revision += 1;
-        self.palette_dirty |= edit.touches_materials();
+        self.mark_materials(edit.touches_materials());
     }
 
     /// Applies a Command from outside the viewport (MCP) as one History step. Unlike [`Editor::execute`] it
@@ -925,7 +930,7 @@ impl Editor {
             return;
         };
         self.revision += 1;
-        self.palette_dirty |= colors;
+        self.mark_materials(colors);
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
@@ -942,7 +947,7 @@ impl Editor {
             return;
         };
         self.revision += 1;
-        self.palette_dirty |= colors;
+        self.mark_materials(colors);
         self.mark_dirty(changed);
         self.selection = Selection::new();
         self.validate();
@@ -990,6 +995,16 @@ impl Editor {
         std::mem::take(&mut self.palette_dirty)
     }
 
+    fn mark_materials(&mut self, changed: bool) {
+        self.palette_dirty |= changed;
+        self.transparency_stale |= changed;
+    }
+
+    /// The transparent Colors the chunk meshes were built with.
+    pub(crate) fn transparency(&self) -> &Transparency {
+        &self.transparency
+    }
+
     /// Marks chunks and their 26 neighbours (borders affect culling and AO) for remeshing.
     // ponytail: remeshes every existing neighbour; narrow it to the touched borders if strokes stutter.
     fn mark_dirty(&mut self, chunks: Vec<(ShapeId, ChunkCoord)>) {
@@ -1015,6 +1030,14 @@ impl Editor {
     ///
     /// Shapes shown for the first time (a duplicate, or a Model shown again) are meshed completely.
     pub(crate) fn take_dirty(&mut self, placements: &[Placement]) -> (bool, Vec<(ShapeId, ChunkCoord)>) {
+        if std::mem::take(&mut self.transparency_stale) {
+            let transparency = Transparency::of_scene(&self.scene);
+            if transparency != self.transparency {
+                // Which faces are hidden depends on it, so every chunk is meshed again.
+                self.transparency = transparency;
+                self.remesh_all = true;
+            }
+        }
         let reset = std::mem::take(&mut self.remesh_all);
         if reset {
             self.dirty.clear();

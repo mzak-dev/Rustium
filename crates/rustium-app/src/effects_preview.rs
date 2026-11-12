@@ -6,7 +6,9 @@
 //! edited Material in the GPU copy of the Palette (the document is not touched).
 
 use glam::{IVec3, Mat4, Vec3, Vec4};
-use rustium_core::{ChunkCoord, ChunkMesh, ColorId, Command, NodeId, Placement, Scene, ShapeId, Transform, mesh_chunk};
+use rustium_core::{
+    ChunkCoord, ChunkMesh, ColorId, Command, NodeId, Placement, Scene, ShapeId, Transform, Transparency, mesh_chunk,
+};
 use rustium_render::{CameraUniform, ModelDraw};
 use tracing::warn;
 
@@ -151,7 +153,7 @@ fn build(shape: PreviewShape, scene: &Scene) -> Vec<(ChunkCoord, ChunkMesh)> {
         .into_iter()
         .map(|coord| {
             let mut mesh = ChunkMesh::default();
-            mesh_chunk(built, coord, &mut mesh);
+            mesh_chunk(built, coord, &Transparency::OPAQUE, &mut mesh);
             (coord, mesh)
         })
         .collect()

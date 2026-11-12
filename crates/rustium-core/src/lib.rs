@@ -80,7 +80,7 @@ pub use material_graph::{
     Link, MaterialGraph, NodeCategory, NodeSpec, OutputRef, OutputSpec, ParamKind, ParamSpec, ParamValue, RAMP_STOPS,
     RampStop, SampleMaterial, SocketType, SurfaceConstants,
 };
-pub use mesh::{ChunkMesh, MeshVertex, mesh_chunk};
+pub use mesh::{ChunkMesh, MeshVertex, Transparency, mesh_chunk};
 pub use node::{Node, NodeKind};
 pub use pal::{MAX_COLORS as PAL_MAX_COLORS, parse_pal, write_pal};
 pub use palette::{Color, ColorId, Palette};

@@ -22,31 +22,6 @@ const FLAG_NO_SHADOW: u32 = 1 << 16;
 /// The Material has a Volume output (`COLOR_VOLUMETRIC` in `material.wgsl`).
 const FLAG_VOLUMETRIC: u32 = 1 << 17;
 
-/// Surface output socket that holds the transmission.
-const TRANSMISSION_SOCKET: u8 = 6;
-
-/// Whether the Material may let light through (a transmission above zero, or linked, or a Volume output). The raster
-/// pass turns on its dithered transparency and temporal anti-aliasing only when a used Material is transparent.
-pub(crate) fn is_transparent(graph: &MaterialGraph) -> bool {
-    if graph.volume_output().is_some() {
-        return true;
-    }
-    let Some(surface) = graph.surface_output() else {
-        return false;
-    };
-    let linked = graph
-        .link_to(rustium_core::InputRef {
-            node: surface.id,
-            socket: TRANSMISSION_SOCKET,
-        })
-        .is_some();
-    let constant = matches!(
-        surface.inputs.get(usize::from(TRANSMISSION_SOCKET)),
-        Some(&rustium_core::InputValue::Float(value)) if value > 0.0
-    );
-    linked || constant
-}
-
 const _: () = assert!(size_of::<GpuColor>() == 16);
 
 /// The Palette as one uniform buffer shared by the raster pass and the path tracer. The Materials themselves are

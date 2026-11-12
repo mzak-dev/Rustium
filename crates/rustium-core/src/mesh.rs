@@ -11,6 +11,9 @@ use glam::{IVec3, Vec3};
 
 use crate::chunk::{CHUNK_SIZE, Chunk, ChunkCoord};
 use crate::face::Face;
+use crate::material_graph::MaterialGraph;
+use crate::palette::ColorId;
+use crate::scene::Scene;
 use crate::shape::Shape;
 
 /// One vertex of a chunk mesh, laid out for the GPU.
@@ -37,11 +40,66 @@ pub struct ChunkMesh {
     pub indices: Vec<u32>,
 }
 
+/// Which Colors let light through, for [`mesh_chunk`].
+///
+/// A transparent Color belongs to the group of its Material. Faces between two voxels of the same group are
+/// culled; an opaque voxel next to a transparent one keeps its face, and so do two different transparent groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transparency {
+    /// Indexed by the Color number: 0 for an opaque Color, otherwise the Material index plus one.
+    groups: [u32; 256],
+}
+
+impl Default for Transparency {
+    fn default() -> Self {
+        Self::OPAQUE
+    }
+}
+
+impl Transparency {
+    /// Every Color is opaque.
+    pub const OPAQUE: Self = Self { groups: [0; 256] };
+
+    /// The table for `scene`: a Color is transparent when its Material is (see
+    /// [`MaterialGraph::is_transparent`](crate::MaterialGraph::is_transparent)).
+    pub fn of_scene(scene: &Scene) -> Self {
+        let graphs = scene.material_graphs();
+        let mut table = Self::OPAQUE;
+        for (id, color) in scene.palette().iter() {
+            // A Color pointing at a graph that does not exist falls back to the Default material.
+            let graph = if (color.graph as usize) < graphs.len() {
+                color.graph
+            } else {
+                0
+            };
+            if graphs.get(graph as usize).is_some_and(MaterialGraph::is_transparent) {
+                table.set(id, Some(graph));
+            }
+        }
+        table
+    }
+
+    /// Marks `color` as transparent with the Material `graph`, or opaque with `None`.
+    pub fn set(&mut self, color: ColorId, graph: Option<u32>) {
+        if let Some(group) = self.groups.get_mut(usize::from(color.get())) {
+            *group = graph.map_or(0, |graph| graph.saturating_add(1));
+        }
+    }
+
+    /// 0 for an opaque Color (or an empty voxel), otherwise a number identifying the Color's Material.
+    fn group(&self, color: u8) -> u32 {
+        self.groups.get(usize::from(color)).copied().unwrap_or(0)
+    }
+}
+
 const SIZE: usize = 32;
 const PADDED: usize = SIZE + 2;
 const PADDED_I32: i32 = CHUNK_SIZE + 2;
 
 /// Builds the greedy mesh of chunk `coord` into `mesh`, culling faces hidden by neighbouring voxels.
+///
+/// A face is hidden by an opaque neighbour, or by a transparent neighbour of the same Material (see
+/// [`Transparency`]). Transparent voxels do not darken their neighbours' ambient occlusion.
 ///
 /// Neighbouring chunks are read for face culling and ambient occlusion, so a chunk must be remeshed when a
 /// voxel on the border of a neighbour changes.
@@ -50,14 +108,14 @@ const PADDED_I32: i32 = CHUNK_SIZE + 2;
 /// one-voxel border), so the exposed faces of a whole column fall out of two shifts, and runs of equal faces
 /// are merged with bit scans instead of per-voxel comparisons.
 // HOT PATH: runs for every changed chunk during a gesture; no allocations beyond growing `mesh`.
-pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
+pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, transparency: &Transparency, mesh: &mut ChunkMesh) {
     mesh.vertices.clear();
     mesh.indices.clear();
     if shape.chunk(coord).is_none() {
         return;
     }
     let padded = PaddedChunk::new(shape, coord);
-    let columns = Columns::new(&padded);
+    let columns = Columns::new(&padded, transparency);
     let origin = coord.origin().as_vec3();
     // `rows[depth * SIZE + v]` has bit `u` set when the voxel at (u, v) of that slice has an exposed face.
     let mut rows = [0_u32; SIZE * SIZE];
@@ -74,12 +132,27 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
         rows.fill(0);
         for v in 0..SIZE {
             for u in 0..SIZE {
-                let column = columns.column(axis, u, v);
-                let exposed = if face.is_positive() {
-                    column & !(column >> 1)
-                } else {
-                    column & !(column << 1)
-                };
+                let (all, glass) = columns.column(axis, u, v);
+                let opaque = all & !glass;
+                let shift = |bits: u64| if face.is_positive() { bits >> 1 } else { bits << 1 };
+                // Next to nothing, or an opaque voxel next to glass.
+                let mut exposed = (all & !shift(all)) | (opaque & shift(glass));
+                if columns.mixed_glass {
+                    // Glass next to glass of another Material shows both faces.
+                    let mut pairs = glass & shift(glass) & INNER_BITS;
+                    while pairs != 0 {
+                        let bit = pairs.trailing_zeros() as usize;
+                        pairs &= pairs - 1;
+                        let mut position = IVec3::ZERO;
+                        position[axis] = bit as i32 - 1;
+                        position[u_axis] = u as i32;
+                        position[v_axis] = v as i32;
+                        let own = transparency.group(padded.get(position));
+                        if own != transparency.group(padded.get(position + normal)) {
+                            exposed |= 1 << bit;
+                        }
+                    }
+                }
                 let mut bits = exposed & INNER_BITS;
                 while bits != 0 {
                     let depth = bits.trailing_zeros() as usize - 1;
@@ -106,7 +179,7 @@ pub fn mesh_chunk(shape: &Shape, coord: ChunkCoord, mesh: &mut ChunkMesh) {
                     position[u_axis] = u as i32;
                     position[v_axis] = v as i32;
                     if let Some(key) = keys.get_mut(v * SIZE + u) {
-                        *key = face_key(&padded, position, normal, u_dir, v_dir);
+                        *key = face_key(&padded, transparency, position, normal, u_dir, v_dir);
                     }
                 }
             }
@@ -163,13 +236,24 @@ const INNER_BITS: u64 = ((1_u64 << SIZE) - 1) << 1;
 
 /// Merge key of the exposed face of the voxel at `position`: Color (bits 0–7), four AO values (8–15) and a
 /// marker bit so a key is never zero.
-fn face_key(padded: &PaddedChunk, position: IVec3, normal: IVec3, u_dir: IVec3, v_dir: IVec3) -> u32 {
+fn face_key(
+    padded: &PaddedChunk,
+    transparency: &Transparency,
+    position: IVec3,
+    normal: IVec3,
+    u_dir: IVec3,
+    v_dir: IVec3,
+) -> u32 {
     let material = padded.get(position);
+    let occludes = |at: IVec3| {
+        let voxel = padded.get(at);
+        voxel != 0 && transparency.group(voxel) == 0
+    };
     let ao = |su: i32, sv: i32| -> u32 {
         let outside = position + normal;
-        let side_u = padded.get(outside + u_dir * su) != 0;
-        let side_v = padded.get(outside + v_dir * sv) != 0;
-        let corner = padded.get(outside + u_dir * su + v_dir * sv) != 0;
+        let side_u = occludes(outside + u_dir * su);
+        let side_v = occludes(outside + v_dir * sv);
+        let corner = occludes(outside + u_dir * su + v_dir * sv);
         if side_u && side_v {
             0
         } else {
@@ -184,12 +268,19 @@ fn face_key(padded: &PaddedChunk, position: IVec3, normal: IVec3, u_dir: IVec3, 
 struct Columns {
     /// `[axis * PADDED² + padded v * PADDED + padded u]`, with u and v the two axes following `axis` cyclically.
     bits: Box<[u64]>,
+    /// The same layout for the transparent voxels only.
+    glass: Box<[u64]>,
+    /// Whether voxels of more than one transparent Material are present.
+    mixed_glass: bool,
 }
 
 impl Columns {
     // HOT PATH: one pass over the padded voxels.
-    fn new(padded: &PaddedChunk) -> Self {
+    fn new(padded: &PaddedChunk, transparency: &Transparency) -> Self {
         let mut bits = vec![0_u64; 3 * PADDED * PADDED].into_boxed_slice();
+        let mut glass = bits.clone();
+        let mut first_group = 0;
+        let mut mixed_glass = false;
         for (y, plane) in padded.voxels.as_chunks::<{ PADDED * PADDED }>().0.iter().enumerate() {
             for (z, line) in plane.as_chunks::<PADDED>().0.iter().enumerate() {
                 for (x, &voxel) in line.iter().enumerate() {
@@ -197,23 +288,41 @@ impl Columns {
                         continue;
                     }
                     // Axis 0 (X): u = Y, v = Z. Axis 1 (Y): u = Z, v = X. Axis 2 (Z): u = X, v = Y.
+                    let group = transparency.group(voxel);
+                    if group != 0 {
+                        if first_group == 0 {
+                            first_group = group;
+                        }
+                        mixed_glass |= group != first_group;
+                    }
                     for (axis, index, bit) in [(0, z * PADDED + y, x), (1, x * PADDED + z, y), (2, y * PADDED + x, z)] {
-                        if let Some(column) = bits.get_mut(axis * PADDED * PADDED + index) {
+                        let slot = axis * PADDED * PADDED + index;
+                        if let Some(column) = bits.get_mut(slot) {
+                            *column |= 1 << bit;
+                        }
+                        if group != 0
+                            && let Some(column) = glass.get_mut(slot)
+                        {
                             *column |= 1 << bit;
                         }
                     }
                 }
             }
         }
-        Self { bits }
+        Self {
+            bits,
+            glass,
+            mixed_glass,
+        }
     }
 
-    /// The column along `axis` at chunk-local `(u, v)`.
-    fn column(&self, axis: usize, u: usize, v: usize) -> u64 {
-        self.bits
-            .get(axis * PADDED * PADDED + (v + 1) * PADDED + u + 1)
-            .copied()
-            .unwrap_or(0)
+    /// The occupied and the transparent column along `axis` at chunk-local `(u, v)`.
+    fn column(&self, axis: usize, u: usize, v: usize) -> (u64, u64) {
+        let slot = axis * PADDED * PADDED + (v + 1) * PADDED + u + 1;
+        (
+            self.bits.get(slot).copied().unwrap_or(0),
+            self.glass.get(slot).copied().unwrap_or(0),
+        )
     }
 }
 
@@ -316,19 +425,24 @@ mod tests {
     use super::*;
     use crate::palette::ColorId;
 
-    fn exposed_faces(shape: &Shape, coord: ChunkCoord) -> u32 {
+    fn exposed_faces(shape: &Shape, coord: ChunkCoord, transparency: &Transparency) -> u32 {
         let mut count = 0;
         for y in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 for x in 0..CHUNK_SIZE {
                     let position = coord.origin() + IVec3::new(x, y, z);
-                    if shape.get(position).is_none() {
+                    let Some(own) = shape.get(position).map(|color| transparency.group(color.get())) else {
                         continue;
-                    }
+                    };
                     for face in Face::ALL {
-                        if shape.get(position + face.normal()).is_none() {
-                            count += 1;
-                        }
+                        let visible = match shape.get(position + face.normal()) {
+                            None => true,
+                            Some(next) => {
+                                let other = transparency.group(next.get());
+                                other != 0 && (own == 0 || own != other)
+                            }
+                        };
+                        count += u32::from(visible);
                     }
                 }
             }
@@ -351,7 +465,7 @@ mod tests {
         let mut shape = Shape::new();
         shape.set(IVec3::new(4, 4, 4), ColorId::new(1));
         let mut mesh = ChunkMesh::default();
-        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &mut mesh);
+        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &Transparency::OPAQUE, &mut mesh);
         assert_eq!(mesh.vertices.len(), 24);
         assert_eq!(mesh.indices.len(), 36);
     }
@@ -365,24 +479,84 @@ mod tests {
             }
         }
         let mut mesh = ChunkMesh::default();
-        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &mut mesh);
+        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &Transparency::OPAQUE, &mut mesh);
         assert_eq!(mesh.vertices.len() / 4, 6);
     }
 
     proptest! {
         #[test]
         fn greedy_mesh_covers_exactly_the_exposed_faces(
-            voxels in prop::collection::vec((0..40_i32, 0..6_i32, 0..6_i32, 1..4_u8), 1..300)
+            voxels in prop::collection::vec((0..40_i32, 0..6_i32, 0..6_i32, 1..6_u8), 1..300),
+            glass in prop::collection::vec(prop::option::of(0..3_u32), 6),
         ) {
+            let mut transparency = Transparency::OPAQUE;
+            for (number, group) in (1..=6_u8).zip(glass) {
+                if let Some(color) = ColorId::new(number) {
+                    transparency.set(color, group);
+                }
+            }
             let mut shape = Shape::new();
             for (x, y, z, color) in voxels {
                 shape.set(IVec3::new(x - 4, y, z), ColorId::new(color));
             }
             let mut mesh = ChunkMesh::default();
             for coord in [ChunkCoord(IVec3::ZERO), ChunkCoord(IVec3::new(1, 0, 0)), ChunkCoord(IVec3::new(-1, 0, 0))] {
-                mesh_chunk(&shape, coord, &mut mesh);
-                prop_assert!((quad_area(&mesh) - exposed_faces(&shape, coord) as f32).abs() < 1e-3);
+                mesh_chunk(&shape, coord, &transparency, &mut mesh);
+                prop_assert!((quad_area(&mesh) - exposed_faces(&shape, coord, &transparency) as f32).abs() < 1e-3);
             }
         }
+    }
+
+    fn face_count(shape: &Shape, transparency: &Transparency) -> usize {
+        let mut mesh = ChunkMesh::default();
+        mesh_chunk(shape, ChunkCoord(IVec3::ZERO), transparency, &mut mesh);
+        mesh.vertices.len() / 4
+    }
+
+    #[test]
+    fn opaque_floor_under_glass_keeps_its_face() {
+        let mut shape = Shape::new();
+        shape.set(IVec3::new(2, 0, 2), ColorId::new(1));
+        shape.set(IVec3::new(2, 1, 2), ColorId::new(2));
+        let mut glass = Transparency::OPAQUE;
+        glass.set(ColorId::new(2).unwrap(), Some(1));
+        // Opaque: both hide the shared face (5 + 5). Glass above: the floor's top is kept, the glass bottom is not.
+        assert_eq!(face_count(&shape, &Transparency::OPAQUE), 10);
+        assert_eq!(face_count(&shape, &glass), 11);
+    }
+
+    #[test]
+    fn glass_of_one_material_is_one_body_and_two_materials_show_both_faces() {
+        let mut shape = Shape::new();
+        shape.set(IVec3::new(2, 0, 2), ColorId::new(1));
+        shape.set(IVec3::new(3, 0, 2), ColorId::new(2));
+        let mut same = Transparency::OPAQUE;
+        same.set(ColorId::new(1).unwrap(), Some(1));
+        same.set(ColorId::new(2).unwrap(), Some(1));
+        let mut different = same.clone();
+        different.set(ColorId::new(2).unwrap(), Some(2));
+        assert_eq!(face_count(&shape, &same), 10, "the shared face is culled");
+        assert_eq!(
+            face_count(&shape, &different),
+            12,
+            "the shared face shows on both sides"
+        );
+    }
+
+    #[test]
+    fn glass_does_not_darken_neighbours() {
+        let mut shape = Shape::new();
+        shape.set(IVec3::new(2, 0, 2), ColorId::new(1));
+        shape.set(IVec3::new(3, 1, 2), ColorId::new(2));
+        let mut mesh = ChunkMesh::default();
+        let mut glass = Transparency::OPAQUE;
+        glass.set(ColorId::new(2).unwrap(), Some(1));
+        mesh_chunk(&shape, ChunkCoord(IVec3::ZERO), &glass, &mut mesh);
+        let occluded = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| (vertex.packed >> 8) & 0xff == 1 && (vertex.packed >> 3) & 3 != 3)
+            .count();
+        assert_eq!(occluded, 0, "the opaque voxel has no occluded corner");
     }
 }

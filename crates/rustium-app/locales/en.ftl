@@ -665,3 +665,19 @@ rtip-dolly = Move the camera closer or farther.
 rtip-focus = Click the model to set the focus distance.
 rtip-sun = Drag to set where the sunlight comes from.
 rtip-region = Render only a dragged rectangle.
+
+# Edit animations and tool hints
+setting-edit-animation = Edit animation
+edit-animation-ghost = Ghost
+edit-animation-pop = Pop
+edit-animation-from-wall = From the face
+edit-animation-wave = Wave
+edit-animation-flash = Flash
+edit-animation-reduced = Motion is Reduced, so edits always flash.
+edit-animation-off = Motion is Off, so edits are not animated.
+mirror-centre = Centre
+mirror-centre-hint = Put the mirror planes through the middle of the Model as it is now
+block-no-target = Nothing here for this tool
+block-no-voxel = No voxel here
+block-not-selected = Select voxels first, then drag them
+block-no-color = No color here

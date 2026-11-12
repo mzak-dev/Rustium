@@ -36,6 +36,12 @@ pub(super) fn interact(ctx: &Context, hud: &mut Hud<'_>, response: &Response, sc
     }
 
     primary_button(ctx, hud, response, screen, ray, pointer);
+    if response.hovered()
+        && !hud.editor.is_stroking()
+        && let (Some(block), Some(pointer)) = (hud.editor.tool_block(), pointer)
+    {
+        block_hint(ctx, hud, pointer, &hud.tr(block.message_key()));
+    }
 
     // Camera: middle drag orbits, Shift + middle drag pans, the wheel zooms towards the cursor.
     if response.dragged_by(PointerButton::Middle) {
@@ -110,6 +116,21 @@ fn primary_button(
     if released || (!down && hud.editor.is_stroking()) {
         hud.editor.release();
     }
+}
+
+/// A short note beside the pointer saying why the Tool would do nothing there.
+fn block_hint(ctx: &Context, hud: &Hud<'_>, pointer: Pos2, text: &str) {
+    let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::unique("tool-block-hint")));
+    let galley = painter.layout_no_wrap(text.to_owned(), crate::theme::bold(11.0), crate::theme::TEXT);
+    let rect = Rect::from_min_size(pointer + egui::vec2(18.0, 14.0), galley.size()).expand2(egui::vec2(7.0, 4.0));
+    painter.rect(
+        rect,
+        6,
+        egui::Color32::from_black_alpha(200),
+        Stroke::new(1.0, hud.accent().gamma_multiply(0.5)),
+        StrokeKind::Inside,
+    );
+    painter.galley(rect.min + egui::vec2(7.0, 4.0), galley, crate::theme::TEXT);
 }
 
 fn draw_marquee(ctx: &Context, hud: &Hud<'_>, rect: Rect) {

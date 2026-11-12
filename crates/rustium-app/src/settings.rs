@@ -59,6 +59,36 @@ pub(crate) enum Motion {
     Off,
 }
 
+/// How voxels appear and vanish when they are edited (Motion Full only; Reduced always flashes, Off shows nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub(crate) enum EditAnimation {
+    /// See-through cells while the stroke runs, hardened one after another on release.
+    #[default]
+    Ghost,
+    /// Cells grow from 60 % with a slight overshoot and shrink away.
+    Pop,
+    /// Cells grow out of the face they were placed on and sink back into it.
+    FromWall,
+    /// Like Pop, spreading out from where the gesture started.
+    Wave,
+    /// The change shows at once, with a fading highlight.
+    Flash,
+}
+
+impl EditAnimation {
+    pub(crate) const ALL: [Self; 5] = [Self::Ghost, Self::Pop, Self::FromWall, Self::Wave, Self::Flash];
+
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::Ghost => "edit-animation-ghost",
+            Self::Pop => "edit-animation-pop",
+            Self::FromWall => "edit-animation-from-wall",
+            Self::Wave => "edit-animation-wave",
+            Self::Flash => "edit-animation-flash",
+        }
+    }
+}
+
 /// How orbiting treats the up axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum OrbitStyle {
@@ -138,6 +168,7 @@ pub(crate) struct Settings {
     pub(crate) ui_scale_percent: u32,
     pub(crate) translucent_panels: bool,
     pub(crate) motion: Motion,
+    pub(crate) edit_animation: EditAnimation,
     pub(crate) shortcut_letters: bool,
     /// Draw tool-aware cursors over the 3D view, node canvas and render frame instead of system ones.
     pub(crate) custom_cursors: bool,
@@ -172,6 +203,7 @@ impl Default for Settings {
             ui_scale_percent: 100,
             translucent_panels: true,
             motion: Motion::Full,
+            edit_animation: EditAnimation::Ghost,
             shortcut_letters: true,
             custom_cursors: true,
             tooltip_delay_seconds: 0.3,
@@ -233,6 +265,7 @@ impl Settings {
                 self.ui_scale_percent = defaults.ui_scale_percent;
                 self.translucent_panels = defaults.translucent_panels;
                 self.motion = defaults.motion;
+                self.edit_animation = defaults.edit_animation;
                 self.shortcut_letters = defaults.shortcut_letters;
                 self.custom_cursors = defaults.custom_cursors;
                 self.tooltip_delay_seconds = defaults.tooltip_delay_seconds;

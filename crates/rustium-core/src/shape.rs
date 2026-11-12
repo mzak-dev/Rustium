@@ -137,6 +137,7 @@ impl Shape {
 
     /// A copy with the voxels at `cells` emptied, for drawing a Shape while some of its voxels are shown another
     /// way (an edit animation). Cheap: only the touched chunks are copied, and the Volume is left as it is.
+    #[must_use]
     pub fn with_hidden(&self, cells: impl IntoIterator<Item = IVec3>) -> Self {
         let mut copy = self.clone();
         for cell in cells {

@@ -4,15 +4,18 @@
 
 use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::Graphics::Gdi::{InvalidateRect, ScreenToClient};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    IsZoomed, WM_NCDESTROY, WM_NCHITTEST,
+    IsZoomed, PostMessageW, SC_MAXIMIZE, SC_RESTORE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+    WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_SYSCOMMAND,
 };
 
 use crate::hit::{Edge, HitRegions, HitZone};
@@ -24,6 +27,10 @@ const SUBCLASS_ID: usize = 0x5255_5354;
 #[derive(Debug, Default)]
 struct Shared {
     regions: Mutex<HitRegions>,
+    /// The pointer is over the maximize button (a non-client area, so the client never sees it).
+    maximize_hovered: AtomicBool,
+    /// The left button went down on the maximize button and has not been released yet.
+    maximize_pressed: AtomicBool,
 }
 
 /// The installed subclass. Dropping it removes the hook.
@@ -59,6 +66,10 @@ impl Subclass {
             shared,
             _not_send: PhantomData,
         })
+    }
+
+    pub(crate) fn maximize_hovered(&self) -> bool {
+        self.shared.maximize_hovered.load(Ordering::Relaxed)
     }
 
     pub(crate) fn update(&self, regions: &HitRegions) {
@@ -107,6 +118,16 @@ unsafe extern "system" fn subclass_proc(
                 Err(_) => tracing::error!("panic while answering WM_NCHITTEST"),
             }
         }
+        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_NCLBUTTONDOWN | WM_NCLBUTTONUP => {
+            let handled = panic::catch_unwind(AssertUnwindSafe(|| {
+                maximize_button_message(hwnd, message, wparam, data)
+            }));
+            match handled {
+                Ok(true) => return 0,
+                Ok(false) => {}
+                Err(_) => tracing::error!("panic while handling a maximize button message"),
+            }
+        }
         WM_NCDESTROY => {
             // SAFETY: called from the window's own procedure with the registration made in `install`.
             let removed = unsafe { RemoveWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID) };
@@ -119,6 +140,65 @@ unsafe extern "system" fn subclass_proc(
     }
     // SAFETY: forwards the unchanged message of this very call to the next procedure in the chain.
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+/// Handles the non-client mouse messages over the maximize button, which Windows sends there instead of the client
+/// area: the button highlights and still maximizes or restores when clicked. Returns `true` when the message is used
+/// up.
+fn maximize_button_message(hwnd: HWND, message: u32, wparam: WPARAM, data: usize) -> bool {
+    // SAFETY: `data` is the pointer from `Arc::into_raw` in `install`, alive until the subclass is removed.
+    let shared = unsafe { &*(data as *const Shared) };
+    let over_button = u32::try_from(wparam).is_ok_and(|code| code == HTMAXBUTTON);
+    match message {
+        WM_NCMOUSEMOVE if over_button => {
+            if !shared.maximize_hovered.swap(true, Ordering::Relaxed) {
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: u32::try_from(size_of::<TRACKMOUSEEVENT>()).unwrap_or(0),
+                    dwFlags: TME_LEAVE | TME_NONCLIENT,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                // SAFETY: `track` is a fully initialised TRACKMOUSEEVENT for this window.
+                unsafe { TrackMouseEvent(&raw mut track) };
+                redraw(hwnd);
+            }
+            false
+        }
+        WM_NCMOUSEMOVE | WM_NCMOUSELEAVE => {
+            // Moved to another part of the window, or left it.
+            let was_hovered = shared.maximize_hovered.swap(false, Ordering::Relaxed);
+            shared.maximize_pressed.store(false, Ordering::Relaxed);
+            if was_hovered {
+                redraw(hwnd);
+            }
+            false
+        }
+        WM_NCLBUTTONDOWN if over_button => {
+            shared.maximize_pressed.store(true, Ordering::Relaxed);
+            true
+        }
+        WM_NCLBUTTONUP if over_button => {
+            if !shared.maximize_pressed.swap(false, Ordering::Relaxed) {
+                return false;
+            }
+            // SAFETY: `hwnd` is the window this procedure runs for.
+            let command = if unsafe { IsZoomed(hwnd) } != 0 {
+                SC_RESTORE
+            } else {
+                SC_MAXIMIZE
+            };
+            // SAFETY: posting a system command to our own window; the handler runs after this procedure returns.
+            unsafe { PostMessageW(hwnd, WM_SYSCOMMAND, command as WPARAM, 0) };
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Asks for a repaint so the interface can show the button's new state.
+fn redraw(hwnd: HWND) {
+    // SAFETY: `hwnd` is the window this procedure runs for; a null rectangle invalidates the whole client area.
+    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0) };
 }
 
 /// The hit-test answer, or `None` to leave the decision to the default procedure.

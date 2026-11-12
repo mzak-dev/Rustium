@@ -1,0 +1,41 @@
+name: Build and test the web version
+description: Build the browser version with scripts/build-web.sh and smoke-test it in headless Chromium.
+
+inputs:
+  out-dir:
+    description: Folder the site is built into.
+    default: target/web
+
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-rust
+      with:
+        cache-key: web
+
+    - name: Install wasm-pack
+      shell: bash
+      # wasm-pack fetches the matching wasm-bindgen and binaryen's wasm-opt itself.
+      run: cargo install wasm-pack --version 0.15.1 --locked
+
+    - name: Build
+      shell: bash
+      env:
+        OUT_DIR: ${{ inputs.out-dir }}
+      run: scripts/build-web.sh "$OUT_DIR"
+
+    - name: Install Playwright's Chromium
+      shell: bash
+      run: |
+        npm install --no-save --prefix "$RUNNER_TEMP/playwright" playwright@1.63.0
+        "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+    - name: Smoke test
+      shell: bash
+      env:
+        OUT_DIR: ${{ inputs.out-dir }}
+      # Chromium runs WebGPU on SwiftShader here, so the runner needs no GPU.
+      run: |
+        python3 -m http.server 8000 --directory "$OUT_DIR" > /dev/null 2>&1 &
+        mkdir -p "$RUNNER_TEMP/screenshots"
+        NODE_PATH="$RUNNER_TEMP/playwright/node_modules" node web/smoke-test.cjs http://localhost:8000/ "$RUNNER_TEMP/screenshots"

@@ -334,9 +334,7 @@ impl Running {
                 .collect();
             self.io.submit(IoJob::Delete(stale));
         }
-        let root_name = scene
-            .node(NodeId::ROOT)
-            .map_or_else(String::new, |root| root.name().to_owned());
+        let root_name = scene_summary(&scene);
         self.editor.replace_scene(scene, settings.undo_steps as usize);
         self.viewport.clear_chunks();
         self.preview.invalidate();
@@ -416,4 +414,21 @@ fn display_name(path: &Path) -> String {
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// The names of the first Nodes under the root, shown next to a recent file on the start screen.
+fn scene_summary(scene: &rustium_core::Scene) -> String {
+    let names: Vec<&str> = scene
+        .node(NodeId::ROOT)
+        .map(|root| {
+            root.children()
+                .iter()
+                .filter_map(|id| scene.node(*id))
+                .map(rustium_core::Node::name)
+                .filter(|name| !name.is_empty())
+                .take(3)
+                .collect()
+        })
+        .unwrap_or_default();
+    names.join(", ")
 }

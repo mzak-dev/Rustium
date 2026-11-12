@@ -253,7 +253,8 @@ fn recent_list(ui: &mut egui::Ui, hud: &mut Hud<'_>, max_height: f32) {
                 egui::FontId::monospace(12.0),
                 name_color,
             );
-            if !item.file.name.is_empty() {
+            // Older entries stored the root Node's own name, which says nothing about the content.
+            if !item.file.name.is_empty() && !matches!(item.file.name.as_str(), "Scene" | "Scena") {
                 ui.painter().text(
                     rect.right_center() - vec2(8.0, 0.0),
                     Align2::RIGHT_CENTER,

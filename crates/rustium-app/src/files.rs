@@ -6,9 +6,10 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -32,6 +33,8 @@ pub(crate) enum Pending {
     Open(Option<PathBuf>),
     /// Ask for a `.vox` file and open it as a new Scene.
     ImportVox,
+    /// Open this `.vox` file as a new Scene.
+    Import(PathBuf),
     /// Leave the application.
     Quit,
 }
@@ -80,6 +83,8 @@ pub(crate) enum IoJob {
     Save {
         path: PathBuf,
         scene: Box<Scene>,
+        /// The document the Scene was taken from, see [`Document::id`].
+        document: u64,
         revision: u64,
         then: Option<Pending>,
         /// Recovery files that become obsolete once the save succeeds.
@@ -115,9 +120,13 @@ pub(crate) enum IoOutcome {
         origin: Origin,
         /// A newer recovery copy next to the file that was opened.
         recovery: Option<RecoveryOffer>,
+        /// The file an import was read from, so it can be asked about again.
+        source: Option<PathBuf>,
     },
     Saved {
         path: PathBuf,
+        /// The document the saved Scene belonged to; the current one may be another by now.
+        document: u64,
         revision: u64,
         name: String,
         then: Option<Pending>,
@@ -126,8 +135,8 @@ pub(crate) enum IoOutcome {
     PaletteLoaded(Vec<[u8; 3]>),
     Autosaved(u64),
     RecentChecked(Vec<RecentItem>),
-    /// A dialog was dismissed.
-    Cancelled,
+    /// A dialog was dismissed; carries the document of a Save dialog.
+    Cancelled(Option<u64>),
     Failed {
         operation: Operation,
         path: PathBuf,
@@ -141,6 +150,10 @@ pub(crate) struct Io {
     outcome_sender: Sender<IoOutcome>,
     outcomes: Receiver<IoOutcome>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    /// Set once the app is quitting: no recovery copy may be written any more.
+    quitting: Arc<AtomicBool>,
+    /// Held while a recovery copy is written, so quitting can wait for a write in flight.
+    autosave_lock: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Io {
@@ -156,9 +169,22 @@ impl Io {
         let (outcome_sender, outcomes) = crossbeam_channel::unbounded::<IoOutcome>();
         let worker_outcomes = outcome_sender.clone();
         let worker_wake = Arc::clone(&wake);
+        let quitting = Arc::new(AtomicBool::new(false));
+        let autosave_lock = Arc::new(Mutex::new(()));
+        let worker_quitting = Arc::clone(&quitting);
+        let worker_lock = Arc::clone(&autosave_lock);
         let spawned = std::thread::Builder::new().name("io-worker".to_owned()).spawn(move || {
             for job in job_receiver {
-                let outcome = run(job);
+                let outcome = if let IoJob::Autosave { .. } = job {
+                    let _guard = worker_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if worker_quitting.load(Ordering::SeqCst) {
+                        None
+                    } else {
+                        run(job)
+                    }
+                } else {
+                    run(job)
+                };
                 if let Some(outcome) = outcome {
                     // A closed channel means the application is shutting down.
                     let _ = worker_outcomes.send(outcome);
@@ -174,6 +200,21 @@ impl Io {
             outcome_sender,
             outcomes,
             wake,
+            quitting,
+            autosave_lock,
+        }
+    }
+
+    /// Stops recovery copies for good and deletes `paths`, waiting for a copy that is being written, so that nothing
+    /// re-creates them while the app exits.
+    pub(crate) fn delete_for_quit(&self, paths: &[PathBuf]) {
+        self.quitting.store(true, Ordering::SeqCst);
+        let _guard = self
+            .autosave_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for path in paths {
+            let _ = fs::remove_file(path);
         }
     }
 
@@ -190,8 +231,8 @@ impl Io {
     }
 
     /// Runs a native dialog on its own thread; a chosen file becomes a job, a dismissed dialog becomes
-    /// [`IoOutcome::Cancelled`].
-    fn dialog(&self, pick: impl FnOnce() -> Option<IoJob> + Send + 'static) {
+    /// [`IoOutcome::Cancelled`] (with `document` when it was a Save dialog for that document).
+    fn dialog(&self, document: Option<u64>, pick: impl FnOnce() -> Option<IoJob> + Send + 'static) {
         let jobs = self.jobs.clone();
         let outcomes = self.outcome_sender.clone();
         let wake = Arc::clone(&self.wake);
@@ -201,7 +242,7 @@ impl Io {
                 if let Some(job) = pick() {
                     let _ = jobs.send(job);
                 } else {
-                    let _ = outcomes.send(IoOutcome::Cancelled);
+                    let _ = outcomes.send(IoOutcome::Cancelled(document));
                     wake();
                 }
             });
@@ -212,7 +253,7 @@ impl Io {
 
     /// Asks for a `.ruv` file to open.
     pub(crate) fn pick_open(&self, title: String, scene_label: String) {
-        self.dialog(move || {
+        self.dialog(None, move || {
             let path = rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter(scene_label, &[EXTENSION])
@@ -223,7 +264,7 @@ impl Io {
 
     /// Asks for a `.vox` file to import.
     pub(crate) fn pick_import_vox(&self, title: String) {
-        self.dialog(move || {
+        self.dialog(None, move || {
             let path = rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter("MagicaVoxel", &["vox"])
@@ -234,7 +275,7 @@ impl Io {
 
     /// Asks for a palette file to import.
     pub(crate) fn pick_import_palette(&self, title: String) {
-        self.dialog(move || {
+        self.dialog(None, move || {
             let path = rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter("Palette", &["pal", "png"])
@@ -245,7 +286,8 @@ impl Io {
 
     /// Asks where to save the Scene.
     pub(crate) fn pick_save(&self, title: String, scene_label: String, start: SaveStart, job: SaveJob) {
-        self.dialog(move || {
+        let document = job.document;
+        self.dialog(Some(document), move || {
             let mut dialog = rfd::FileDialog::new()
                 .set_title(title)
                 .add_filter(scene_label, &[EXTENSION])
@@ -260,7 +302,7 @@ impl Io {
 
     /// Asks where to export a `.vox` file.
     pub(crate) fn pick_export_vox(&self, title: String, start: SaveStart, scene: Box<Scene>) {
-        self.dialog(move || {
+        self.dialog(None, move || {
             let path = save_dialog(title, "MagicaVoxel", "vox", &start)?;
             Some(IoJob::ExportVox { path, scene })
         });
@@ -268,7 +310,7 @@ impl Io {
 
     /// Asks where to export a palette file.
     pub(crate) fn pick_export_palette(&self, title: String, start: SaveStart, colors: Vec<[u8; 3]>) {
-        self.dialog(move || {
+        self.dialog(None, move || {
             let path = save_dialog(title, "Palette", "pal", &start)?;
             Some(IoJob::ExportPalette { path, colors })
         });
@@ -297,6 +339,7 @@ pub(crate) struct SaveStart {
 #[derive(Debug)]
 pub(crate) struct SaveJob {
     pub(crate) scene: Box<Scene>,
+    pub(crate) document: u64,
     pub(crate) revision: u64,
     pub(crate) then: Option<Pending>,
     pub(crate) obsolete: Vec<PathBuf>,
@@ -307,6 +350,7 @@ impl SaveJob {
         IoJob::Save {
             path,
             scene: self.scene,
+            document: self.document,
             revision: self.revision,
             then: self.then,
             obsolete: self.obsolete,
@@ -352,6 +396,8 @@ pub(crate) fn find_recovery(document: Option<&Path>) -> Option<RecoveryOffer> {
 /// The open document: where it lives and whether it differs from disk.
 #[derive(Debug)]
 pub(crate) struct Document {
+    /// Tells this document from every earlier one, so a late file outcome can be matched to its document.
+    id: u64,
     pub(crate) path: Option<PathBuf>,
     /// The Editor revision that matches the file; `None` when the Scene has no clean state (imported, recovered).
     saved_revision: Option<u64>,
@@ -364,7 +410,9 @@ pub(crate) struct Document {
 impl Document {
     /// A clean, unsaved Scene at `revision`.
     pub(crate) fn new(revision: u64) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             path: None,
             saved_revision: Some(revision),
             autosaved_revision: None,
@@ -380,6 +428,16 @@ impl Document {
         if !clean {
             self.saved_revision = None;
         }
+    }
+
+    /// Identifies this document among all that were open in this run.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// A recovery copy could not be written: try again at the next interval.
+    pub(crate) fn note_autosave_failed(&mut self) {
+        self.autosaved_revision = None;
     }
 
     pub(crate) fn is_dirty(&self, revision: u64) -> bool {
@@ -435,10 +493,27 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut temporary: OsString = path.as_os_str().to_owned();
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, bytes)?;
+    let written = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        // The data must be on disk before the rename makes it the document.
+        file.sync_all()
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
     fs::rename(&temporary, path).inspect_err(|_| {
         let _ = fs::remove_file(&temporary);
-    })
+    })?;
+    // Persist the rename itself where the platform lets a directory be opened (not on Windows).
+    #[cfg(unix)]
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 fn root_name(scene: &Scene) -> String {
@@ -474,6 +549,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                     scene: Box::new(scene),
                     origin: Origin::File,
                     recovery,
+                    source: None,
                 }
             }
             Err(error) => failure(Operation::Open, &path, error),
@@ -484,6 +560,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                 scene: Box::new(scene),
                 origin: Origin::Recovery,
                 recovery: None,
+                source: None,
             },
             Err(error) => {
                 // A damaged recovery file would be offered again at every start.
@@ -501,6 +578,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                     scene: Box::new(scene),
                     origin: Origin::Import,
                     recovery: None,
+                    source: Some(path),
                 },
                 Err(error) => failure(Operation::Import, &path, error),
             }
@@ -508,6 +586,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
         IoJob::Save {
             path,
             scene,
+            document,
             revision,
             then,
             obsolete,
@@ -523,6 +602,7 @@ fn run(job: IoJob) -> Option<IoOutcome> {
                 IoOutcome::Saved {
                     name: root_name(&scene),
                     path,
+                    document,
                     revision,
                     then,
                 }
@@ -615,9 +695,10 @@ fn palette_from_png(bytes: &[u8]) -> Result<Vec<[u8; 3]>, String> {
     Ok(colors)
 }
 
-/// Deletes the recovery files of a document and of the unsaved Scene on the IO thread.
+/// The recovery file of a document; the one of the unsaved Scene when `document` is `None`. Other documents'
+/// recovery copies are never touched, because they may be work the user has not decided about yet.
 pub(crate) fn recovery_files(document: Option<&Path>) -> Vec<PathBuf> {
-    vec![recovery_path(document), recovery_path(None)]
+    vec![recovery_path(document)]
 }
 
 #[cfg(test)]
@@ -651,6 +732,7 @@ mod tests {
         let outcome = run(IoJob::Save {
             path: path.clone(),
             scene: Box::new(scene),
+            document: 1,
             revision: 7,
             then: Some(Pending::New),
             obsolete: Vec::new(),
@@ -741,6 +823,42 @@ mod tests {
             .write_image_data(&[1, 2, 3, 250, 251, 252])
             .unwrap();
         assert_eq!(read_palette(&png_path).unwrap(), colors);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recovery_files_never_include_another_documents_copy() {
+        let path = PathBuf::from("a.ruv");
+        assert_eq!(recovery_files(Some(&path)), vec![recovery_path(Some(&path))]);
+        assert!(!recovery_files(Some(&path)).contains(&recovery_path(None)));
+    }
+
+    #[test]
+    fn every_document_gets_its_own_id_even_after_a_reset() {
+        let mut document = Document::new(1);
+        let first = document.id();
+        document.reset(None, 2, true);
+        assert_ne!(document.id(), first);
+    }
+
+    #[test]
+    fn a_failed_autosave_is_tried_again() {
+        let mut document = Document::new(1);
+        let start = document.last_autosave;
+        let interval = Duration::from_secs(60);
+        document.note_autosave_started(2, start);
+        document.note_autosave_failed();
+        assert!(document.autosave_due(2, start + interval, interval));
+    }
+
+    #[test]
+    fn writing_replaces_the_file_and_leaves_no_temporary_one() {
+        let dir = directory("atomic");
+        let path = dir.join("a.bin");
+        write_atomic(&path, b"one").unwrap();
+        write_atomic(&path, b"two").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+        assert!(!dir.join("a.bin.tmp").exists());
         let _ = fs::remove_dir_all(dir);
     }
 

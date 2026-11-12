@@ -10,8 +10,8 @@ use glam::{IVec3, Vec3};
 use rustium_core::{ChunkMesh, Volume, mesh_chunk};
 use rustium_platform::{HitRegions, Platform};
 use rustium_render::{
-    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, TraceFrame,
-    ViewportFrame, ViewportRenderer,
+    CameraUniform, GlassRect, GpuContext, GpuPreferences, GraphicsBackend, LineVertex, ModelDraw, RayTracing,
+    TraceFrame, ViewportFrame, ViewportRenderer,
 };
 use tracing::{error, info, warn};
 use winit::application::ApplicationHandler;
@@ -30,7 +30,7 @@ use crate::recent::{self, RecentFile};
 use crate::render_job::{self, Destination, JobSpec, Output, OutputKind};
 use crate::render_mode::{Backdrop, ImageFormat};
 use crate::render_output::{self, SaveOutcome};
-use crate::settings::{Backend, FrameLimit, Settings};
+use crate::settings::{Backend, FrameLimit, RayTracingMode, Settings};
 use crate::{settings_window, splash, theme};
 
 mod documents;
@@ -249,7 +249,8 @@ impl Running {
         gpu.set_vsync(settings.vsync);
         let sample_counts = gpu.supported_sample_counts(wgpu::TextureFormat::Rgba8UnormSrgb);
         let samples = best_sample_count(&sample_counts, settings.msaa_samples);
-        let viewport = ViewportRenderer::new(&gpu, samples);
+        let mut viewport = ViewportRenderer::new(&gpu, samples);
+        viewport.set_ray_tracing(&gpu, ray_tracing(settings.ray_tracing));
         let adapter_name = gpu.adapter_info().name;
         info!(samples, "viewport ready");
 
@@ -387,6 +388,8 @@ impl Running {
                 logo: &self.logo,
                 maximized,
                 adapter_name: &self.adapter_name,
+                trace_engine: self.viewport.trace_engine(),
+                ray_query_supported: self.gpu.supports_ray_query(),
                 sample_counts: &self.sample_counts,
                 mcp_status: self.mcp.status(),
                 glass: Vec::new(),
@@ -592,6 +595,13 @@ impl Running {
         self.gpu.set_vsync(settings.vsync);
         let samples = best_sample_count(&self.sample_counts, settings.msaa_samples);
         self.viewport.set_sample_count(&self.gpu, samples);
+        if self
+            .viewport
+            .set_ray_tracing(&self.gpu, ray_tracing(settings.ray_tracing))
+        {
+            // The new tracer holds no Scene yet.
+            self.trace_revision = None;
+        }
         self.camera.field_of_view_degrees = settings.field_of_view_degrees;
         self.editor.history.set_limit(settings.undo_steps as usize);
         self.mcp.apply(&settings.mcp);
@@ -944,6 +954,15 @@ fn frame_interval(settings: &Settings) -> Duration {
         FrameLimit::Fps60 => Duration::from_micros(16_667),
         FrameLimit::Fps144 => Duration::from_micros(6_944),
         FrameLimit::MatchDisplay | FrameLimit::Unlimited => Duration::ZERO,
+    }
+}
+
+/// The renderer's name for the Settings choice.
+fn ray_tracing(mode: RayTracingMode) -> RayTracing {
+    match mode {
+        RayTracingMode::Automatic => RayTracing::Auto,
+        RayTracingMode::Software => RayTracing::Software,
+        RayTracingMode::Hardware => RayTracing::Hardware,
     }
 }
 

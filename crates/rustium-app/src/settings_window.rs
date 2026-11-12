@@ -10,7 +10,7 @@ use crate::hud::widgets::{self, Look};
 use crate::hud::{self, AppCommand, Glass, Hud};
 use crate::icons::Icon;
 use crate::mcp::{McpStatus, McpTransport, permission_key};
-use crate::settings::{Accent, Backend, FrameLimit, Language, Motion, OrbitStyle, Settings};
+use crate::settings::{Accent, Backend, FrameLimit, Language, Motion, OrbitStyle, RayTracingMode, Settings};
 use crate::theme;
 
 /// Sections of the Settings window.
@@ -87,6 +87,7 @@ impl Section {
             Self::Performance => &[
                 "setting-device",
                 "setting-backend",
+                "setting-ray-tracing",
                 "setting-vsync",
                 "setting-frame-limit",
             ],
@@ -550,6 +551,23 @@ fn performance(ui: &mut Ui, hud: &mut Hud<'_>) {
             );
         },
     );
+    let ray_hint = i18n.tr(if hud.ray_query_supported {
+        "setting-ray-tracing-hint"
+    } else {
+        "setting-ray-tracing-unsupported"
+    });
+    row(ui, &i18n.tr("setting-ray-tracing"), Some(&ray_hint), |ui| {
+        widgets::segmented(
+            ui,
+            &mut settings.ray_tracing,
+            &[
+                (RayTracingMode::Automatic, i18n.tr("backend-automatic")),
+                (RayTracingMode::Software, i18n.tr("ray-tracing-software")),
+                (RayTracingMode::Hardware, i18n.tr("ray-tracing-hardware")),
+            ],
+            true,
+        );
+    });
     row(ui, &i18n.tr("setting-vsync"), None, |ui| {
         widgets::switch(ui, &mut settings.vsync, true);
     });

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use egui::{Align2, Context, CornerRadius, Id, InnerResponse, Order, Pos2, Rect, Ui, Vec2};
 pub(crate) use prompt::Prompt;
 use rustium_core::{Face, NodeId};
+use rustium_render::TraceEngine;
 pub(crate) use toast::Toast;
 use winit::window::ResizeDirection;
 
@@ -185,6 +186,9 @@ pub(crate) struct Hud<'frame> {
     pub(crate) logo: &'frame egui::TextureHandle,
     pub(crate) maximized: bool,
     pub(crate) adapter_name: &'frame str,
+    /// The traversal the viewport's path tracer runs, and whether the GPU could run the hardware one.
+    pub(crate) trace_engine: TraceEngine,
+    pub(crate) ray_query_supported: bool,
     pub(crate) sample_counts: &'frame [u32],
     pub(crate) mcp_status: &'frame McpStatus,
     pub(crate) glass: Vec<Glass>,

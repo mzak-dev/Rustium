@@ -25,6 +25,7 @@ pub struct Tools {
 
 /// Arguments of `get_voxels`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GetVoxelsParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
@@ -34,6 +35,7 @@ pub(crate) struct GetVoxelsParams {
 
 /// Arguments of `get_region`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GetRegionParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
@@ -47,6 +49,7 @@ pub(crate) struct GetRegionParams {
 
 /// One voxel for `set_voxels`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct VoxelParam {
     /// X position.
     x: i32,
@@ -60,6 +63,7 @@ pub(crate) struct VoxelParam {
 
 /// Arguments of `set_voxels`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetVoxelsParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
@@ -69,6 +73,7 @@ pub(crate) struct SetVoxelsParams {
 
 /// Arguments of `erase_voxels`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EraseVoxelsParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
@@ -78,6 +83,7 @@ pub(crate) struct EraseVoxelsParams {
 
 /// Arguments of `apply_brush`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ApplyBrushParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,
@@ -101,6 +107,7 @@ pub(crate) struct ApplyBrushParams {
 
 /// Arguments of `set_palette_color`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetPaletteColorParams {
     /// Palette entry 1-255.
     id: u8,
@@ -110,6 +117,7 @@ pub(crate) struct SetPaletteColorParams {
 
 /// Arguments of `run_script`.
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RunScriptParams {
     /// Node id of the Model to read or edit (see `scene_info`); defaults to the Focus Model.
     model: Option<u32>,

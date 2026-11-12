@@ -137,14 +137,15 @@ fn roof_slate(g: &mut MaterialGraph) {
     link(g, mix, "Color", surface, "Base color");
     link(g, remap, "Result", surface, "Roughness");
     link(g, bevel, "Normal", surface, "Normal");
-    g.push_frame("Surface variation", [250.0, 56.0], [484.0, 404.0]);
+    // Tall enough for the Noise node (the tallest) with a margin; the app tests that it holds the nodes.
+    g.push_frame("Surface variation", [250.0, 56.0], [484.0, 430.0]);
 }
 
 fn plaster(g: &mut MaterialGraph) {
     let voxel = g.push_node(GraphNodeKind::VoxelColor, [20.0, 90.0]);
-    let noise = g.push_node(GraphNodeKind::Noise, [20.0, 280.0]);
-    let mix = g.push_node(GraphNodeKind::Mix, [280.0, 90.0]);
-    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [540.0, 120.0]);
+    let noise = g.push_node(GraphNodeKind::Noise, [270.0, 280.0]);
+    let mix = g.push_node(GraphNodeKind::Mix, [530.0, 90.0]);
+    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [800.0, 120.0]);
     set_param(g, noise, "Scale", ParamValue::Float(10.0));
     set_param(g, noise, "Detail", ParamValue::Int(1));
     set_param(g, noise, "Per voxel", ParamValue::Bool(true));
@@ -160,11 +161,11 @@ fn plaster(g: &mut MaterialGraph) {
 fn grass(g: &mut MaterialGraph) {
     let voxel = g.push_node(GraphNodeKind::VoxelColor, [20.0, 130.0]);
     let gradient = g.push_node(GraphNodeKind::Gradient, [20.0, 330.0]);
-    let noise = g.push_node(GraphNodeKind::Noise, [20.0, 520.0]);
-    let remap = g.push_node(GraphNodeKind::Remap, [270.0, 520.0]);
+    let noise = g.push_node(GraphNodeKind::Noise, [270.0, 520.0]);
+    let remap = g.push_node(GraphNodeKind::Remap, [540.0, 520.0]);
     let mix = g.push_node(GraphNodeKind::Mix, [270.0, 130.0]);
-    let hue = g.push_node(GraphNodeKind::HueShift, [540.0, 130.0]);
-    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [800.0, 200.0]);
+    let hue = g.push_node(GraphNodeKind::HueShift, [800.0, 130.0]);
+    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [1060.0, 200.0]);
     set_param(g, gradient, "Range", ParamValue::Range([0.0, 8.0]));
     set_param(g, noise, "Scale", ParamValue::Float(12.0));
     set_param(g, noise, "Detail", ParamValue::Int(1));
@@ -183,10 +184,10 @@ fn grass(g: &mut MaterialGraph) {
 
 fn wood(g: &mut MaterialGraph) {
     let voxel = g.push_node(GraphNodeKind::VoxelColor, [20.0, 90.0]);
-    let noise = g.push_node(GraphNodeKind::Noise, [20.0, 300.0]);
-    let ramp = g.push_node(GraphNodeKind::ColorRamp, [280.0, 300.0]);
-    let mix = g.push_node(GraphNodeKind::Mix, [540.0, 120.0]);
-    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [800.0, 150.0]);
+    let noise = g.push_node(GraphNodeKind::Noise, [270.0, 300.0]);
+    let ramp = g.push_node(GraphNodeKind::ColorRamp, [540.0, 300.0]);
+    let mix = g.push_node(GraphNodeKind::Mix, [800.0, 120.0]);
+    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [1060.0, 150.0]);
     set_param(g, noise, "Scale", ParamValue::Float(1.5));
     set_param(g, noise, "Detail", ParamValue::Int(3));
     set_param(
@@ -232,9 +233,9 @@ fn glass(g: &mut MaterialGraph) {
 
 fn stone(g: &mut MaterialGraph) {
     let voxel = g.push_node(GraphNodeKind::VoxelColor, [20.0, 110.0]);
-    let cells = g.push_node(GraphNodeKind::Cells, [20.0, 300.0]);
-    let mix = g.push_node(GraphNodeKind::Mix, [300.0, 110.0]);
-    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [570.0, 140.0]);
+    let cells = g.push_node(GraphNodeKind::Cells, [270.0, 300.0]);
+    let mix = g.push_node(GraphNodeKind::Mix, [530.0, 110.0]);
+    let surface = g.push_node(GraphNodeKind::SurfaceOutput, [800.0, 140.0]);
     set_param(g, cells, "Scale", ParamValue::Float(3.0));
     set_input(g, mix, "A", InputValue::Color(rgb(0x4a, 0x4a, 0x4a)));
     set_input(g, surface, "Roughness", InputValue::Float(0.9));
@@ -274,6 +275,18 @@ mod tests {
             let graph = sample.build();
             assert_eq!(graph.validate(), Ok(()), "{}", sample.label());
             assert_eq!(graph.name, sample.label());
+        }
+    }
+
+    #[test]
+    fn links_run_from_left_to_right() {
+        for sample in SampleMaterial::ALL {
+            let graph = sample.build();
+            for link in graph.links() {
+                let from = graph.node(link.from.node).unwrap().position[0];
+                let to = graph.node(link.to.node).unwrap().position[0];
+                assert!(from < to, "{}: a link runs backwards", sample.label());
+            }
         }
     }
 

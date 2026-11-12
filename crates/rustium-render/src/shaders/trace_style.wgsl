@@ -63,7 +63,11 @@ fn write_gbuffer(pixel: vec2<u32>, centre: vec2<f32>) {
         if (hit.color_index == GROUND_ID) {
             albedo = params.ground.rgb;
         } else {
-            albedo = evaluate_material(hit.color_index, ray.origin + ray.dir * hit.t, hit.normal).base_color;
+            let surface = evaluate_material(hit.color_index, ray.origin + ray.dir * hit.t, hit.normal);
+            // What shows through glass or haze is not the surface's color: a white albedo keeps the denoiser from
+            // dividing the background by the tint (normal and distance still keep its edges).
+            let clear = surface.transmission > 0.5 || surface.volume_density > 0.0;
+            albedo = select(surface.base_color, vec3<f32>(1.0), clear);
         }
     }
     textureStore(gbuffer_geometry, vec2<i32>(pixel), geometry);

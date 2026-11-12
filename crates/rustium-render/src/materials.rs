@@ -12,8 +12,39 @@ pub(crate) const COLORS: usize = 256;
 pub struct GpuColor {
     /// Linear base color.
     pub albedo: [f32; 3],
-    /// Index of the Color's material graph.
+    /// Bits 0..16: index of the Color's material graph. Bit 16 is set when the Material does not cast shadows, bit 17
+    /// when it has a Volume output (haze dims shadow rays instead of stopping them).
     pub graph: u32,
+}
+
+/// The Material does not cast shadows (`COLOR_NO_SHADOW` in `material.wgsl`).
+const FLAG_NO_SHADOW: u32 = 1 << 16;
+/// The Material has a Volume output (`COLOR_VOLUMETRIC` in `material.wgsl`).
+const FLAG_VOLUMETRIC: u32 = 1 << 17;
+
+/// Surface output socket that holds the transmission.
+const TRANSMISSION_SOCKET: u8 = 6;
+
+/// Whether the Material may let light through (a transmission above zero, or linked, or a Volume output). The raster
+/// pass turns on its dithered transparency and temporal anti-aliasing only when a used Material is transparent.
+pub(crate) fn is_transparent(graph: &MaterialGraph) -> bool {
+    if graph.volume_output().is_some() {
+        return true;
+    }
+    let Some(surface) = graph.surface_output() else {
+        return false;
+    };
+    let linked = graph
+        .link_to(rustium_core::InputRef {
+            node: surface.id,
+            socket: TRANSMISSION_SOCKET,
+        })
+        .is_some();
+    let constant = matches!(
+        surface.inputs.get(usize::from(TRANSMISSION_SOCKET)),
+        Some(&rustium_core::InputValue::Float(value)) if value > 0.0
+    );
+    linked || constant
 }
 
 const _: () = assert!(size_of::<GpuColor>() == 16);
@@ -40,10 +71,19 @@ impl GpuMaterialTable {
             } else {
                 0
             };
+            let mut packed = graph;
+            if let Some(found) = graphs.get(graph as usize) {
+                if !found.casts_shadow {
+                    packed |= FLAG_NO_SHADOW;
+                }
+                if found.volume_output().is_some() {
+                    packed |= FLAG_VOLUMETRIC;
+                }
+            }
             if let Some(slot) = table.colors.get_mut(usize::from(id.get())) {
                 *slot = GpuColor {
                     albedo: color.color.map(srgb_to_linear),
-                    graph,
+                    graph: packed,
                 };
             }
         }

@@ -22,15 +22,15 @@ fn chunk_record(model: ModelRecord, chunk: vec3<i32>) -> ModelRecord {
 
 // HOT PATH: the voxel hit inside chunk box `box_index` of Model `index`. (Ray queries cannot be passed to functions,
 // so the callers read the candidate themselves.)
-fn trace_chunk(index: u32, box_index: u32, origin: vec3<f32>, dir: vec3<f32>) -> Hit {
+fn trace_chunk(index: u32, box_index: u32, origin: vec3<f32>, dir: vec3<f32>, mode: u32) -> Hit {
     let chunk = chunk_boxes[box_index].xyz;
-    return trace_record(chunk_record(models[index], chunk), index, origin, dir, 0u);
+    return trace_record(chunk_record(models[index], chunk), index, origin, dir, mode, 0u);
 }
 
 // The nearest voxel hit over the visible Models. A ray inside glass stays with the Model it is in and uses the DDA.
 fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> Hit {
     if (inside != 0u) {
-        return trace_model(inside_model, origin, dir, inside);
+        return trace_model(inside_model, origin, dir, MODE_INSIDE, inside);
     }
     var result = miss();
     var rq: ray_query;
@@ -43,7 +43,7 @@ fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model:
         if (box.kind != RAY_QUERY_INTERSECTION_AABB) {
             continue;
         }
-        let candidate = trace_chunk(box.instance_index, box.instance_custom_data + box.primitive_index, origin, dir);
+        let candidate = trace_chunk(box.instance_index, box.instance_custom_data + box.primitive_index, origin, dir, MODE_NEAREST);
         // A hit past the nearest one found so far is skipped; where Models overlap exactly, the earlier one wins.
         if (candidate.hit && candidate.t < result.t) {
             result = candidate;
@@ -54,10 +54,12 @@ fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model:
     return result;
 }
 
-// Whether anything blocks the ray (shadow rays): stops at the first voxel found.
-fn occluded(origin: vec3<f32>, dir: vec3<f32>) -> bool {
+// The fraction of sunlight that gets along the ray (see the DDA variant). Every chunk box on the ray is walked in
+// MODE_SHADOW: a blocking voxel ends the query, haze adds its optical depth chunk by chunk.
+fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    var optical = 0.0;
     var rq: ray_query;
-    rayQueryInitialize(&rq, scene_tlas, RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0xFFu, 0.0, FAR, origin, dir));
+    rayQueryInitialize(&rq, scene_tlas, RayDesc(0u, 0xFFu, 0.0, FAR, origin, dir));
     loop {
         if (!rayQueryProceed(&rq)) {
             break;
@@ -66,9 +68,11 @@ fn occluded(origin: vec3<f32>, dir: vec3<f32>) -> bool {
         if (box.kind != RAY_QUERY_INTERSECTION_AABB) {
             continue;
         }
-        if (trace_chunk(box.instance_index, box.instance_custom_data + box.primitive_index, origin, dir).hit) {
-            return true;
+        let found = trace_chunk(box.instance_index, box.instance_custom_data + box.primitive_index, origin, dir, MODE_SHADOW);
+        if (found.hit) {
+            return 0.0;
         }
+        optical += found.optical;
     }
-    return false;
+    return exp(-optical);
 }

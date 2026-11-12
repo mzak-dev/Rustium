@@ -6,11 +6,11 @@
 // ponytail: loops over all Models per ray; add a BVH over Model bounds when scenes hold hundreds of Models.
 fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model: u32) -> Hit {
     if (inside != 0u) {
-        return trace_model(inside_model, origin, dir, inside);
+        return trace_model(inside_model, origin, dir, MODE_INSIDE, inside);
     }
     var result = miss();
     for (var index = 0u; index < params.options.w; index += 1u) {
-        let candidate = trace_model(index, origin, dir, 0u);
+        let candidate = trace_model(index, origin, dir, MODE_NEAREST, 0u);
         if (candidate.hit && candidate.t < result.t) {
             result = candidate;
         }
@@ -18,12 +18,16 @@ fn trace_scene_hit(origin: vec3<f32>, dir: vec3<f32>, inside: u32, inside_model:
     return result;
 }
 
-// Whether anything blocks the ray (shadow rays).
-fn occluded(origin: vec3<f32>, dir: vec3<f32>) -> bool {
+// The fraction of sunlight that gets along the ray: 1.0 in the open, 0.0 when a voxel that casts shadows is in the
+// way, in between when it crosses haze (see MODE_SHADOW).
+fn shadow_transmittance(origin: vec3<f32>, dir: vec3<f32>) -> f32 {
+    var optical = 0.0;
     for (var index = 0u; index < params.options.w; index += 1u) {
-        if (trace_model(index, origin, dir, 0u).hit) {
-            return true;
+        let hit = trace_model(index, origin, dir, MODE_SHADOW, 0u);
+        if (hit.hit) {
+            return 0.0;
         }
+        optical += hit.optical;
     }
-    return false;
+    return exp(-optical);
 }

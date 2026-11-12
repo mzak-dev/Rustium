@@ -46,6 +46,28 @@ pub struct LineVertex {
 
 const _: () = assert!(size_of::<LineVertex>() == 28);
 
+/// One overlay box (`shaders/cubes.wgsl`): a voxel in the middle of an edit animation, a cell a Tool will change, or
+/// the face under the pointer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct CubeInstance {
+    /// xyz: centre in voxel space; w: strength of the white outline along the edges of each face.
+    pub centre: [f32; 4],
+    /// xyz: half the size on each axis; w: how far the color is pushed towards white.
+    pub half_size: [f32; 4],
+    /// Linear RGBA; alpha below 1 makes the box see-through.
+    pub color: [f32; 4],
+}
+
+const _: () = assert!(size_of::<CubeInstance>() == 48);
+
+impl CubeInstance {
+    /// Whether the box hides what is behind it completely, so it can be drawn with the depth buffer.
+    fn is_opaque(&self) -> bool {
+        self.color[3] >= 1.0
+    }
+}
+
 /// One Model to draw this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelDraw {
@@ -103,6 +125,8 @@ pub struct ViewportFrame<'frame> {
     pub show_grid: bool,
     /// Overlay line list, two vertices per line.
     pub lines: &'frame [LineVertex],
+    /// Overlay boxes, drawn with the Models.
+    pub cubes: &'frame [CubeInstance],
     /// Panels that show the viewport blurred behind them.
     pub glass: &'frame [GlassRect],
     /// Whether glass panels blur (Settings → Interface → Translucent panels).
@@ -165,6 +189,8 @@ struct Pipelines {
     raster_mirrored: wgpu::RenderPipeline,
     grid: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
+    cubes_opaque: wgpu::RenderPipeline,
+    cubes_translucent: wgpu::RenderPipeline,
 }
 
 const SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -181,6 +207,7 @@ pub struct ViewportRenderer {
     pipeline_layout: wgpu::PipelineLayout,
     pipelines: Pipelines,
     line_buffer: wgpu::Buffer,
+    cube_buffer: wgpu::Buffer,
     instance_buffer: wgpu::Buffer,
     chunks: HashMap<ShapeId, HashMap<ChunkCoord, GpuChunk>>,
     targets: Option<SceneTargets>,
@@ -244,6 +271,7 @@ impl ViewportRenderer {
         let pipelines = create_pipelines(device, &pipeline_layout, sample_count, &initial.shader_source());
         let line_buffer = create_line_buffer(device, 256);
         let instance_buffer = create_instance_buffer(device, 64);
+        let cube_buffer = create_cube_buffer(device, 64);
         let glass = GlassPass::new(device, gpu.surface_srgb_format());
         let tracer = PathTracer::new(device, &materials, SCENE_FORMAT, RayTracing::Auto);
         let compiler = MaterialCompiler::new(materials.clone(), initial.generated);
@@ -257,6 +285,7 @@ impl ViewportRenderer {
             pipelines,
             line_buffer,
             instance_buffer,
+            cube_buffer,
             chunks: HashMap::new(),
             targets: None,
             glass,
@@ -485,6 +514,8 @@ impl ViewportRenderer {
         let temporal = self.has_transparency && frame.trace.is_none();
         let mut camera = frame.camera;
         let mut taa_uniform = None;
+        // Moving boxes would leave trails in the temporal history; let it follow them closely instead.
+        self.taa.edited |= !frame.cubes.is_empty();
         if temporal {
             let state = &mut self.taa;
             let models_changed = state.models != frame.models;
@@ -543,6 +574,16 @@ impl ViewportRenderer {
             self.line_buffer = create_line_buffer(gpu.device(), frame.lines.len().next_power_of_two());
         }
         queue.write_buffer(&self.line_buffer, 0, line_bytes);
+        // Opaque boxes first, drawn with depth; see-through ones after, blended over everything.
+        let (mut cubes, translucent): (Vec<CubeInstance>, Vec<CubeInstance>) =
+            frame.cubes.iter().partition(|cube| cube.is_opaque());
+        let opaque_cubes = u32::try_from(cubes.len()).unwrap_or(0);
+        cubes.extend(translucent);
+        let cube_count = u32::try_from(cubes.len()).unwrap_or(0);
+        if cubes.len() * size_of::<CubeInstance>() > usize::try_from(self.cube_buffer.size()).unwrap_or(0) {
+            self.cube_buffer = create_cube_buffer(gpu.device(), cubes.len().next_power_of_two());
+        }
+        queue.write_buffer(&self.cube_buffer, 0, bytemuck::cast_slice(&cubes));
         let instances: Vec<InstanceData> = frame.models.iter().map(InstanceData::new).collect();
         if instances.len() * size_of::<InstanceData>() > usize::try_from(self.instance_buffer.size()).unwrap_or(0) {
             self.instance_buffer = create_instance_buffer(gpu.device(), instances.len().next_power_of_two());
@@ -608,6 +649,13 @@ impl ViewportRenderer {
                     pass.draw_indexed(0..chunk.index_count, 0, index..index + 1);
                 }
             }
+            if cube_count > 0 {
+                pass.set_vertex_buffer(0, self.cube_buffer.slice(..));
+                pass.set_pipeline(&self.pipelines.cubes_opaque);
+                pass.draw(0..36, 0..opaque_cubes);
+                pass.set_pipeline(&self.pipelines.cubes_translucent);
+                pass.draw(0..36, opaque_cubes..cube_count);
+            }
             if frame.show_grid {
                 pass.set_pipeline(&self.pipelines.grid);
                 pass.draw(0..6, 0..1);
@@ -643,6 +691,15 @@ fn create_line_buffer(device: &wgpu::Device, vertices: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("overlay lines"),
         size: (vertices.max(2) * size_of::<LineVertex>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_cube_buffer(device: &wgpu::Device, cubes: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("overlay cubes"),
+        size: (cubes.max(1) * size_of::<CubeInstance>()) as u64,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
@@ -881,6 +938,29 @@ fn create_pipelines(
     };
     let grid_module = module("grid shader", include_str!("shaders/grid.wgsl"));
     let lines_module = module("lines shader", include_str!("shaders/lines.wgsl"));
+    let cubes_module = module("cubes shader", include_str!("shaders/cubes.wgsl"));
+    let cube_layout = wgpu::VertexBufferLayout {
+        array_stride: size_of::<CubeInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
+    };
+    let cubes = |label, depth_write, blend| {
+        build_pipeline(
+            device,
+            layout,
+            sample_count,
+            &PipelineSpec {
+                label,
+                module: &cubes_module,
+                buffers: &[Some(cube_layout.clone())],
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Ccw,
+                depth_write,
+                blend,
+            },
+        )
+    };
     let line_layout = wgpu::VertexBufferLayout {
         array_stride: size_of::<LineVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
@@ -890,6 +970,12 @@ fn create_pipelines(
     Pipelines {
         raster,
         raster_mirrored,
+        cubes_opaque: cubes("opaque cubes pipeline", true, None),
+        cubes_translucent: cubes(
+            "translucent cubes pipeline",
+            false,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        ),
         grid: build_pipeline(
             device,
             layout,

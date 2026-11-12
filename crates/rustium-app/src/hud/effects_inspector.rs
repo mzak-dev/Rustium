@@ -35,6 +35,10 @@ pub(crate) fn tabs(ui: &mut Ui, hud: &mut Hud<'_>) {
                     Look::Plain
                 };
                 if widgets::text_button(ui, &hud.tr(key), 32.0, look, true).clicked() {
+                    if hud.ui.effects.tab != tab {
+                        // The assign grid belongs to the Material tab and must not stay open behind another one.
+                        hud.ui.effects.assign_open = false;
+                    }
                     hud.ui.effects.tab = tab;
                 }
             }

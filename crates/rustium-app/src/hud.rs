@@ -320,6 +320,32 @@ pub(crate) struct Fit {
     level: u8,
     widths: [f32; FIT_LEVELS],
     key: u64,
+    /// Widths measured under other keys, so going back to a layout (a Render status that comes and goes) does not
+    /// measure every level again.
+    remembered: Vec<(u64, [f32; FIT_LEVELS])>,
+}
+
+impl Fit {
+    /// Moves to the widths measured under `key`: the ones remembered from an earlier visit, else none.
+    fn switch_key(&mut self, key: u64) {
+        if self.key == key {
+            return;
+        }
+        if self.widths.iter().any(|width| *width != 0.0) {
+            self.remembered.retain(|(known, _)| *known != self.key);
+            self.remembered.push((self.key, self.widths));
+        }
+        // Few distinct keys occur in practice; the oldest memories go first.
+        if self.remembered.len() > 8 {
+            self.remembered.remove(0);
+        }
+        self.key = key;
+        self.widths = self
+            .remembered
+            .iter()
+            .find(|(known, _)| *known == key)
+            .map_or([0.0; FIT_LEVELS], |(_, widths)| *widths);
+    }
 }
 
 /// A hash of what decides the width of an island (the Tool, the language), to forget stale measurements.
@@ -337,9 +363,7 @@ pub(crate) fn fit_key(parts: &[&dyn std::fmt::Debug]) -> u64 {
 /// next frame. Call it before drawing the island with the same `id`.
 pub(crate) fn fit_level(ctx: &Context, hud: &mut Hud<'_>, id: &str, budget: f32, key: u64, max: u8) -> u8 {
     let fit = hud.ui.fit.entry(id.to_owned()).or_default();
-    if fit.key != key {
-        *fit = Fit { key, ..Fit::default() };
-    }
+    fit.switch_key(key);
     let mut chosen = max;
     for level in 0..=max {
         let width = fit.widths[usize::from(level)];
@@ -452,7 +476,9 @@ pub(crate) fn draw(ctx: &Context, hud: &mut Hud<'_>) {
 fn escape_owner_open(ctx: &Context, hud: &Hud<'_>) -> bool {
     egui::Popup::is_any_open(ctx)
         || (hud.ui.mode == Mode::Model && hud.ui.palette_open)
-        || (hud.ui.mode == Mode::Effects && hud.ui.effects.assign_open)
+        || (hud.ui.mode == Mode::Effects
+            && hud.ui.effects.assign_open
+            && hud.ui.effects.tab == effects::EffectsTab::Material)
         || hud.ui.tool_wheel.is_some()
         || hud.ui.renaming.is_some()
         || hud.ui.effects.add_popup.is_some()
@@ -648,3 +674,22 @@ pub(crate) fn corner(top_left: u8, top_right: u8, bottom_right: u8, bottom_left:
 pub(crate) const MARGIN: f32 = 12.0;
 pub(crate) const INSPECTOR_WIDTH: f32 = 296.0;
 pub(crate) const TOP_BAR_HEIGHT: f32 = 44.0;
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    #[test]
+    fn widths_come_back_when_an_earlier_key_returns() {
+        let mut fit = Fit::default();
+        fit.switch_key(1);
+        fit.widths = [300.0, 200.0, 0.0, 0.0];
+        fit.switch_key(2);
+        assert_eq!(fit.widths, [0.0; FIT_LEVELS], "a new key has nothing measured");
+        fit.widths = [320.0, 0.0, 0.0, 0.0];
+        fit.switch_key(1);
+        assert_eq!(fit.widths, [300.0, 200.0, 0.0, 0.0], "no level is measured again");
+        fit.switch_key(2);
+        assert_eq!(fit.widths[0], 320.0);
+    }
+}

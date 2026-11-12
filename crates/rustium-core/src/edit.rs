@@ -409,6 +409,12 @@ impl History {
         self.done.back()
     }
 
+    /// Drops the latest undone Edit, so that redo can no longer apply it. For a gesture that was undone because it
+    /// failed half way.
+    pub fn forget_undone(&mut self) -> Option<Edit> {
+        self.undone.pop()
+    }
+
     /// Applied Edits, oldest first.
     pub fn done(&self) -> impl Iterator<Item = &Edit> {
         self.done.iter()

@@ -54,7 +54,7 @@ impl Tool {
 
     pub(crate) fn icon(self) -> Icon {
         match self {
-            Self::SelectBox => Icon::SelectBox,
+            Self::SelectBox => Icon::Pointer,
             Self::SelectColor => Icon::SelectColor,
             Self::Attach => Icon::Attach,
             Self::Erase => Icon::Erase,
@@ -101,6 +101,17 @@ impl Tool {
             Self::Attach | Self::Erase | Self::Paint | Self::Fill | Self::SelectColor
         )
     }
+}
+
+/// What the Cursor's drag selects in a Model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectMode {
+    /// Every voxel inside the screen rectangle, hidden ones too.
+    Through,
+    /// Only the voxels inside the screen rectangle that the camera sees.
+    Visible,
+    /// The box between the pressed and the current cell, so a drag over a flat surface takes that one layer.
+    Layer,
 }
 
 /// Why the current Tool would do nothing at the pointer; the viewport cursor shows it as not allowed and a hint
@@ -196,12 +207,14 @@ pub(crate) enum EditEvent {
 #[derive(Debug)]
 struct ShapeDrag {
     tool: VoxelTool,
+    /// The Brush of this gesture: a Voxel brush pressed with Shift draws a Line.
+    brush: Brush,
     anchor: RayHit,
     current: RayHit,
     mirror: Mirror,
 }
 
-/// A Select box gesture in a Model.
+/// A Layer select gesture in a Model: the box between the pressed cell and the one under the pointer.
 #[derive(Debug)]
 struct SelectDrag {
     anchor: IVec3,
@@ -213,6 +226,8 @@ struct SelectDrag {
 struct MoveDrag {
     axis: usize,
     coordinate: f32,
+    /// Where the pointer grabbed, on the drag plane.
+    start: IVec3,
     last: IVec3,
     edit: Option<Edit>,
     /// The voxel Selection at the press; undo puts it back.
@@ -265,6 +280,7 @@ pub(crate) struct ScriptRun {
 
 /// The document plus everything about how the user is editing it.
 #[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "independent editor flags")]
 pub(crate) struct Editor {
     pub(crate) scene: Scene,
     pub(crate) history: History,
@@ -272,6 +288,10 @@ pub(crate) struct Editor {
     pub(crate) brush: Brush,
     pub(crate) fill_mode: FillMode,
     pub(crate) mirror: [bool; 3],
+    /// Shift is held: a Voxel brush draws a Line and a Line snaps to 15° steps.
+    pub(crate) shift: bool,
+    /// What the Cursor's drag selects in a Model.
+    pub(crate) select_mode: SelectMode,
     /// Where each Model mirrors, as [`Mirror::pivot`] in its cells; the origin column when not set. It stays put
     /// while the user draws, unlike the centre of the Volume.
     mirror_pivots: HashMap<NodeId, IVec3>,
@@ -342,6 +362,8 @@ impl Editor {
             brush: Brush::default(),
             fill_mode: FillMode::default(),
             mirror: [false; 3],
+            shift: false,
+            select_mode: SelectMode::Through,
             mirror_pivots: HashMap::new(),
             events: Vec::new(),
             slots,
@@ -412,6 +434,78 @@ impl Editor {
             self.history.push(edit);
         }
         applied
+    }
+
+    /// The Color showing `rgb`: the Palette entry with exactly that color, else a new entry while the Palette has
+    /// room (one History step), else the nearest one.
+    pub(crate) fn color_for(&mut self, rgb: [u8; 3]) -> Option<ColorId> {
+        let palette = self.scene.palette();
+        if let Some((id, _)) = palette.iter().find(|(_, color)| color.color == rgb) {
+            return Some(id);
+        }
+        let next = u8::try_from(palette.len() + 1).ok().and_then(ColorId::new);
+        if let Some(edit) = self.apply_command(&Command::AddColor { color: rgb }) {
+            self.history.push(edit);
+            return next;
+        }
+        self.scene.palette().nearest(rgb)
+    }
+
+    /// Removes Color `id` from the Palette (one History step); the hotbar slots follow the renumbering.
+    pub(crate) fn delete_color(&mut self, id: ColorId) {
+        let before: Vec<Option<[u8; 3]>> = self
+            .slots
+            .iter()
+            .map(|slot| self.scene.palette().get(*slot).map(|entry| entry.color))
+            .collect();
+        if self.execute_checked(&Command::DeleteColor { id }).unwrap_or(false) {
+            for (slot, look) in self.slots.iter_mut().zip(before) {
+                if *slot > id {
+                    *slot = ColorId::new(slot.get() - 1).unwrap_or(*slot);
+                } else if *slot == id {
+                    *slot = look
+                        .and_then(|look| self.scene.palette().nearest(look))
+                        .unwrap_or(ColorId::FIRST);
+                }
+            }
+        }
+    }
+
+    /// Swaps two Colors of the Palette (one History step); the hotbar slots keep showing the same colors.
+    pub(crate) fn swap_colors(&mut self, a: ColorId, b: ColorId) {
+        if self.execute_checked(&Command::SwapColors { a, b }).unwrap_or(false) {
+            for slot in &mut self.slots {
+                if *slot == a {
+                    *slot = b;
+                } else if *slot == b {
+                    *slot = a;
+                }
+            }
+        }
+    }
+
+    /// Replaces the Palette with the default one (one History step); voxels and hotbar slots take the nearest new
+    /// Color.
+    pub(crate) fn new_palette(&mut self) {
+        let looks: Vec<Option<[u8; 3]>> = self
+            .slots
+            .iter()
+            .map(|slot| self.scene.palette().get(*slot).map(|entry| entry.color))
+            .collect();
+        let colors = rustium_core::Palette::default()
+            .iter()
+            .map(|(_, entry)| entry.color)
+            .collect();
+        if self
+            .execute_checked(&Command::ReplacePalette { colors })
+            .unwrap_or(false)
+        {
+            for (slot, look) in self.slots.iter_mut().zip(looks) {
+                *slot = look
+                    .and_then(|look| self.scene.palette().nearest(look))
+                    .unwrap_or(ColorId::FIRST);
+            }
+        }
     }
 
     pub(crate) fn color(&self) -> ColorId {
@@ -565,7 +659,7 @@ impl Editor {
             return None;
         }
         if let Some(Gesture::Select(drag)) = &self.gesture {
-            let current = self.hover.as_ref().map(|hit| select_cell(self.local_hit(hit)))?;
+            let current = self.hover.as_ref().map(|hit| world_cell(self.local_hit(hit)))?;
             let volume = Volume::point(drag.anchor).including(current);
             return Some(self.focus_transform().volume(volume));
         }
@@ -590,7 +684,7 @@ impl Editor {
     /// The press and current hit, Tool and Brush of the voxel gesture the pointer would make or is making.
     fn voxel_gesture(&self) -> Option<(RayHit, RayHit, VoxelTool, Brush)> {
         match &self.gesture {
-            Some(Gesture::Shape(drag)) => Some((drag.anchor, drag.current, drag.tool, self.brush)),
+            Some(Gesture::Shape(drag)) => Some((drag.anchor, drag.current, drag.tool, drag.brush)),
             Some(Gesture::Face(drag)) => Some((
                 drag.anchor,
                 drag.anchor,
@@ -602,7 +696,7 @@ impl Editor {
             )),
             _ => {
                 let local = self.local_hit(self.hover.as_ref()?);
-                Some((local, local, self.tool.voxel_tool()?, self.brush))
+                Some((local, local, self.tool.voxel_tool()?, self.gesture_brush()))
             }
         }
     }
@@ -811,8 +905,9 @@ impl Editor {
             Tool::Attach | Tool::Erase | Tool::Paint if self.focus_is_model() => self.begin_brush(&hit, ray),
             Tool::Fill if self.focus_is_model() => self.fill(&hit),
             Tool::SelectColor if self.focus_is_model() => self.select_color(&hit, extend),
-            Tool::SelectBox if self.focus_is_model() => {
-                let anchor = select_cell(self.local_hit(&hit));
+            Tool::SelectBox if self.over_selection() => self.begin_move(&hit),
+            Tool::SelectBox if self.focus_is_model() && self.select_mode == SelectMode::Layer => {
+                let anchor = world_cell(self.local_hit(&hit));
                 let base = if extend {
                     self.selection.clone()
                 } else {
@@ -821,7 +916,8 @@ impl Editor {
                 self.gesture = Some(Gesture::Select(SelectDrag { anchor, base }));
                 self.drag(ray);
             }
-            Tool::SelectBox if !self.focus_is_model() => self.click_node(&hit, extend),
+            Tool::SelectBox if self.focus_is_model() => self.click_voxel(&hit, extend),
+            Tool::SelectBox => self.click_node(&hit, extend),
             Tool::Move => self.begin_move(&hit),
             _ => {}
         }
@@ -839,12 +935,8 @@ impl Editor {
             Gesture::Face(drag) => Gesture::Face(self.drag_face(drag, ray)),
             Gesture::Select(drag) => {
                 if let (Some(hit), Some((_, shape))) = (hit, self.scene.model_shape(self.focus)) {
-                    let boxed = select_box(shape, drag.anchor, select_cell(hit));
-                    self.selection = if drag.base.is_empty() {
-                        boxed
-                    } else {
-                        drag.base.union(&boxed)
-                    };
+                    let boxed = select_box(shape, drag.anchor, world_cell(hit));
+                    self.selection = drag.base.union(&boxed);
                 }
                 Gesture::Select(drag)
             }
@@ -867,11 +959,11 @@ impl Editor {
             }
             Gesture::Shape(drag) => self.finish_shape(&drag),
             Gesture::Face(drag) => self.finish_face(&drag),
+            Gesture::Select(_) => None,
             Gesture::MoveVoxels(drag) | Gesture::MoveNodes(drag) => {
                 selection_before = drag.selection;
                 drag.edit
             }
-            Gesture::Select(_) => None,
         };
         if let Some(edit) = edit {
             self.push_history(edit, selection_before);
@@ -970,10 +1062,12 @@ impl Editor {
         };
         let local = self.local_hit(hit);
         let mirror = self.mirror_now();
-        match self.brush.kind {
+        let brush = self.gesture_brush();
+        match brush.kind {
             BrushKind::Line | BrushKind::Box => {
                 self.gesture = Some(Gesture::Shape(ShapeDrag {
                     tool,
+                    brush,
                     anchor: local,
                     current: local,
                     mirror,
@@ -1081,8 +1175,24 @@ impl Editor {
         Some(edit)
     }
 
+    /// The Brush a gesture pressed now would use: Shift turns the Voxel brush into a Line.
+    fn gesture_brush(&self) -> Brush {
+        let mut brush = self.brush;
+        if self.shift && brush.kind == BrushKind::Voxel {
+            brush.kind = BrushKind::Line;
+        }
+        brush
+    }
+
     fn drag_shape(&mut self, mut drag: ShapeDrag, hit: Option<RayHit>, ray: Ray) -> ShapeDrag {
-        match self.brush.kind {
+        match drag.brush.kind {
+            BrushKind::Line if self.shift => {
+                // Shift keeps the line on the pressed face's plane, at a multiple of 15°.
+                let (axis, coordinate) = plane_of(drag.anchor);
+                if let Some(cell) = plane_cell(self.local_ray(ray), axis, coordinate) {
+                    drag.current = snap_line(drag.anchor, cell);
+                }
+            }
             BrushKind::Box => {
                 // The rectangle lives on the plane of the pressed face, so follow the pointer over that plane.
                 let (axis, coordinate) = plane_of(drag.anchor);
@@ -1106,7 +1216,7 @@ impl Editor {
     }
 
     fn finish_shape(&mut self, drag: &ShapeDrag) -> Option<Edit> {
-        let edit = self.run_brush(drag.tool, self.brush, drag.anchor, Some(drag.current), drag.mirror)?;
+        let edit = self.run_brush(drag.tool, drag.brush, drag.anchor, Some(drag.current), drag.mirror)?;
         self.note_voxels(EditPhase::Commit, &edit, drag.anchor, drag.mirror);
         Some(edit)
     }
@@ -1125,6 +1235,54 @@ impl Editor {
             self.note_voxels(EditPhase::Commit, &edit, local, mirror);
             self.push_history(edit, self.selection.clone());
         }
+    }
+
+    /// Whether the pointer is over something selected that the Cursor would drag: a selected voxel of the Focus
+    /// Model, or a selected child of the Focus Group.
+    pub(crate) fn over_selection(&self) -> bool {
+        let Some(hit) = self.hover.as_ref() else {
+            return false;
+        };
+        if self.focus_is_model() {
+            let local = self.local_hit(hit);
+            return local.target == HitTarget::Voxel && self.selection.contains(local.voxel);
+        }
+        hit.node
+            .and_then(|node| self.scene.child_toward(self.focus, node))
+            .is_some_and(|child| self.node_selection.contains(&child))
+    }
+
+    /// Cursor click in a Model: selects the voxel under the pointer (Shift adds it), or clears on the ground.
+    fn click_voxel(&mut self, hit: &SceneHit, extend: bool) {
+        let local = self.local_hit(hit);
+        let picked: Selection = (local.target == HitTarget::Voxel)
+            .then_some(local.voxel)
+            .into_iter()
+            .collect();
+        self.selection = if extend { self.selection.union(&picked) } else { picked };
+    }
+
+    /// Cursor marquee in a Model: selects the voxels whose centre `inside` accepts (a point in the Scene), and with
+    /// `visible` only those the pointer ray through that point reaches first.
+    pub(crate) fn marquee_voxels(&mut self, inside: impl Fn(Vec3) -> bool, ray_to: impl Fn(Vec3) -> Ray, extend: bool) {
+        let Some((_, shape)) = self.scene.model_shape(self.focus) else {
+            return;
+        };
+        let transform = self.focus_transform();
+        let through = self.select_mode == SelectMode::Through;
+        // ponytail: one pick per candidate when only visible ones count; fine for marquees of up to ~100k voxels.
+        let picked: Selection = shape
+            .voxels()
+            .map(|(cell, _)| cell)
+            .filter(|cell| {
+                let centre = transform.point(cell.as_vec3() + Vec3::splat(0.5));
+                inside(centre)
+                    && (through
+                        || pick(shape, self.local_ray(ray_to(centre)), PICK_DISTANCE)
+                            .is_some_and(|hit| hit.target == HitTarget::Voxel && hit.voxel == *cell))
+            })
+            .collect();
+        self.selection = if extend { self.selection.union(&picked) } else { picked };
     }
 
     fn select_color(&mut self, hit: &SceneHit, extend: bool) {
@@ -1162,6 +1320,84 @@ impl Editor {
         }
     }
 
+    /// Where the move gizmo sits and its three arrows, in the Scene: the centre of the voxel Selection (in a Model)
+    /// or of the selected Nodes (in a Group), and the Focus's X, Y and Z.
+    pub(crate) fn gizmo(&self) -> Option<(Vec3, [Vec3; 3])> {
+        let transform = self.focus_transform();
+        let volume = if self.focus_is_model() {
+            transform.volume(self.selection.bounds()?)
+        } else {
+            self.node_selection
+                .iter()
+                .filter_map(|node| self.scene.world_volume(*node))
+                .reduce(|a, b| a.including(b.min).including(b.max))?
+        };
+        let centre = (volume.min.as_vec3() + (volume.max + IVec3::ONE).as_vec3()) / 2.0;
+        let axes = [Vec3::X, Vec3::Y, Vec3::Z].map(|axis| transform.orientation.apply_float(axis));
+        Some((centre, axes))
+    }
+
+    /// Starts a gizmo drag of the selected voxels or Nodes; [`Editor::gizmo_to`] moves them, release ends it.
+    pub(crate) fn begin_gizmo(&mut self) {
+        let drag = MoveDrag {
+            axis: 0,
+            coordinate: 0.0,
+            start: IVec3::ZERO,
+            last: IVec3::ZERO,
+            edit: None,
+            selection: self.selection.clone(),
+        };
+        self.gesture = Some(if self.focus_is_model() {
+            Gesture::MoveVoxels(drag)
+        } else {
+            Gesture::MoveNodes(drag)
+        });
+    }
+
+    /// Puts the gizmo drag at `offset` from where it started, in the Focus's cells.
+    pub(crate) fn gizmo_to(&mut self, offset: IVec3) {
+        self.gesture = match self.gesture.take() {
+            Some(Gesture::MoveVoxels(drag)) => Some(Gesture::MoveVoxels(self.step_move(drag, offset, true))),
+            Some(Gesture::MoveNodes(drag)) => Some(Gesture::MoveNodes(self.step_move(drag, offset, false))),
+            other => other,
+        };
+    }
+
+    /// Selects everything in the Focus: every voxel of a Model, or every visible, unlocked child of a Group.
+    pub(crate) fn select_all(&mut self) {
+        if let Some((_, shape)) = self.scene.model_shape(self.focus) {
+            self.selection = shape.voxels().map(|(cell, _)| cell).collect();
+            return;
+        }
+        let scene = &self.scene;
+        self.node_selection = scene
+            .node(self.focus)
+            .map(|node| node.children().to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| !scene.is_hidden(*child) && !scene.is_locked(*child))
+            .collect();
+    }
+
+    /// Merges the selected Nodes into one Model (a single selected Group merges what is inside it) and selects it.
+    pub(crate) fn merge_selected(&mut self) {
+        let nodes = self.node_selection.clone();
+        let Some(first) = nodes.first().copied() else {
+            return;
+        };
+        let target = self
+            .scene
+            .descendants(first)
+            .into_iter()
+            .find(|id| self.scene.node(*id).is_some_and(|node| !node.is_group()));
+        self.execute(&Command::Merge { nodes });
+        // The merged Model is the first Model in tree order; the others are gone.
+        self.node_selection.retain(|node| self.scene.is_attached(*node));
+        if let Some(target) = target.filter(|node| self.scene.is_attached(*node)) {
+            self.node_selection = vec![target];
+        }
+    }
+
     /// Select box in a Group: a click selects the child Node under the pointer.
     pub(crate) fn click_node(&mut self, hit: &SceneHit, extend: bool) {
         let child = hit.node.and_then(|node| self.scene.child_toward(self.focus, node));
@@ -1183,6 +1419,7 @@ impl Editor {
             self.gesture = Some(Gesture::MoveVoxels(MoveDrag {
                 axis,
                 coordinate,
+                start: plane_flat(local.voxel, axis),
                 last: plane_flat(local.voxel, axis),
                 edit: None,
                 selection: self.selection.clone(),
@@ -1199,35 +1436,49 @@ impl Editor {
             axis,
             coordinate,
             selection: self.selection.clone(),
+            start: plane_flat(local.voxel, axis),
             last: plane_flat(local.voxel, axis),
             edit: None,
         }));
     }
 
-    fn drag_move(&mut self, mut drag: MoveDrag, ray: Ray, voxels: bool) -> MoveDrag {
+    fn drag_move(&mut self, drag: MoveDrag, ray: Ray, voxels: bool) -> MoveDrag {
         let Some(cell) = plane_cell(self.local_ray(ray), drag.axis, drag.coordinate) else {
             return drag;
         };
+        self.step_move(drag, cell, voxels)
+    }
+
+    /// Moves what the Move gesture holds to `cell - drag.start` from where it was at the press.
+    fn step_move(&mut self, mut drag: MoveDrag, cell: IVec3, voxels: bool) -> MoveDrag {
         let delta = cell - drag.last;
         if delta == IVec3::ZERO {
             return drag;
         }
         drag.last = cell;
-        let edit = if voxels {
-            let command = Command::MoveVoxels {
-                model: self.focus,
-                selection: self.selection.clone(),
-                offset: delta,
-            };
-            let edit = self.apply_command(&command);
-            if edit.is_some() {
-                self.selection = self.selection.translated(delta);
-            }
-            edit
-        } else {
-            self.move_nodes(delta)
+        if !voxels {
+            let edit = self.move_nodes(delta);
+            drag.edit = merge(drag.edit.take(), edit);
+            return drag;
+        }
+        // Voxels move from the Model as it was at the press, so the ones they pass over come back undamaged.
+        if let Some(edit) = drag.edit.take() {
+            edit.revert(&mut self.scene);
+            self.mark_dirty(edit.changed_chunks().collect());
+            self.revision += 1;
+        }
+        let offset = cell - drag.start;
+        let command = Command::MoveVoxels {
+            model: self.focus,
+            selection: drag.selection.clone(),
+            offset,
         };
-        drag.edit = merge(drag.edit.take(), edit);
+        drag.edit = self.apply_command(&command);
+        self.selection = if drag.edit.is_some() {
+            drag.selection.translated(offset)
+        } else {
+            drag.selection.clone()
+        };
         drag
     }
 
@@ -1415,6 +1666,17 @@ impl Editor {
         self.revision = revision;
     }
 
+    /// Changes the base color of `id` while a picker is dragged; the changes until
+    /// [`Editor::finish_material_edit`] become one History step.
+    pub(crate) fn set_color_live(&mut self, id: ColorId, color: [u8; 3]) {
+        if let Some(applied) = self.apply_command(&Command::SetColor { id, color }) {
+            self.material_edit = Some(match self.material_edit.take() {
+                Some(pending) => pending.merge(applied),
+                None => applied,
+            });
+        }
+    }
+
     /// Ends a Material slider drag: its Edits become one History step.
     pub(crate) fn finish_material_edit(&mut self) {
         if let Some(edit) = self.material_edit.take() {
@@ -1541,9 +1803,28 @@ fn aim(shape: &Shape, ray: Ray) -> Option<RayHit> {
     pick(shape, ray, PICK_DISTANCE)
 }
 
-/// The cell a Select box corner snaps to.
-fn select_cell(hit: RayHit) -> IVec3 {
-    world_cell(hit)
+/// Angle step of a Line drawn with Shift.
+const LINE_SNAP: f32 = std::f32::consts::PI / 12.0;
+
+/// The end of a Line from `anchor` towards `cell` (on the anchor face's plane, axis cleared), turned to the nearest
+/// 15° on that plane and kept as long.
+fn snap_line(anchor: RayHit, cell: IVec3) -> RayHit {
+    let axis = anchor.face.axis();
+    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+    let delta = cell - plane_flat(anchor.voxel, axis);
+    let (du, dv) = (delta[u] as f32, delta[v] as f32);
+    let length = du.hypot(dv);
+    let angle = (dv.atan2(du) / LINE_SNAP).round() * LINE_SNAP;
+    let mut voxel = anchor.voxel;
+    #[expect(clippy::cast_possible_truncation, reason = "a line end within the pointer's reach")]
+    let step = |part: f32| (part * length).round() as i32;
+    voxel[u] += step(angle.cos());
+    voxel[v] += step(angle.sin());
+    RayHit {
+        voxel,
+        face: anchor.face,
+        target: HitTarget::Voxel,
+    }
 }
 
 /// Axis and coordinate of the plane of the hit face, in cell space.
@@ -1809,6 +2090,122 @@ mod tests {
         editor.release();
         assert_eq!(used(&editor), 7);
         assert_eq!(editor.history.done().count(), 1);
+    }
+
+    #[test]
+    fn a_shift_line_snaps_to_15_degree_steps_on_the_face_plane() {
+        let anchor = RayHit {
+            voxel: IVec3::new(0, 0, 0),
+            face: Face::PosY,
+            target: HitTarget::Voxel,
+        };
+        // Almost along +X: snaps flat onto it.
+        assert_eq!(snap_line(anchor, IVec3::new(10, 0, 1)).voxel, IVec3::new(10, 0, 0));
+        // Near the diagonal: 45°, same length.
+        let end = snap_line(anchor, IVec3::new(7, 0, 8)).voxel;
+        assert_eq!(end.y, 0);
+        assert_eq!(end.x, end.z);
+    }
+
+    #[test]
+    fn a_pasted_color_is_found_or_added_to_the_palette() {
+        let mut editor = Editor::new(0.25, 50);
+        let first = editor.scene.palette().get(ColorId::FIRST).unwrap().color;
+        assert_eq!(editor.color_for(first), Some(ColorId::FIRST));
+        let length = editor.scene.palette().len();
+        let added = editor.color_for([1, 2, 3]).unwrap();
+        assert_eq!(usize::from(added.get()), length + 1);
+        assert_eq!(editor.scene.palette().get(added).unwrap().color, [1, 2, 3]);
+        assert_eq!(editor.color_for([1, 2, 3]), Some(added), "the second paste finds it");
+        editor.undo();
+        assert_eq!(editor.scene.palette().len(), length);
+    }
+
+    #[test]
+    fn a_gizmo_drag_moves_the_selection_in_one_history_step() {
+        let mut editor = Editor::new(0.25, 50);
+        click(&mut editor, 0, 0);
+        let cell = IVec3::new(0, 0, 0);
+        assert!(voxel(&editor, cell).is_some());
+        editor.selection = std::iter::once(cell).collect();
+        let (centre, axes) = editor.gizmo().unwrap();
+        assert_eq!(centre, Vec3::splat(0.5));
+        assert_eq!(axes[1], Vec3::Y);
+        editor.begin_gizmo();
+        editor.gizmo_to(IVec3::new(0, 2, 0));
+        editor.gizmo_to(IVec3::new(0, 3, 0));
+        editor.release();
+        assert!(voxel(&editor, IVec3::new(0, 3, 0)).is_some());
+        assert!(voxel(&editor, cell).is_none());
+        editor.undo();
+        assert!(voxel(&editor, cell).is_some(), "the whole drag was one step");
+    }
+
+    #[test]
+    fn a_layer_drag_over_a_flat_top_selects_only_that_layer() {
+        let mut editor = Editor::new(0.25, 50);
+        for x in 0..3 {
+            click(&mut editor, x, 0);
+            click(&mut editor, x, 0);
+        }
+        editor.tool = Tool::SelectBox;
+        editor.select_mode = SelectMode::Layer;
+        editor.update_hover(down(0, 0));
+        editor.press(down(0, 0), false);
+        editor.update_hover(down(2, 0));
+        editor.drag(down(2, 0));
+        editor.release();
+        assert_eq!(editor.selection.len(), 3, "only the top layer of the two-high row");
+        assert!(editor.selection.iter().all(|cell| cell.y == 1));
+    }
+
+    #[test]
+    fn dragged_voxels_leave_the_voxels_they_pass_over_alone() {
+        let mut editor = Editor::new(0.25, 50);
+        for x in 0..4 {
+            click(&mut editor, x, 0);
+        }
+        let moving = IVec3::new(0, 0, 0);
+        editor.selection = std::iter::once(moving).collect();
+        editor.begin_gizmo();
+        for x in 1..=5 {
+            editor.gizmo_to(IVec3::new(x, 0, 0));
+        }
+        editor.release();
+        assert!(voxel(&editor, moving).is_none());
+        for x in 1..4 {
+            assert!(voxel(&editor, IVec3::new(x, 0, 0)).is_some(), "voxel {x} survived");
+        }
+        assert!(voxel(&editor, IVec3::new(5, 0, 0)).is_some());
+        editor.undo();
+        assert!(voxel(&editor, moving).is_some());
+        assert!(voxel(&editor, IVec3::new(5, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn a_color_picker_drag_is_one_history_step() {
+        let mut editor = Editor::new(0.25, 50);
+        let before = editor.scene.palette().get(ColorId::FIRST).unwrap().color;
+        for shade in [10, 20, 30] {
+            editor.set_color_live(ColorId::FIRST, [shade, 0, 0]);
+        }
+        editor.finish_material_edit();
+        assert_eq!(editor.scene.palette().get(ColorId::FIRST).unwrap().color, [30, 0, 0]);
+        editor.undo();
+        assert_eq!(editor.scene.palette().get(ColorId::FIRST).unwrap().color, before);
+    }
+
+    #[test]
+    fn a_new_palette_keeps_voxels_filled_and_undoes_in_one_step() {
+        let mut editor = Editor::new(0.25, 50);
+        editor.color_for([1, 2, 3]);
+        let custom = editor.scene.palette().len();
+        click(&mut editor, 0, 0);
+        editor.new_palette();
+        assert_eq!(editor.scene.palette().len(), 96);
+        assert!(voxel(&editor, IVec3::ZERO).is_some());
+        editor.undo();
+        assert_eq!(editor.scene.palette().len(), custom);
     }
 
     #[test]

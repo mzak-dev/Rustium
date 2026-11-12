@@ -69,4 +69,7 @@ pub enum Error {
         /// Largest allowed batch.
         max: usize,
     },
+    /// A Palette must have 1 to 255 colors.
+    #[error("a palette needs 1 to 255 colors, got {0}")]
+    PaletteSize(usize),
 }

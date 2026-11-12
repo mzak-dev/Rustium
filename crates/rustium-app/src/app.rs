@@ -392,7 +392,9 @@ impl Running {
         );
         let logo = egui_ctx.load_texture("logo", logo_image, egui::TextureOptions::LINEAR);
 
-        let editor = Editor::new(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
+        let mut editor = Editor::new(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
+        // The Cursor is the Tool a session starts with.
+        editor.tool = crate::editor::Tool::SelectBox;
         let waker_proxy = proxy.clone();
         let mcp = McpHost::new(
             &settings.mcp,

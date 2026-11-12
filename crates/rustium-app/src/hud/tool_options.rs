@@ -8,7 +8,7 @@ use rustium_core::{Brush, BrushKind, FillMode};
 
 use super::widgets::{self, Look};
 use super::{Hud, Intro, MARGIN, Place, TOP_BAR_HEIGHT, centre_budget, fit_key, fit_level, island};
-use crate::editor::Tool;
+use crate::editor::{SelectMode, Tool};
 use crate::icons::Icon;
 use crate::theme;
 
@@ -49,6 +49,16 @@ pub(crate) fn show(ctx: &Context, hud: &mut Hud<'_>) {
                     pill.on_hover_text(hud.tr("tool-needs-model"));
                 } else if level > 0 {
                     pill.on_hover_text(&name);
+                }
+                if tool == Tool::SelectBox && hud.editor.focus_is_model() {
+                    widgets::divider(ui, 32.0);
+                    let modes = [
+                        (SelectMode::Through, hud.tr("select-through")),
+                        (SelectMode::Visible, hud.tr("select-visible")),
+                        (SelectMode::Layer, hud.tr("select-layer")),
+                    ];
+                    widgets::segmented(ui, &mut hud.editor.select_mode, &modes, true);
+                    return;
                 }
                 if tool == Tool::Fill {
                     widgets::divider(ui, 32.0);

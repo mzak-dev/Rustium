@@ -60,6 +60,33 @@ impl Palette {
         (!colors.is_empty() && colors.len() <= Self::MAX_LEN).then_some(Self { colors })
     }
 
+    /// Removes the Color `id`; later entries move down by one. Refuses to remove the last Color.
+    pub(crate) fn remove(&mut self, id: ColorId) -> bool {
+        if self.colors.len() <= 1 || id.slot() >= self.colors.len() {
+            return false;
+        }
+        self.colors.remove(id.slot());
+        true
+    }
+
+    /// Swaps the Colors `a` and `b`; returns false when either is missing or they are the same.
+    pub(crate) fn swap(&mut self, a: ColorId, b: ColorId) -> bool {
+        if a == b || a.slot().max(b.slot()) >= self.colors.len() {
+            return false;
+        }
+        self.colors.swap(a.slot(), b.slot());
+        true
+    }
+
+    /// Appends a Color with the Default material; returns false when the Palette is full.
+    pub(crate) fn push(&mut self, color: [u8; 3]) -> bool {
+        if self.colors.len() >= Self::MAX_LEN {
+            return false;
+        }
+        self.colors.push(Color::new(color));
+        true
+    }
+
     /// Changes the color of `id`; returns whether anything changed.
     pub(crate) fn set_color(&mut self, id: ColorId, color: [u8; 3]) -> bool {
         match self.colors.get_mut(id.slot()) {

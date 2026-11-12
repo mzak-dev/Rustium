@@ -95,6 +95,14 @@ pub enum EditKind {
     SetVoxels,
     /// The base color of a Palette entry changed.
     SetColor,
+    /// A Color was appended to the Palette.
+    AddColor,
+    /// A Color was removed from the Palette and its voxels took the nearest one.
+    DeleteColor,
+    /// Two Colors of the Palette changed places.
+    SwapColors,
+    /// The whole Palette was replaced and voxels took the nearest new Color.
+    ReplacePalette,
     /// A script ran.
     Script,
 }
@@ -440,6 +448,13 @@ pub struct History {
     done: VecDeque<Edit>,
     undone: Vec<Edit>,
     limit: usize,
+}
+
+impl Edit {
+    /// Takes this Edit back on `scene` without touching any History, for a gesture that recomputes its change.
+    pub fn revert(&self, scene: &mut Scene) {
+        self.restore(scene, Direction::Back);
+    }
 }
 
 impl History {

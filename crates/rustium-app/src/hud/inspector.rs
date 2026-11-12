@@ -209,6 +209,10 @@ fn edit_label(hud: &Hud<'_>, kind: EditKind) -> String {
         EditKind::DuplicateGraphNodes => "duplicate-graph-nodes",
         EditKind::SetVoxels => "edit-set-voxels",
         EditKind::SetColor => "edit-set-color",
+        EditKind::AddColor => "edit-add-color",
+        EditKind::DeleteColor => "edit-delete-color",
+        EditKind::SwapColors => "edit-swap-colors",
+        EditKind::ReplacePalette => "edit-new-palette",
         EditKind::Script => "edit-script",
     })
 }

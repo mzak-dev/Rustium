@@ -339,14 +339,29 @@ fn row_ui(
     // Selection, step in and context menu.
     if response.clicked() && !is_root {
         let (command, shift) = ui.input(|input| (input.modifiers.command, input.modifiers.shift));
-        let edit = if command {
-            SelectionEdit::Toggle
-        } else if shift {
-            SelectionEdit::Add
+        let anchor = hud.editor.node_selection.last().copied();
+        let range = anchor
+            .filter(|_| shift)
+            .and_then(|anchor| rows.iter().position(|other| other.id == anchor))
+            .zip(rows.iter().position(|other| other.id == row.id));
+        if let Some((from, to)) = range {
+            // Shift selects every row between the last selected one and this one.
+            let span: Vec<NodeId> = rows[from.min(to)..=from.max(to)]
+                .iter()
+                .map(|other| other.id)
+                .filter(|id| *id != NodeId::ROOT)
+                .collect();
+            hud.editor.select_nodes(&span, SelectionEdit::Add);
         } else {
-            SelectionEdit::Replace
-        };
-        hud.editor.select_nodes(&[row.id], edit);
+            let edit = if command {
+                SelectionEdit::Toggle
+            } else if shift {
+                SelectionEdit::Add
+            } else {
+                SelectionEdit::Replace
+            };
+            hud.editor.select_nodes(&[row.id], edit);
+        }
     }
     if response.double_clicked() {
         hud.editor.step_in(row.id);
@@ -657,10 +672,13 @@ fn properties(ui: &mut Ui, hud: &mut Hud<'_>) {
                     if !is_root {
                         ui.label(widgets::muted(hud.tr("prop-position")));
                         ui.horizontal(|ui| {
+                            field_look(ui);
                             let mut offset = transform.offset;
                             let mut changed = false;
                             for axis in 0..3 {
-                                changed |= ui.add(DragValue::new(&mut offset[axis]).speed(0.2)).changed();
+                                changed |= ui
+                                    .add_sized(vec2(44.0, 22.0), DragValue::new(&mut offset[axis]).speed(0.2))
+                                    .changed();
                             }
                             if changed {
                                 command = Some(Command::SetTransform {
@@ -673,11 +691,21 @@ fn properties(ui: &mut Ui, hud: &mut Hud<'_>) {
 
                         ui.label(widgets::muted(hud.tr("prop-orientation")));
                         ui.horizontal(|ui| {
-                            if widgets::text_button(ui, &hud.tr("prop-rotate"), 24.0, Look::Plain, true).clicked() {
+                            if outlined(widgets::text_button(
+                                ui,
+                                &hud.tr("prop-rotate"),
+                                24.0,
+                                Look::Plain,
+                                true,
+                            ))
+                            .clicked()
+                            {
                                 command = turned(&hud.editor.scene, node, Orientation::rotation(1, 1))
                                     .map(|transform| Command::SetTransform { node, transform });
                             }
-                            if widgets::text_button(ui, &hud.tr("prop-flip"), 24.0, Look::Plain, true).clicked() {
+                            if outlined(widgets::text_button(ui, &hud.tr("prop-flip"), 24.0, Look::Plain, true))
+                                .clicked()
+                            {
                                 command = turned(&hud.editor.scene, node, Orientation::mirror(0))
                                     .map(|transform| Command::SetTransform { node, transform });
                             }
@@ -689,6 +717,41 @@ fn properties(ui: &mut Ui, hud: &mut Hud<'_>) {
     if let Some(command) = command {
         hud.editor.execute(&command);
     }
+}
+
+/// Number fields drawn as fields (fill and border) instead of bare text, so they read as editable.
+fn field_look(ui: &mut Ui) {
+    let widgets = &mut ui.visuals_mut().widgets;
+    for (state, border) in [
+        (&mut widgets.inactive, theme::FIELD_BORDER),
+        (&mut widgets.hovered, theme::MUTED),
+        (&mut widgets.active, theme::MUTED),
+    ] {
+        state.bg_fill = theme::FIELD;
+        state.weak_bg_fill = theme::FIELD;
+        state.bg_stroke = egui::Stroke::new(1.0, border);
+        state.corner_radius = egui::CornerRadius::same(6);
+    }
+}
+
+/// Gives a plain button the field border, so it does not look like a label.
+fn outlined(response: egui::Response) -> egui::Response {
+    let border = if response.hovered() {
+        theme::MUTED
+    } else {
+        theme::FIELD_BORDER
+    };
+    let painter = response
+        .ctx
+        .layer_painter(response.layer_id)
+        .with_clip_rect(response.interact_rect);
+    painter.rect_stroke(
+        response.rect.shrink(0.5),
+        7,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Inside,
+    );
+    response
 }
 
 /// The Transform of `node` after turning it by `turn` in its parent's space around the centre of its Voxels, so it

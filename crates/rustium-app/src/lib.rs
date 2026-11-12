@@ -24,6 +24,7 @@ mod icons;
 mod keymap;
 mod logging;
 mod mcp;
+mod mouse_map;
 mod recent;
 // The browser has no render jobs; its module only keeps the interface's job slot compiling.
 #[cfg_attr(target_arch = "wasm32", path = "render_job/web.rs")]

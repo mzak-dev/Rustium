@@ -19,6 +19,7 @@ use crate::hud::widgets::{self, Look};
 use crate::hud::{Hud, Toast};
 use crate::i18n::I18n;
 use crate::keymap::{Action, Capture, Chord, Group, Keymap};
+use crate::mouse_map::{Gesture, MouseMap};
 use crate::theme;
 
 /// Colour of a chip whose key is shared with another shortcut.
@@ -48,6 +49,8 @@ enum FileOutcome {
 pub(crate) struct KeymapUi {
     /// The shortcut waiting for the next key press.
     capturing: Option<Action>,
+    /// The camera gesture waiting for a mouse button, and whether the click that started it has ended.
+    mouse_capture: Option<(Gesture, bool)>,
     pending: Option<Pending>,
     pub(crate) filter: String,
     job: Option<Receiver<FileOutcome>>,
@@ -56,7 +59,7 @@ pub(crate) struct KeymapUi {
 impl KeymapUi {
     /// Whether a key press is being captured, so Escape must not close Settings.
     pub(crate) fn is_capturing(&self) -> bool {
-        self.capturing.is_some()
+        self.capturing.is_some() || self.mouse_capture.is_some()
     }
 }
 
@@ -64,6 +67,7 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
     let i18n = hud.i18n;
     poll_job(ui.ctx(), hud);
     handle_capture(ui.ctx(), hud);
+    handle_mouse_capture(ui.ctx(), hud);
 
     super::settings_window::row(ui, &i18n.tr("setting-keymap"), None, |ui| {
         let custom = !hud.settings.keymap.is_default();
@@ -139,7 +143,7 @@ pub(crate) fn show(ui: &mut Ui, hud: &mut Hud<'_>) {
         ui.add_space(8.0);
     }
     if query.is_empty() {
-        mouse_bindings(ui, i18n);
+        mouse_bindings(ui, hud);
     } else if shown == 0 {
         ui.label(widgets::muted(i18n.tr("keymap-no-match")).size(12.0));
     }
@@ -236,38 +240,102 @@ fn binding(ui: &mut Ui, hud: &mut Hud<'_>, action: Action) {
     });
 }
 
-/// The mouse bindings are fixed and only listed.
-fn mouse_bindings(ui: &mut Ui, i18n: &I18n) {
+/// The camera gestures of the Model view: click a chip, then press a mouse button (holding Shift, Ctrl, Alt or
+/// Space if wanted). The Tool wheel button of Render and Effects mode is only listed.
+fn mouse_bindings(ui: &mut Ui, hud: &mut Hud<'_>) {
+    let i18n = hud.i18n;
     ui.label(
         RichText::new(i18n.tr("binding-group-mouse").to_uppercase())
             .size(10.0)
             .color(theme::SUBTLE),
     );
     ui.add_space(2.0);
-    egui::Grid::new("mouse-bindings")
-        .num_columns(2)
-        .spacing(vec2(28.0, 0.0))
-        .show(ui, |ui| {
-            for (label, key) in [("hint-tool-wheel", "RMB"), ("hint-orbit", "MMB")] {
-                ui.horizontal(|ui| {
-                    ui.set_min_size(vec2(270.0, 36.0));
-                    ui.label(i18n.tr(label));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // The same chip as the key bindings, only not clickable.
-                        ui.add(
-                            egui::Button::new(widgets::mono(key, 11.0).color(theme::TEXT))
-                                .fill(Color32::from_white_alpha(15))
-                                .stroke(Stroke::new(1.0, Color32::from_white_alpha(46)))
-                                .corner_radius(6)
-                                .min_size(vec2(56.0, 24.0))
-                                .sense(egui::Sense::hover()),
-                        );
+    let chip = |ui: &mut Ui, text: String, capturing: bool, enabled: bool| {
+        let (fill, stroke) = if capturing {
+            (
+                ui.visuals().selection.bg_fill.gamma_multiply(0.35),
+                ui.visuals().selection.bg_fill,
+            )
+        } else {
+            (Color32::from_white_alpha(15), Color32::from_white_alpha(46))
+        };
+        let button = egui::Button::new(widgets::mono(text, 11.0).color(theme::TEXT))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke))
+            .corner_radius(6)
+            .min_size(vec2(56.0, 24.0));
+        ui.add(if enabled {
+            button
+        } else {
+            button.sense(egui::Sense::hover())
+        })
+    };
+    let mut rows: Vec<(String, Option<Gesture>)> = Gesture::ALL
+        .into_iter()
+        .map(|gesture| (i18n.tr(gesture.message_key()), Some(gesture)))
+        .collect();
+    rows.push((i18n.tr("hint-tool-wheel"), None));
+    for pair in rows.chunks(2) {
+        egui::Grid::new(("mouse-bindings", pair[0].0.clone()))
+            .num_columns(2)
+            .spacing(vec2(28.0, 0.0))
+            .show(ui, |ui| {
+                for (label, gesture) in pair {
+                    ui.horizontal(|ui| {
+                        ui.set_min_size(vec2(270.0, 36.0));
+                        ui.label(label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let Some(gesture) = *gesture else {
+                                chip(ui, "RMB".to_owned(), false, false);
+                                return;
+                            };
+                            let capturing = hud.ui.keymap_ui.mouse_capture.is_some_and(|(g, _)| g == gesture);
+                            let text = if capturing {
+                                i18n.tr("mouse-press")
+                            } else {
+                                hud.settings.mouse.chord(gesture).to_string()
+                            };
+                            if chip(ui, text, capturing, true)
+                                .on_hover_text(i18n.tr("mouse-chip-hint"))
+                                .clicked()
+                            {
+                                hud.ui.keymap_ui.mouse_capture = if capturing { None } else { Some((gesture, false)) };
+                                hud.ui.keymap_ui.capturing = None;
+                            }
+                        });
                     });
-                });
-            }
-            ui.end_row();
-        });
+                }
+                ui.end_row();
+            });
+    }
     ui.add_space(8.0);
+}
+
+/// Takes the mouse button pressed while a gesture chip waits for one. The click on the chip itself is not it: the
+/// capture arms once every button is up.
+fn handle_mouse_capture(ctx: &Context, hud: &mut Hud<'_>) {
+    let Some((gesture, armed)) = hud.ui.keymap_ui.mouse_capture else {
+        return;
+    };
+    if !armed {
+        if !ctx.input(|input| input.pointer.any_down()) {
+            hud.ui.keymap_ui.mouse_capture = Some((gesture, true));
+        }
+        return;
+    }
+    if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        hud.ui.keymap_ui.mouse_capture = None;
+        return;
+    }
+    let Some(chord) = ctx.input(MouseMap::capture) else {
+        return;
+    };
+    hud.ui.keymap_ui.mouse_capture = None;
+    if chord.blocks_tools() {
+        hud.ui.toast = Some(Toast::new(hud.tr("mouse-left-taken"), true));
+    } else {
+        hud.settings.mouse.set(gesture, chord);
+    }
 }
 
 /// Applies the key pressed while a chip waits for one.

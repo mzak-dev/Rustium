@@ -59,6 +59,10 @@ pub(crate) enum Icon {
     Keyboard,
     Bolt,
     Plug,
+    Perspective,
+    Orthographic,
+    NewFile,
+    Download,
 }
 
 impl Icon {
@@ -94,6 +98,10 @@ impl Icon {
             Self::Keyboard => "M3 7h18v10H3z M7 11h.01 M11 11h.01 M15 11h.01 M8 14h8",
             Self::Bolt => "M13 3L5 13h6l-1 8 8-10h-6z",
             Self::Plug => "M9 3v5 M15 3v5 M6 8h12v4a6 6 0 0 1-12 0z M12 18v3",
+            Self::Perspective => "M3 21L9 4 M21 21L15 4 M9 4h6 M4.8 16h14.4 M6.9 10h10.2",
+            Self::NewFile => "M6 3h9l4 4v14H6z M14 3v5h5 M12 11v6 M9 14h6",
+            Self::Download => "M12 4v11 M7 10l5 5 5-5 M5 20h14",
+            Self::Orthographic => "M5 21V4 M19 21V4 M5 4h14 M5 16h14 M5 10h14",
             Self::Folder => "M3 6h6l2 2h10v11H3z",
             Self::Search => "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z M16 16l4 4",
             Self::Settings => "M4 7h10 M18 7h2 M4 17h2 M10 17h10 M16 5v4 M8 15v4",

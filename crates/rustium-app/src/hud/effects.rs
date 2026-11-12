@@ -1108,7 +1108,7 @@ pub(crate) fn color_picker(ui: &mut Ui, color: &mut Color32) -> bool {
 }
 
 /// `#RRGGBB` or `RRGGBB` as a color.
-fn parse_hex(text: &str) -> Option<Color32> {
+pub(crate) fn parse_hex(text: &str) -> Option<Color32> {
     let digits = text.trim().trim_start_matches('#');
     if digits.len() != 6 {
         return None;

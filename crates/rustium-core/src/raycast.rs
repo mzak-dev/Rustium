@@ -78,7 +78,36 @@ pub(crate) fn raycast_ground(ray: Ray, max_distance: f32) -> Option<(RayHit, f32
     ))
 }
 
-/// Amanatides–Woo voxel traversal, clipped to the Volume so empty space costs nothing.
+/// The background an empty Model is drawn against, seen from any side: of the three axis planes through the origin,
+/// the one the ray faces most directly that lies ahead of it. The hit is a ground hit whose `voxel` is the cell
+/// behind the plane, so Attach places in the cell in front of it, on the camera's side.
+pub fn pick_background(ray: Ray, max_distance: f32) -> Option<RayHit> {
+    let direction = ray.direction.normalize_or_zero();
+    let mut axes = [0, 1, 2];
+    axes.sort_by(|a, b| direction[*b].abs().total_cmp(&direction[*a].abs()));
+    axes.into_iter().find_map(|axis| {
+        let slope = direction[axis];
+        if slope.abs() < 1e-4 {
+            return None;
+        }
+        let distance = -ray.origin[axis] / slope;
+        if !(0.0..=max_distance).contains(&distance) {
+            return None;
+        }
+        // The camera is on the side the ray comes from, so the visible face points back along the ray.
+        let face = Face::entered_by_step(axis, if slope > 0.0 { 1 } else { -1 });
+        let mut voxel = (ray.origin + direction * distance).floor().as_ivec3();
+        voxel[axis] = if slope > 0.0 { 0 } else { -1 };
+        Some(RayHit {
+            voxel,
+            face,
+            target: HitTarget::Ground,
+        })
+    })
+}
+
+/// Amanatides–Woo voxel traversal, clipped to the Volume so empty space costs nothing. A ray that starts inside a
+/// filled voxel passes out of it (the camera inside a wall sees the wall's far side, not nothing).
 // HOT PATH: runs on every pointer move.
 pub(crate) fn raycast_voxels(shape: &Shape, ray: Ray, max_distance: f32) -> Option<(RayHit, f32)> {
     let volume = shape.volume()?;
@@ -116,9 +145,11 @@ pub(crate) fn raycast_voxels(shape: &Shape, ray: Ray, max_distance: f32) -> Opti
     let entry_axis = (0..3).max_by(|a, b| t_near[*a].total_cmp(&t_near[*b])).unwrap_or(1);
     let mut face = Face::entered_by_step(entry_axis, step[entry_axis]);
     let mut distance = start;
+    // The ray starts inside the Volume, so the first cell is the one holding its origin.
+    let mut in_origin_cell = enter < 0.0;
 
     loop {
-        if shape.get(voxel).is_some() {
+        if !std::mem::take(&mut in_origin_cell) && shape.get(voxel).is_some() {
             return Some((
                 RayHit {
                     voxel,
@@ -204,6 +235,38 @@ mod tests {
         };
         let hit = pick(&shape, ray, 100.0).unwrap();
         assert_eq!((hit.voxel, hit.target), (IVec3::new(2, -1, -2), HitTarget::Ground));
+    }
+
+    #[test]
+    fn ray_starting_inside_a_voxel_skips_it() {
+        let shape = shape_with(&[IVec3::ZERO, IVec3::new(3, 0, 0)]);
+        let ray = Ray {
+            origin: Vec3::new(0.5, 0.5, 0.5),
+            direction: Vec3::X,
+        };
+        let hit = pick(&shape, ray, 100.0).unwrap();
+        assert_eq!((hit.voxel, hit.face), (IVec3::new(3, 0, 0), Face::NegX));
+    }
+
+    #[test]
+    fn the_background_faces_the_camera_from_every_side() {
+        for (origin, direction, attach) in [
+            (Vec3::new(2.5, 9.0, 1.5), Vec3::NEG_Y, IVec3::new(2, 0, 1)),
+            (Vec3::new(2.5, -9.0, 1.5), Vec3::Y, IVec3::new(2, -1, 1)),
+            (
+                Vec3::new(9.0, 2.5, 1.5),
+                Vec3::new(-1.0, -0.2, 0.0),
+                IVec3::new(0, 0, 1),
+            ),
+            (
+                Vec3::new(2.5, 2.5, -9.0),
+                Vec3::Z,
+                IVec3::new(0, 0, -1) + IVec3::new(2, 2, 0),
+            ),
+        ] {
+            let hit = pick_background(Ray { origin, direction }, 100.0).unwrap();
+            assert_eq!(hit.voxel + hit.face.normal(), attach, "from {origin}");
+        }
     }
 
     #[test]

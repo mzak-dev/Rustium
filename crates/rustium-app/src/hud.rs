@@ -663,6 +663,24 @@ fn shortcuts(ctx: &Context, hud: &mut Hud<'_>) {
         effects::extra_keys(ctx, hud);
     }
     let pressed = ctx.input_mut(|input| hud.settings.keymap.take_pressed(input, scope));
+    if scope == Scope::Effects && pressed.contains(&Action::AddNode) {
+        // Letters typed in the same frame as Tab belong to the node search, not to the graph tool shortcuts.
+        effects::shortcut(ctx, hud, Action::AddNode);
+        let typed: String = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        });
+        if let Some(popup) = hud.ui.effects.add_popup.as_mut() {
+            popup.query.push_str(&typed);
+        }
+        return;
+    }
     for action in pressed {
         match action {
             Action::Undo => hud.editor.undo(),

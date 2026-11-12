@@ -654,6 +654,43 @@ fn pixel_style_repeats_each_block() {
 }
 
 #[test]
+fn wire_leaves_flat_faces_free_of_stray_dots() {
+    let gpu = gpu_or_skip!();
+    let mut scene = Scene::new();
+    fill(&mut scene, IVec3::new(-10, 1, -10), IVec3::new(9, 20, 9), id(37));
+    shade(
+        &mut scene,
+        37,
+        SurfaceConstants {
+            transmission: 1.0,
+            roughness: 0.0,
+            ..SurfaceConstants::MATTE
+        },
+    );
+    let camera = Camera::looking_at(Vec3::new(30.0, 14.0, 40.0), Vec3::new(0.0, 10.0, 0.0));
+    let wire = render(
+        &gpu,
+        &scene,
+        &camera,
+        &Setup {
+            samples: 64,
+            style: RenderStyle::Wire,
+            ..Setup::default()
+        },
+    );
+    dump("wire-flat", &wire);
+    // The middle of the face that looks at the camera is five voxels from any edge.
+    let (cx, cy) = camera.pixel(Vec3::new(0.0, 10.0, 10.0));
+    let mut bright = 0;
+    for y in cy - 6..=cy + 6 {
+        for x in cx - 6..=cx + 6 {
+            bright += usize::from(luminance(&wire, (x, y)) > 0.5);
+        }
+    }
+    assert_eq!(bright, 0, "bright pixels in the middle of a flat face");
+}
+
+#[test]
 fn wire_draws_light_lines_on_dark() {
     let gpu = gpu_or_skip!();
     let (scene, camera) = showpiece();

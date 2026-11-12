@@ -595,14 +595,14 @@ fn properties(ui: &mut Ui, hud: &mut Hud<'_>) {
                 .spacing(vec2(8.0, 8.0))
                 .show(ui, |ui| {
                     ui.label(widgets::muted(hud.tr("prop-name")));
-                    let mut text = name.clone();
-                    let edit = ui.add_enabled(
+                    if let Some(text) = widgets::text_field(
+                        ui,
+                        egui::IdSalt::new(("node-name", node.get())),
+                        &name,
                         !is_root,
-                        TextEdit::singleline(&mut text)
-                            .desired_width(150.0)
-                            .font(FontId::proportional(12.0)),
-                    );
-                    if edit.lost_focus() && text != name {
+                        None,
+                        150.0,
+                    ) {
                         command = Some(Command::Rename { node, name: text });
                     }
                     ui.end_row();

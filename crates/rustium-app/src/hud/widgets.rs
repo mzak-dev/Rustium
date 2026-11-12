@@ -291,3 +291,39 @@ pub(crate) fn side_tip(response: &Response, name: &str, key: &str, description: 
             );
         });
 }
+
+/// A single-line text field that keeps the typed text in egui memory while it has focus and returns the
+/// new text once editing ends (focus lost or Enter) with a value that differs from `current`.
+pub(crate) fn text_field(
+    ui: &mut Ui,
+    salt: egui::IdSalt,
+    current: &str,
+    enabled: bool,
+    hint: Option<&str>,
+    width: f32,
+) -> Option<String> {
+    let id = ui.make_persistent_id(salt);
+    let buffer_id = id.with("buffer");
+    let focused = ui.ctx().memory(|memory| memory.has_focus(id));
+    let mut text = if focused {
+        ui.data(|data| data.get_temp::<String>(buffer_id))
+            .unwrap_or_else(|| current.to_owned())
+    } else {
+        current.to_owned()
+    };
+    let mut edit = egui::TextEdit::singleline(&mut text).id(id).desired_width(width);
+    if let Some(hint) = hint {
+        edit = edit.hint_text(hint);
+    }
+    let response = ui.add_enabled(enabled, edit);
+    if response.has_focus() {
+        ui.data_mut(|data| data.insert_temp(buffer_id, text.clone()));
+    }
+    if response.lost_focus() {
+        ui.data_mut(|data| data.remove_temp::<String>(buffer_id));
+        if text != current {
+            return Some(text);
+        }
+    }
+    None
+}

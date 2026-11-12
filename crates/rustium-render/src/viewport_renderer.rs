@@ -140,12 +140,14 @@ struct TaaState {
     edited: bool,
 }
 
-/// Weight of the new frame in the history blend: about the last ten frames count.
+/// Weight of the new frame in the history blend while the view changes: about the last ten frames count.
 const TAA_BLEND: f32 = 0.1;
 /// The same right after an edit: the changed pixels settle fast and stale ones fade.
 const TAA_BLEND_AFTER_EDIT: f32 = 0.35;
 /// Frames the image needs to settle after a change (the dither pattern repeats every few frames).
-const SETTLE_FRAMES: u32 = 24;
+const SETTLE_FRAMES: u32 = 40;
+/// The smallest weight of the new frame once the image has been still for a while.
+const TAA_BLEND_STILL: f32 = 1.0 / 32.0;
 /// An eye farther from last frame's eye than this (in voxels) is a camera cut: the history is dropped.
 const TAA_CUT_DISTANCE: f32 = 48.0;
 
@@ -477,7 +479,12 @@ impl ViewportRenderer {
             } else {
                 state.still_frames.saturating_add(1)
             };
-            let blend = if state.edited { TAA_BLEND_AFTER_EDIT } else { TAA_BLEND };
+            // While nothing moves the memory grows (1/n down to 1/32), so the dither averages out completely.
+            let blend = if state.edited {
+                TAA_BLEND_AFTER_EDIT
+            } else {
+                (1.0 / (state.still_frames as f32 + 3.0)).clamp(TAA_BLEND_STILL, TAA_BLEND)
+            };
             let unjittered = glam::Mat4::from_cols_array_2d(&frame.camera.view_proj);
             camera.view_proj = taa::jittered(frame.camera.view_proj, taa::jitter(state.frame), size);
             taa_uniform = Some(TaaUniform {

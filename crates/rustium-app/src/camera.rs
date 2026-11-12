@@ -2,7 +2,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use glam::camera::rh::proj::directx;
 use glam::camera::rh::view;
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat3, Mat4, Vec2, Vec3};
 use rustium_core::{Face, Ray, Volume};
 
 use crate::settings::OrbitStyle;
@@ -120,18 +120,30 @@ impl OrbitCamera {
         self.distance = new_distance;
     }
 
-    /// Makes `point` the orbit centre without moving the eye.
-    pub(crate) fn retarget(&mut self, point: Vec3) {
-        let offset = self.eye() - point;
-        let distance = offset.length();
-        if distance < f32::EPSILON {
-            return;
-        }
-        let direction = offset / distance;
-        self.target = point;
-        self.distance = distance.clamp(MIN_DISTANCE, MAX_DISTANCE);
-        self.pitch = direction.y.clamp(-1.0, 1.0).asin();
-        self.yaw = direction.x.atan2(direction.z).rem_euclid(TAU);
+    /// Orbits like [`OrbitCamera::orbit`], but around `pivot` instead of the target: the camera turns about that point,
+    /// so it stays exactly where it is on screen and the view never jumps when the pivot is not the target (Around
+    /// Cursor, or Around Model after a pan).
+    pub(crate) fn orbit_around(&mut self, delta: Vec2, style: OrbitStyle, pivot: Vec3) {
+        let before = self.rotation();
+        let target = self.target;
+        self.orbit(delta, style);
+        let turn = self.rotation() * before.transpose();
+        self.target = pivot + turn * (target - pivot);
+    }
+
+    /// The camera's orientation: columns are right, up and the direction from the target to the eye.
+    fn rotation(&self) -> Mat3 {
+        let back = self.direction();
+        let right = self.up().cross(back).normalize_or_zero();
+        Mat3::from_cols(right, back.cross(right), back)
+    }
+
+    /// Whether this is the isometric view: orthographic, turned 45° and looking down the cube diagonal.
+    pub(crate) fn is_isometric(&self) -> bool {
+        let pitch = (1.0_f32 / 2.0_f32.sqrt()).atan();
+        self.projection == Projection::Orthographic
+            && (self.yaw - std::f32::consts::FRAC_PI_4).abs() < 1e-3
+            && (self.pitch - pitch).abs() < 1e-3
     }
 
     /// Orthographic view from the classic isometric angle (45° turn, 35.264° down).
@@ -185,13 +197,74 @@ mod tests {
         assert!(ray.direction.normalize().dot(to_target) > 0.9999);
     }
 
+    /// Where `point` lands in normalized device coordinates.
+    fn screen(camera: &OrbitCamera, point: Vec3) -> Vec2 {
+        camera.view_proj(16.0 / 9.0).project_point3(point).truncate()
+    }
+
     #[test]
-    fn retarget_keeps_the_eye_where_it_was() {
+    fn orbiting_around_a_pivot_keeps_it_where_it_is_on_screen() {
+        for pivot in [Vec3::new(10.0, 2.0, -6.0), Vec3::new(-3.0, 9.0, 4.0)] {
+            let mut camera = OrbitCamera::default();
+            camera.pan(Vec2::new(40.0, -25.0), 600.0);
+            let before = screen(&camera, pivot);
+            camera.orbit_around(Vec2::new(60.0, 35.0), OrbitStyle::Turntable, pivot);
+            camera.orbit_around(Vec2::new(-20.0, 10.0), OrbitStyle::Turntable, pivot);
+            assert!(
+                (screen(&camera, pivot) - before).length() < 1e-3,
+                "pivot {pivot} stayed put"
+            );
+        }
+    }
+
+    #[test]
+    fn orbiting_around_the_target_is_a_plain_orbit() {
+        let mut plain = OrbitCamera::default();
+        let mut around = plain.clone();
+        plain.orbit(Vec2::new(30.0, -12.0), OrbitStyle::Turntable);
+        around.orbit_around(Vec2::new(30.0, -12.0), OrbitStyle::Turntable, around.target);
+        assert!((plain.eye() - around.eye()).length() < 1e-3);
+        assert!((plain.target - around.target).length() < 1e-3);
+    }
+
+    #[test]
+    fn the_first_orbit_step_barely_moves_an_off_centre_pivot() {
+        // The view must not jump when a drag starts: a one-point nudge moves the picture by about a point's worth.
         let mut camera = OrbitCamera::default();
+        let pivot = Vec3::new(8.0, 1.0, 3.0);
         let eye = camera.eye();
-        camera.retarget(Vec3::new(10.0, 2.0, -6.0));
-        assert!((camera.eye() - eye).length() < 1e-3);
-        assert!((camera.target - Vec3::new(10.0, 2.0, -6.0)).length() < 1e-6);
+        camera.orbit_around(Vec2::new(1.0, 0.0), OrbitStyle::Turntable, pivot);
+        assert!(
+            (camera.eye() - eye).length() < 1.0,
+            "eye moved {}",
+            (camera.eye() - eye).length()
+        );
+    }
+
+    #[test]
+    fn orthographic_matches_perspective_at_the_target_plane() {
+        // A point beside the target, at the target's depth, lands in the same place with either projection, so
+        // switching projection keeps the framing of what the camera looks at.
+        let mut camera = OrbitCamera::default();
+        let right = (camera.target - camera.eye()).normalize().cross(Vec3::Y).normalize();
+        let beside = camera.target + right * 6.0;
+        let perspective = screen(&camera, beside);
+        camera.projection = Projection::Orthographic;
+        let orthographic = screen(&camera, beside);
+        assert!(
+            (perspective - orthographic).length() < 1e-3,
+            "{perspective} against {orthographic}"
+        );
+    }
+
+    #[test]
+    fn the_isometric_view_is_recognised() {
+        let mut camera = OrbitCamera::default();
+        assert!(!camera.is_isometric());
+        camera.isometric();
+        assert!(camera.is_isometric());
+        camera.projection = Projection::Perspective;
+        assert!(!camera.is_isometric());
     }
 
     #[test]

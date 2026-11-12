@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use rustium_core::Scene;
@@ -151,8 +152,12 @@ fn run(
     progress: &Progress,
     cancel: &AtomicBool,
 ) -> SaveOutcome {
-    let Some(target) = ask_where(spec) else {
-        return SaveOutcome::Cancelled;
+    let target = match ask_where(spec) {
+        Answer::Path(path) => path,
+        Answer::Cancelled => return SaveOutcome::Cancelled,
+        Answer::Unavailable => {
+            return SaveOutcome::Failed("the file dialog could not be opened on this system".to_owned());
+        }
     };
     renderer.upload_scene(scene);
     let mut render = |frame: &TraceFrame, report: &mut dyn FnMut(u32) -> bool| {
@@ -169,15 +174,47 @@ fn run(
     }
 }
 
-/// The save or folder dialog for `spec`; `None` when the user cancels.
-fn ask_where(spec: &JobSpec) -> Option<PathBuf> {
-    match spec.destination {
-        Destination::File => rfd::FileDialog::new()
+/// A dialog that comes back this fast never opened: the user could not have looked at it, let alone answered.
+const DIALOG_MIN_TIME: Duration = Duration::from_millis(200);
+
+/// What the save or folder dialog for `spec` gave.
+enum Answer {
+    Path(PathBuf),
+    /// The user closed the dialog.
+    Cancelled,
+    /// The dialog could not be shown (no desktop portal, no display server).
+    Unavailable,
+}
+
+/// The save or folder dialog for `spec`.
+fn ask_where(spec: &JobSpec) -> Answer {
+    let asked = Instant::now();
+    let path = match (spec.destination, spec.outputs.first().map(|output| &output.kind)) {
+        (Destination::File, Some(OutputKind::Still(format))) => {
+            let (label, extension) = match format {
+                ImageFormat::Exr => ("OpenEXR", "exr"),
+                ImageFormat::Png | ImageFormat::Mp4 => ("PNG", "png"),
+            };
+            rfd::FileDialog::new()
+                .add_filter(label, &[extension])
+                .set_file_name(format!("render.{extension}"))
+                .save_file()
+                .map(|path| path.with_extension(extension))
+        }
+        (Destination::File, _) => rfd::FileDialog::new()
             .add_filter("MP4", &["mp4"])
             .set_file_name("turntable.mp4")
             .save_file()
             .map(|path| path.with_extension("mp4")),
-        Destination::Folder => rfd::FileDialog::new().pick_folder(),
+        (Destination::Folder, _) => rfd::FileDialog::new().pick_folder(),
+    };
+    match path {
+        Some(path) => Answer::Path(path),
+        None if asked.elapsed() < DIALOG_MIN_TIME => {
+            warn!("the file dialog closed immediately, it probably could not be opened");
+            Answer::Unavailable
+        }
+        None => Answer::Cancelled,
     }
 }
 

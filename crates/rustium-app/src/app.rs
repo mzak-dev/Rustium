@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
@@ -30,7 +29,7 @@ use crate::mcp::McpHost;
 use crate::recent::{self, RecentFile};
 use crate::render_job::{self, Destination, JobSpec, Output, OutputKind};
 use crate::render_mode::{Backdrop, ImageFormat};
-use crate::render_output::{self, SaveOutcome};
+use crate::render_output::SaveOutcome;
 use crate::settings::{Backend, FrameLimit, RayTracingMode, Settings};
 use crate::{settings_window, splash, theme};
 
@@ -93,6 +92,8 @@ impl std::fmt::Debug for App {
 /// What a render job produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JobKind {
+    /// One still of the live view at the output size.
+    Image,
     Turntable,
     Queue,
 }
@@ -118,8 +119,6 @@ struct Running {
     /// Mode and Editor revision the path tracer's scene upload matches.
     last_mode: Mode,
     trace_revision: Option<u64>,
-    save_results: Receiver<SaveOutcome>,
-    save_sender: mpsc::Sender<SaveOutcome>,
     mcp: McpHost,
     io: Io,
     doc: Document,
@@ -287,7 +286,6 @@ impl Running {
         let logo = egui_ctx.load_texture("logo", logo_image, egui::TextureOptions::LINEAR);
 
         let editor = Editor::new(settings.default_voxel_size_cm / 100.0, settings.undo_steps as usize);
-        let (save_sender, save_results) = mpsc::channel();
         let waker_proxy = proxy.clone();
         let mcp = McpHost::new(
             &settings.mcp,
@@ -331,8 +329,6 @@ impl Running {
             next_frame: None,
             last_mode: Mode::Model,
             trace_revision: None,
-            save_results,
-            save_sender,
             mcp,
             io,
             doc,
@@ -612,11 +608,12 @@ impl Running {
             }
             AppCommand::SettingsChanged => self.apply_settings(settings),
             AppCommand::SaveImage => {
-                if self.ui.render.format == ImageFormat::Mp4 {
-                    self.start_job(JobKind::Turntable);
+                let kind = if self.ui.render.format == ImageFormat::Mp4 {
+                    JobKind::Turntable
                 } else {
-                    self.save_image();
-                }
+                    JobKind::Image
+                };
+                self.start_job(kind);
             }
             AppCommand::QueueShots => self.start_job(JobKind::Queue),
             AppCommand::CancelJob => {
@@ -739,8 +736,6 @@ impl Running {
                 self.viewport.upload_trace_scene(&self.gpu, &self.editor.scene);
                 self.trace_revision = Some(self.editor.revision);
             }
-            self.ui.render.sync_active_shot(&self.camera);
-            self.poll_saves();
             self.poll_job();
         }
         self.last_mode = mode;
@@ -757,33 +752,8 @@ impl Running {
         }
     }
 
-    /// Reads the traced image back and hands it to the save dialog thread.
-    fn save_image(&mut self) {
-        match self.viewport.read_trace_image(&self.gpu) {
-            Ok(image) => {
-                let render = &self.ui.render;
-                render_output::save_with_dialog(
-                    image,
-                    render.format,
-                    render.backdrop == Backdrop::Transparent,
-                    render.exposure(),
-                    self.save_sender.clone(),
-                );
-            }
-            Err(error) => {
-                error!(%error, "cannot read the image back");
-                self.ui.render.message = Some(self.i18n.tr("save-failed-readback"));
-            }
-        }
-    }
-
-    fn poll_saves(&mut self) {
-        while let Ok(outcome) = self.save_results.try_recv() {
-            self.report(outcome);
-        }
-    }
-
-    /// Starts a turntable or queue job on a worker thread, unless one is already running.
+    /// Starts a still, turntable or queue job on a worker thread, unless one is already running. Everything saved is
+    /// rendered at the full output size by an offline renderer; the interactive preview is only a preview.
     fn start_job(&mut self, kind: JobKind) {
         if self.ui.render.job.is_some() {
             return;
@@ -796,13 +766,18 @@ impl Running {
             ImageFormat::Png
         };
         let outputs = match kind {
+            JobKind::Image => vec![Output {
+                name: "render".to_owned(),
+                kind: OutputKind::Still(still_format),
+                frames: vec![render.frame_for(&self.camera, render.lens_mm, render.size, voxel_size)],
+            }],
             JobKind::Turntable => vec![Output {
                 name: "turntable".to_owned(),
                 kind: OutputKind::Video,
                 frames: render.turntable_frames(&self.camera, render.lens_mm, render.size, voxel_size),
             }],
             JobKind::Queue => render
-                .shots
+                .queued_shots(&self.camera)
                 .iter()
                 .enumerate()
                 .map(|(index, shot)| {
@@ -825,10 +800,15 @@ impl Running {
                 })
                 .collect(),
         };
+        if let Some(message) = self.image_too_large(&outputs) {
+            self.ui.toast = Some(Toast::new(message.clone(), true));
+            self.ui.render.message = Some(message);
+            return;
+        }
         let spec = JobSpec {
             outputs,
             destination: match kind {
-                JobKind::Turntable => Destination::File,
+                JobKind::Image | JobKind::Turntable => Destination::File,
                 JobKind::Queue => Destination::Folder,
             },
             exposure: render.exposure(),
@@ -838,6 +818,38 @@ impl Running {
         let scene = self.editor.scene.clone();
         self.ui.render.message = None;
         self.ui.render.job = Some(render_job::spawn(spec, renderer, scene));
+    }
+
+    /// The translated reason when an image of `outputs` does not fit the GPU, or `None` when they all do.
+    fn image_too_large(&self, outputs: &[Output]) -> Option<String> {
+        outputs.iter().flat_map(|output| &output.frames).find_map(|frame| {
+            match rustium_render::check_image_size(self.gpu.device(), frame.size) {
+                Ok(()) => None,
+                Err(rustium_render::Error::ImageTooLarge {
+                    width,
+                    height,
+                    needed,
+                    allowed,
+                    max_side,
+                }) => Some(self.i18n.tr_args(
+                    "image-too-large",
+                    &[
+                        ("width", FluentValue::from(width)),
+                        ("height", FluentValue::from(height)),
+                        (
+                            "needed",
+                            FluentValue::from(format!("{:.1}", needed as f64 / f64::from(1u32 << 30))),
+                        ),
+                        (
+                            "allowed",
+                            FluentValue::from(format!("{:.1}", allowed as f64 / f64::from(1u32 << 30))),
+                        ),
+                        ("side", FluentValue::from(max_side)),
+                    ],
+                )),
+                Err(error) => Some(error.to_string()),
+            }
+        })
     }
 
     /// Picks up the result of the running render job.

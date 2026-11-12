@@ -92,6 +92,8 @@ pub(crate) struct UiState {
     pub(crate) tool_wheel: Option<Pos2>,
     /// Where the right button went down over the viewport, until it is released.
     pub(crate) wheel_press: Option<Pos2>,
+    /// The primary press in progress began while a text field had focus, so it must not reach the Tools.
+    pub(crate) press_swallowed: bool,
     /// Viewport cursor bookkeeping.
     pub(crate) cursor: CursorUi,
     /// Where a marquee drag started, in points.
@@ -136,6 +138,7 @@ impl UiState {
             text_focus_before: false,
             tool_wheel: None,
             wheel_press: None,
+            press_swallowed: false,
             cursor: CursorUi::default(),
             marquee: None,
             collapsed: HashSet::new(),
@@ -560,6 +563,23 @@ fn viewport_input(ctx: &Context, hud: &mut Hud<'_>) {
     let busy = hud.editor.is_stroking() || hud.ui.effects.gesture.is_some() || egui::Popup::is_any_open(ctx);
     open_wheel_on_right_click(ctx, hud, &response, pointer, busy);
 
+    // A press that began while a text field had focus only commits the field: the Tool must not act on it.
+    let (pressed, down, released) = ctx.input(|input| {
+        (
+            input.pointer.primary_pressed(),
+            input.pointer.primary_down(),
+            input.pointer.primary_released(),
+        )
+    });
+    if pressed {
+        hud.ui.press_swallowed = hud.ui.text_focus_before;
+    } else if !down && !released {
+        hud.ui.press_swallowed = false;
+    }
+    if hud.ui.press_swallowed {
+        hud.editor.clear_hover();
+        return;
+    }
 
     if hud.ui.mode == Mode::Render {
         render_viewport::input(ctx, hud, &response, pointer);

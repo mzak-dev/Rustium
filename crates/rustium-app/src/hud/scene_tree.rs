@@ -321,13 +321,19 @@ fn row_ui(
         } else {
             FontId::proportional(12.0)
         };
-        ui.painter().with_clip_rect(name_rect).text(
-            egui::pos2(x, centre_y),
-            Align2::LEFT_CENTER,
-            &row.name,
-            font,
-            text_color,
-        );
+        // A name that does not fit ends in an ellipsis and shows in full as a tooltip.
+        let mut job = egui::text::LayoutJob::simple_singleline(row.name.clone(), font, text_color);
+        job.wrap.max_width = name_rect.width();
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        job.wrap.overflow_character = Some('…');
+        let galley = ui.painter().layout_job(job);
+        let elided = galley.elided;
+        let position = egui::pos2(x, centre_y - galley.size().y / 2.0);
+        ui.painter().galley(position, galley, text_color);
+        if elided {
+            response.clone().on_hover_text(&row.name);
+        }
     }
 
     // Selection, step in and context menu.

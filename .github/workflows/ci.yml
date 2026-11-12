@@ -45,7 +45,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Ubuntu 24.04, not ubuntu-latest (26.04): the Vulkan loader there (1.4.341) segfaults in
+        # vkSetDebugUtilsObjectNameEXT when several test threads each own a device, which debug builds do.
+        # 24.04 (loader 1.3.275) is also the image the Linux release is built on.
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

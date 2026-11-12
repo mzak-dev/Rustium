@@ -17,11 +17,29 @@ pub enum GraphicsBackend {
 }
 
 impl GraphicsBackend {
-    fn backends(self) -> wgpu::Backends {
+    /// Whether this backend can be used yet; unavailable ones are shown in Settings but cannot be picked.
+    ///
+    /// DirectX 12 is off: wgpu compiles its shaders with FXC, which rejects the path tracer shader (dynamically
+    /// indexed local arrays written in loops it cannot unroll).
+    // TODO(mzak): compile with DXC (wgpu `static-dxc`) and turn DirectX 12 back on.
+    pub const fn is_available(self) -> bool {
+        !matches!(self, Self::DirectX12)
+    }
+
+    /// The wgpu backends this choice opens; Automatic leaves out the unavailable ones.
+    pub fn backends(self) -> wgpu::Backends {
         match self {
-            Self::Automatic => wgpu::Backends::PRIMARY,
+            Self::Automatic => wgpu::Backends::PRIMARY.difference(wgpu::Backends::DX12),
             Self::Vulkan => wgpu::Backends::VULKAN,
             Self::DirectX12 => wgpu::Backends::DX12,
+        }
+    }
+
+    /// Whether `choice` is a device this backend opens, so Settings can list it.
+    pub fn offers(self, choice: &AdapterChoice) -> bool {
+        match self {
+            Self::Automatic => choice.backend.is_none_or(Self::is_available),
+            _ => choice.backend == Some(self),
         }
     }
 
@@ -112,6 +130,9 @@ impl GpuContext {
         height: u32,
         preferences: GpuPreferences,
     ) -> Result<Self, Error> {
+        if !preferences.backend.is_available() {
+            return Err(Error::BackendUnavailable(preferences.backend));
+        }
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         descriptor.backends = preferences.backend.backends();
         let instance = wgpu::Instance::new(descriptor);
@@ -366,5 +387,34 @@ mod tests {
             vec![GraphicsBackend::Automatic, GraphicsBackend::Vulkan]
         );
         assert_eq!(selectable_backends(&[]), vec![GraphicsBackend::Automatic]);
+    }
+
+    #[test]
+    fn directx_12_is_listed_but_automatic_never_opens_it() {
+        let adapters = [
+            choice("GPU", Some(GraphicsBackend::Vulkan)),
+            choice("GPU", Some(GraphicsBackend::DirectX12)),
+            choice("Basic Render Driver", Some(GraphicsBackend::DirectX12)),
+        ];
+        assert_eq!(
+            selectable_backends(&adapters),
+            vec![
+                GraphicsBackend::Automatic,
+                GraphicsBackend::Vulkan,
+                GraphicsBackend::DirectX12
+            ]
+        );
+        assert!(!GraphicsBackend::DirectX12.is_available());
+        assert!(!GraphicsBackend::Automatic.backends().contains(wgpu::Backends::DX12));
+        let offered: Vec<&str> = adapters
+            .iter()
+            .filter(|adapter| GraphicsBackend::Automatic.offers(adapter))
+            .map(|adapter| adapter.name.as_str())
+            .collect();
+        assert_eq!(
+            offered,
+            ["GPU"],
+            "a device only DirectX 12 reaches is not offered under Automatic"
+        );
     }
 }

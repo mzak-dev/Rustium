@@ -106,7 +106,7 @@ Every shortcut can be rebound in Settings → Input; these are the defaults.
 
 ## Getting started
 
-You need a recent stable Rust toolchain (`rust-toolchain.toml` pins `stable`) and a GPU with Vulkan, DirectX 12 or Metal.
+You need a recent stable Rust toolchain (`rust-toolchain.toml` pins `stable`) and a GPU with Vulkan or Metal (DirectX 12 is turned off for now: its shader compiler cannot build the path tracer).
 
 ```bash
 git clone https://github.com/mzak-dev/Rustium.git

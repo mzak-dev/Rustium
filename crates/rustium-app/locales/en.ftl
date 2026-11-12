@@ -232,6 +232,7 @@ setting-pt-device-hint = Render mode traces on the same GPU as the viewport; usi
 pt-device-same = Same as viewport
 startup-gpu-fallback = The chosen graphics backend or device could not be started, so Automatic was used instead.
 backend-automatic = Automatic
+backend-work-in-progress = Work in progress (WIP): DirectX 12 cannot run the Render mode path tracer yet, so it is turned off for now.
 setting-ray-tracing = Ray tracing
 setting-ray-tracing-hint = Hardware uses the GPU ray query units for the Render mode path tracer; software works on every GPU.
 setting-ray-tracing-unsupported = This GPU has no ray query support, so the software tracer is used.

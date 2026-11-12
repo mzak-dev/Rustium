@@ -15,8 +15,8 @@ use rustium_core::{
     ParamValue, RayHit, SampleMaterial, Scene, SurfaceConstants, Transform, VoxelTool, apply,
 };
 use rustium_render::{
-    Ground, MaterialBuffers, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens, TraceEngine, TraceFrame,
-    TraceImage,
+    GraphicsBackend, Ground, MaterialBuffers, PathTracer, RayTracing, RenderPass, RenderStyle, Sky, ThinLens,
+    TraceEngine, TraceFrame, TraceImage,
 };
 
 const SIZE: u32 = 96;
@@ -29,7 +29,10 @@ struct Gpu {
 }
 
 fn gpu() -> Option<Gpu> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    // The backends the app opens, so a machine with only DirectX 12 skips instead of failing.
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+    descriptor.backends = GraphicsBackend::Automatic.backends();
+    let instance = wgpu::Instance::new(descriptor);
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(rustium_render::request_device(&adapter)).ok()?;
     Some(Gpu { device, queue })
